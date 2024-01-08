@@ -150,7 +150,7 @@ impl PublicClientApplication {
     }
 
     pub async fn acquire_token_by_username_password(
-        &mut self,
+        &self,
         username: &str,
         password: &str,
         scopes: Vec<&str>,
@@ -253,7 +253,7 @@ impl PublicClientApplication {
     }
 
     pub async fn acquire_token_by_device_flow(
-        &mut self,
+        &self,
         flow: DeviceAuthorizationResponse,
     ) -> Result<UserToken, MsalError> {
         let params = [
@@ -299,7 +299,7 @@ impl PublicClientApplication {
     }
 
     pub async fn acquire_token_silent(
-        &mut self,
+        &self,
         scopes: Vec<&str>,
         refresh_token: &str,
     ) -> Result<UserToken, MsalError> {
