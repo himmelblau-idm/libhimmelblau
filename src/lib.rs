@@ -10,5 +10,13 @@
 #![deny(clippy::needless_pass_by_value)]
 #![deny(clippy::trivially_copy_pass_by_ref)]
 
+pub mod error;
+
 pub mod auth;
 pub use auth::*;
+
+#[cfg(feature = "prt")]
+pub mod enroll;
+
+#[cfg(feature = "prt")]
+pub(crate) mod discovery;

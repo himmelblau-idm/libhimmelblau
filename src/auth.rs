@@ -1,9 +1,9 @@
+use crate::error::{ErrorResponse, MsalError};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::{header, Client};
 use serde::{Deserialize, Deserializer};
 use serde_json::{from_str as json_from_str, Value};
-use tracing::error;
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
@@ -20,37 +20,10 @@ use os_release::OsRelease;
 #[cfg(feature = "prt")]
 use serde::Serialize;
 
-pub const INVALID_CRED: u32 = 0xC3CE;
-pub const REQUIRES_MFA: u32 = 0xC39C;
-pub const INVALID_USER: u32 = 0xC372;
-pub const NO_CONSENT: u32 = 0xFDE9;
-pub const NO_GROUP_CONSENT: u32 = 0xFDEA;
-pub const NO_SECRET: u32 = 0x6AD09A;
-pub const AUTH_PENDING: u32 = 0x11180;
-
 #[cfg(feature = "prt")]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub error_description: String,
-    pub error_codes: Vec<u32>,
-}
-
-#[derive(Debug)]
-pub enum MsalError {
-    /// MSAL failed to parse a json input
-    InvalidJson,
-    /// MSAL failed when acquiring a token
-    AcquireTokenFailed(ErrorResponse),
-    /// Failure encountered in the reqwest module
-    RequestFailed,
-    /// The Authentication type is not supported
-    AuthTypeUnsupported,
-    /// Failure encountered interacting with the TPM
-    TPMFail(String),
-}
+#[cfg(feature = "prt")]
+const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
 #[derive(Default, Clone, Deserialize)]
@@ -260,6 +233,17 @@ impl PublicClientApplication {
         }
     }
 
+    #[cfg(feature = "prt")]
+    pub async fn acquire_token_for_device_enrollment(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<UserToken, MsalError> {
+        let drs_scope = format!("{}/.default", DRS_APP_ID);
+        self.acquire_token_by_username_password(username, password, vec![&drs_scope])
+            .await
+    }
+
     pub async fn acquire_token_by_username_password(
         &self,
         username: &str,
@@ -295,22 +279,19 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| {
-                error!("{}", e);
-                MsalError::RequestFailed
-            })?;
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let token: UserToken = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
 
             Ok(token)
         } else {
-            let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
@@ -344,21 +325,18 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| {
-                error!("{}", e);
-                MsalError::RequestFailed
-            })?;
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let json_resp: DeviceAuthorizationResponse = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: DeviceAuthorizationResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Ok(json_resp)
         } else {
-            let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
@@ -389,22 +367,19 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| {
-                error!("{}", e);
-                MsalError::RequestFailed
-            })?;
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let token: UserToken = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
 
             Ok(token)
         } else {
-            let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
@@ -442,22 +417,19 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| {
-                error!("{}", e);
-                MsalError::RequestFailed
-            })?;
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let token: UserToken = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
 
             Ok(token)
         } else {
-            let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
@@ -473,21 +445,18 @@ impl PublicClientApplication {
             .body("grant_type=srv_challenge")
             .send()
             .await
-            .map_err(|e| {
-                error!("{}", e);
-                MsalError::RequestFailed
-            })?;
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let json_resp: Nonce = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: Nonce = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Ok(json_resp.nonce)
         } else {
-            let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
@@ -507,15 +476,13 @@ impl PublicClientApplication {
                 &UsernamePasswordAuthenticationPayload::new(&uname, &pass, &nonce),
             )
             .map_err(|e| {
-                error!("Failed serializing UsernamePassword JWT: {}", e);
-                MsalError::InvalidJson
+                MsalError::InvalidJson(format!("Failed serializing UsernamePassword JWT: {}", e))
             })?,
             Credentials::RefreshToken(refresh_token) => serde_json::to_vec(
                 &RefreshTokenAuthenticationPayload::new(&refresh_token, &nonce),
             )
             .map_err(|e| {
-                error!("Failed serializing RefreshToken JWT: {}", e);
-                MsalError::InvalidJson
+                MsalError::InvalidJson(format!("Failed serializing RefreshToken JWT: {}", e))
             })?,
             _ => return Err(MsalError::AuthTypeUnsupported),
         })
@@ -560,21 +527,18 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| {
-                error!("{}", e);
-                MsalError::RequestFailed
-            })?;
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let json_resp: PrimaryRefreshToken = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: PrimaryRefreshToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Ok(json_resp)
         } else {
-            let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{}", e);
-                MsalError::InvalidJson
-            })?;
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
