@@ -185,19 +185,19 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::RequestFailed
             })?;
         if resp.status().is_success() {
             let token: UserToken = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
 
             Ok(token)
         } else {
             let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
             Err(MsalError::AcquireTokenFailed(json_resp))
@@ -234,18 +234,18 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::RequestFailed
             })?;
         if resp.status().is_success() {
             let json_resp: DeviceAuthorizationResponse = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
             Ok(json_resp)
         } else {
             let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
             Err(MsalError::AcquireTokenFailed(json_resp))
@@ -279,19 +279,19 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::RequestFailed
             })?;
         if resp.status().is_success() {
             let token: UserToken = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
 
             Ok(token)
         } else {
             let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
             Err(MsalError::AcquireTokenFailed(json_resp))
@@ -332,19 +332,19 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::RequestFailed
             })?;
         if resp.status().is_success() {
             let token: UserToken = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
 
             Ok(token)
         } else {
             let json_resp: ErrorResponse = resp.json().await.map_err(|e| {
-                error!("{:?}", e);
+                error!("{}", e);
                 MsalError::InvalidJson
             })?;
             Err(MsalError::AcquireTokenFailed(json_resp))
