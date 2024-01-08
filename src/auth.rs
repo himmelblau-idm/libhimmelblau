@@ -50,8 +50,8 @@ pub struct IdToken {
     pub name: String,
     pub oid: String,
     pub preferred_username: String,
-    pub puid: String,
-    pub tenant_region_scope: String,
+    pub puid: Option<String>,
+    pub tenant_region_scope: Option<String>,
     pub tid: String,
 }
 
@@ -62,23 +62,31 @@ where
     let s: String = Deserialize::deserialize(d)?;
     let mut siter = s.splitn(3, '.');
     if siter.next().is_none() {
+        error!("Failed parsing id_token header");
         return Err(serde::de::Error::custom("Failed parsing id_token header"));
     }
     let payload_str = match siter.next() {
         Some(payload_str) => URL_SAFE_NO_PAD
             .decode(payload_str)
-            .map_err(|e| serde::de::Error::custom(format!("Failed parsing client_info: {:?}", e)))
+            .map_err(|e| {
+                error!("Failed parsing id_token: {}", e);
+                serde::de::Error::custom(format!("Failed parsing id_token: {}", e))
+            })
             .and_then(|bytes| {
                 String::from_utf8(bytes).map_err(|e| {
-                    serde::de::Error::custom(format!("Failed parsing client_info: {:?}", e))
+                    error!("Failed parsing id_token: {}", e);
+                    serde::de::Error::custom(format!("Failed parsing id_token: {}", e))
                 })
             })?,
         None => {
+            error!("Failed parsing id_token payload");
             return Err(serde::de::Error::custom("Failed parsing id_token payload"));
         }
     };
-    let payload: IdToken =
-        json_from_str(&payload_str).map_err(|e| serde::de::Error::custom(format!("{:?}", e)))?;
+    let payload: IdToken = json_from_str(&payload_str).map_err(|e| {
+        error!("Failed parsing id_token from json: {}", e);
+        serde::de::Error::custom(format!("Failed parsing id_token from json: {}", e))
+    })?;
     Ok(payload)
 }
 
@@ -95,25 +103,34 @@ where
     let s: String = Deserialize::deserialize(d)?;
     let client_info: Value = URL_SAFE_NO_PAD
         .decode(s)
-        .map_err(|e| serde::de::Error::custom(format!("Failed parsing client_info: {:?}", e)))
+        .map_err(|e| {
+            error!("Failed parsing client_info: {}", e);
+            serde::de::Error::custom(format!("Failed parsing client_info: {}", e))
+        })
         .and_then(|bytes| {
             String::from_utf8(bytes).map_err(|e| {
-                serde::de::Error::custom(format!("Failed parsing client_info: {:?}", e))
+                error!("Failed parsing client_info: {}", e);
+                serde::de::Error::custom(format!("Failed parsing client_info: {}", e))
             })
         })
         .and_then(|client_info_str| {
             json_from_str(&client_info_str).map_err(|e| {
-                serde::de::Error::custom(format!("Failed parsing client_info: {:?}", e))
+                error!("Failed parsing client_info: {}", e);
+                serde::de::Error::custom(format!("Failed parsing client_info: {}", e))
             })
         })?;
 
     let uid_str = client_info["uid"].to_string();
-    let uid = Uuid::parse_str(uid_str.trim_matches('"'))
-        .map_err(|e| serde::de::Error::custom(format!("Failed parsing client_info: {:?}", e)))?;
+    let uid = Uuid::parse_str(uid_str.trim_matches('"')).map_err(|e| {
+        error!("Failed parsing client_info: {}", e);
+        serde::de::Error::custom(format!("Failed parsing client_info: {}", e))
+    })?;
 
     let utid_str = client_info["utid"].to_string();
-    let utid = Uuid::parse_str(utid_str.trim_matches('"'))
-        .map_err(|e| serde::de::Error::custom(format!("Failed parsing client_info: {:?}", e)))?;
+    let utid = Uuid::parse_str(utid_str.trim_matches('"')).map_err(|e| {
+        error!("Failed parsing client_info: {}", e);
+        serde::de::Error::custom(format!("Failed parsing client_info: {}", e))
+    })?;
 
     Ok(ClientInfo { uid, utid })
 }
