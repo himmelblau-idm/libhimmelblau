@@ -14,6 +14,8 @@ use compact_jwt::jws::JwsBuilder;
 #[cfg(feature = "prt")]
 use compact_jwt::traits::JwsMutSigner;
 #[cfg(feature = "prt")]
+use compact_jwt::Jws;
+#[cfg(feature = "prt")]
 use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey};
 #[cfg(feature = "prt")]
 use os_release::OsRelease;
@@ -125,13 +127,6 @@ pub struct UserToken {
     pub id_token: IdToken,
     #[serde(deserialize_with = "decode_client_info", default)]
     pub client_info: ClientInfo,
-}
-
-#[cfg(feature = "prt")]
-pub enum Credentials {
-    UsernamePassword(String, String),
-    RefreshToken(String),
-    SAMLToken(String),
 }
 
 #[cfg(feature = "prt")]
@@ -462,33 +457,61 @@ impl PublicClientApplication {
     }
 
     #[cfg(feature = "prt")]
-    pub async fn acquire_user_prt(
+    pub async fn acquire_user_prt_by_username_password(
         &self,
-        credentials: Credentials,
+        username: &str,
+        password: &str,
         tpm: &mut BoxedDynTpm,
         id_key: &IdentityKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         let nonce = self.request_nonce().await?;
 
-        // [MS-OAPXBC] 3.2.5.1.2 POST (Request for Primary Refresh Token)
-        let jwt = JwsBuilder::from(match credentials {
-            Credentials::UsernamePassword(uname, pass) => serde_json::to_vec(
-                &UsernamePasswordAuthenticationPayload::new(&uname, &pass, &nonce),
-            )
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&UsernamePasswordAuthenticationPayload::new(
+                &username, &password, &nonce,
+            ))
             .map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing UsernamePassword JWT: {}", e))
             })?,
-            Credentials::RefreshToken(refresh_token) => serde_json::to_vec(
-                &RefreshTokenAuthenticationPayload::new(&refresh_token, &nonce),
-            )
-            .map_err(|e| {
-                MsalError::InvalidJson(format!("Failed serializing RefreshToken JWT: {}", e))
-            })?,
-            _ => return Err(MsalError::AuthTypeUnsupported),
-        })
+        )
         .set_typ(Some("JWT"))
         .build();
 
+        self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
+    }
+
+    #[cfg(feature = "prt")]
+    pub async fn acquire_user_prt_silent(
+        &self,
+        refresh_token: &str,
+        tpm: &mut BoxedDynTpm,
+        id_key: &IdentityKey,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        let nonce = self.request_nonce().await?;
+
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&RefreshTokenAuthenticationPayload::new(
+                &refresh_token,
+                &nonce,
+            ))
+            .map_err(|e| {
+                MsalError::InvalidJson(format!("Failed serializing RefreshToken JWT: {}", e))
+            })?,
+        )
+        .set_typ(Some("JWT"))
+        .build();
+
+        self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
+    }
+
+    #[cfg(feature = "prt")]
+    async fn acquire_user_prt_jwt(
+        &self,
+        jwt: &Jws,
+        tpm: &mut BoxedDynTpm,
+        id_key: &IdentityKey,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        // [MS-OAPXBC] 3.2.5.1.2 POST (Request for Primary Refresh Token)
         let mut jws_tpm_signer = match JwsTpmSigner::new(tpm, id_key) {
             Ok(jws_tpm_signer) => jws_tpm_signer,
             Err(e) => {
@@ -499,7 +522,7 @@ impl PublicClientApplication {
             }
         };
 
-        let signed_jwt = match jws_tpm_signer.sign(&jwt) {
+        let signed_jwt = match jws_tpm_signer.sign(jwt) {
             Ok(signed_jwt) => signed_jwt,
             Err(e) => return Err(MsalError::TPMFail(format!("Failed signing jwk: {}", e))),
         };
