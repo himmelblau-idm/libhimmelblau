@@ -5,7 +5,7 @@ The purpose of this project is to implement MSAL for Rust, based on the specific
 
 > **_NOTE:_**  Implementing the [ConfidentialClientApplication Class](https://learn.microsoft.com/en-us/python/api/msal/msal.application.confidentialclientapplication?view=msal-py-latest) is not currently a target for this project. If you are interested in volunteering to implement the ConfidentialClientApplication Class, please contact the maintainer.
 
-In addition to the ClientApplication Class implementations, a goal of this project will also be to implement [MS-OAPXBC] sections [3.1.5.1.2 Request for Primary Refresh Token](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oapxbc/d32d5cd0-05d4-4ec2-8bcc-ac29ce711c23) and [3.1.5.1.3 Exchange Primary Refresh Token for Access Token](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oapxbc/06e2bf0d-8cea-4b11-ad78-d212330ebda9). These are not implemented in Microsoft's MSAL libraries, but are possible when authenticating from a [joined device](https://github.com/himmelblau-idm/himmelblau-device-enrollment).
+In addition to the ClientApplication Class implementations, a goal of this project will also be to implement [MS-OAPXBC] sections [3.1.5.1.2 Request for Primary Refresh Token](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oapxbc/d32d5cd0-05d4-4ec2-8bcc-ac29ce711c23) and [3.1.5.1.3 Exchange Primary Refresh Token for Access Token](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oapxbc/06e2bf0d-8cea-4b11-ad78-d212330ebda9). These are not implemented in Microsoft's MSAL libraries, but are possible when authenticating from an [enrolled device](https://github.com/himmelblau-idm/himmelblau-device-enrollment).
 
 How do I use this library?
 --------------------------
@@ -42,3 +42,12 @@ let flow = app.initiate_device_flow(scope).await?;
 
 let token = app.acquire_token_by_device_flow(flow).await?;
 ```
+
+If msal is built with the `prt` feature, you can request a PRT:
+
+```Rust
+let creds = Credentials::UsernamePassword(username, password);
+let prt = app.request_user_prt(creds, &tpm, &id_key).await?;
+```
+
+The tpm parameter is a BoxedDynTpm from Kanidm's hsm\_crypto crate. The id\_key parameter is an IdentityKey, also from the hsm\_crypto crate. See the [Kanidm hsm\_crypto documentation](https://docs.rs/kanidm-hsm-crypto/0.1.5/kanidm_hsm_crypto/) for an understanding of how to use the tpm code. The IdentityKey required here will be the one used to enroll the device in the tenant.
