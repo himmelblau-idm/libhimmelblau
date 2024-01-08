@@ -20,9 +20,9 @@ Create an instance of the PublicClientApplication, then authenticate:
 
 ```Rust
 let authority_host = "login.microsoftonline.com";
-let app = PublicClientApplication(client_id, tenant_id, &authority_host);
+let app = PublicClientApplication::new(client_id, tenant_id, &authority_host);
 let scope = vec![];
-let token = app.acquire_token_by_username_password(username, password, scope)?;
+let token = app.acquire_token_by_username_password(username, password, scope).await?;
 ```
 
 You can obtain your `client_id` and `tenant_id` from the Azure portal.
@@ -30,15 +30,15 @@ You can obtain your `client_id` and `tenant_id` from the Azure portal.
 You can perform a silent auth using a previously obtained refresh token:
 
 ```Rust
-let token = app.acquire_token_silent(scope, &token.refresh_token)?;
+let token = app.acquire_token_silent(scope, &token.refresh_token).await?;
 ```
 
 Or finally, you can perform a Device Authorization Grant:
 
 ```Rust
-let flow = app.initiate_device_flow(scope)?;
+let flow = app.initiate_device_flow(scope).await?;
 
 // Prompt the user with the message found in flow.message
 
-let token = app.acquire_token_by_device_flow(flow)?;
+let token = app.acquire_token_by_device_flow(flow).await?;
 ```
