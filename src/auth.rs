@@ -51,7 +51,7 @@ pub struct IdToken {
     pub oid: String,
     pub preferred_username: String,
     pub puid: Option<String>,
-    pub tenant_region_scope: String,
+    pub tenant_region_scope: Option<String>,
     pub tid: String,
 }
 
