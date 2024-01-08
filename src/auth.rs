@@ -90,10 +90,10 @@ where
     Ok(payload)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ClientInfo {
-    pub uid: Uuid,
-    pub utid: Uuid,
+    pub uid: Option<Uuid>,
+    pub utid: Option<Uuid>,
 }
 
 fn decode_client_info<'de, D>(d: D) -> Result<ClientInfo, D::Error>
@@ -132,7 +132,10 @@ where
         serde::de::Error::custom(format!("Failed parsing client_info: {}", e))
     })?;
 
-    Ok(ClientInfo { uid, utid })
+    Ok(ClientInfo {
+        uid: Some(uid),
+        utid: Some(utid),
+    })
 }
 
 #[derive(Clone, Deserialize)]
@@ -145,7 +148,7 @@ pub struct UserToken {
     pub refresh_token: String,
     #[serde(deserialize_with = "decode_id_token")]
     pub id_token: IdToken,
-    #[serde(deserialize_with = "decode_client_info")]
+    #[serde(deserialize_with = "decode_client_info", default)]
     pub client_info: ClientInfo,
 }
 
