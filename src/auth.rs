@@ -462,7 +462,7 @@ impl PublicClientApplication {
     }
 
     #[cfg(feature = "prt")]
-    pub async fn request_user_prt(
+    pub async fn acquire_user_prt(
         &self,
         credentials: Credentials,
         tpm: &mut BoxedDynTpm,
