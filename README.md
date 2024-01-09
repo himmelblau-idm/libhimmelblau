@@ -48,6 +48,7 @@ If msal is built with the `prt` feature, you can enroll the device, then request
 ```Rust
 use msal::enroll::register_device;
 
+let app = BrokerClientApplication::new(client_id, tenant_id, &authority_host);
 let token = app.acquire_token_for_device_enrollment(username, password).await?;
 let (loadable_id_key, device_id) = register_device(token.access_token, domain, &machine_key, &tpm, &loadable_id_key).await?;
 let prt = app.acquire_user_prt_by_username_password(username, password, &tpm, &id_key).await?;

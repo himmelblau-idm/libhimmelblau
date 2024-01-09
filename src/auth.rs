@@ -7,24 +7,26 @@ use serde_json::{from_str as json_from_str, Value};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
+use crate::enroll::register_device;
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::crypto::JwsTpmSigner;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::jws::JwsBuilder;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::traits::JwsMutSigner;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::Jws;
-#[cfg(feature = "prt")]
-use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey};
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
+use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey, LoadableIdentityKey, MachineKey};
+#[doc(cfg(feature = "prt"))]
 use os_release::OsRelease;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use serde::Serialize;
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
@@ -129,7 +131,7 @@ pub struct UserToken {
     pub client_info: ClientInfo,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Serialize, Clone, Default)]
 struct UsernamePasswordAuthenticationPayload {
     client_id: String,
@@ -141,7 +143,7 @@ struct UsernamePasswordAuthenticationPayload {
     password: String,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 impl UsernamePasswordAuthenticationPayload {
     fn new(username: &str, password: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -163,7 +165,7 @@ impl UsernamePasswordAuthenticationPayload {
     }
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Serialize, Clone, Default)]
 struct RefreshTokenAuthenticationPayload {
     client_id: String,
@@ -174,7 +176,7 @@ struct RefreshTokenAuthenticationPayload {
     refresh_token: String,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 impl RefreshTokenAuthenticationPayload {
     fn new(refresh_token: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -195,14 +197,14 @@ impl RefreshTokenAuthenticationPayload {
     }
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Debug, Deserialize)]
 struct Nonce {
     #[serde(rename = "Nonce")]
     nonce: String,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrimaryRefreshToken {
     pub refresh_token: String,
@@ -211,35 +213,25 @@ pub struct PrimaryRefreshToken {
     pub id_token: String,
 }
 
-pub struct PublicClientApplication {
+struct ClientApplication {
     client: Client,
     client_id: String,
-    tenant_id: String,
-    authority_host: String,
+    authority: String,
 }
 
-impl PublicClientApplication {
-    pub fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
-        PublicClientApplication {
+impl ClientApplication {
+    fn new(client_id: &str, authority: Option<&str>) -> Self {
+        ClientApplication {
             client: reqwest::Client::new(),
             client_id: client_id.to_string(),
-            tenant_id: tenant_id.to_string(),
-            authority_host: authority_host.to_string(),
+            authority: match authority {
+                Some(authority) => authority.to_string(),
+                None => "https://login.microsoftonline.com/common".to_string(),
+            },
         }
     }
 
-    #[cfg(feature = "prt")]
-    pub async fn acquire_token_for_device_enrollment(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Result<UserToken, MsalError> {
-        let drs_scope = format!("{}/.default", DRS_APP_ID);
-        self.acquire_token_by_username_password(username, password, vec![&drs_scope])
-            .await
-    }
-
-    pub async fn acquire_token_by_username_password(
+    async fn acquire_token_by_username_password(
         &self,
         username: &str,
         password: &str,
@@ -265,10 +257,7 @@ impl PublicClientApplication {
 
         let resp = self
             .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/token",
-                self.authority_host, self.tenant_id
-            ))
+            .post(format!("{}/oauth2/v2.0/token", self.authority))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -291,10 +280,11 @@ impl PublicClientApplication {
         }
     }
 
-    pub async fn initiate_device_flow(
+    async fn acquire_token_by_refresh_token(
         &self,
+        refresh_token: &str,
         scopes: Vec<&str>,
-    ) -> Result<DeviceAuthorizationResponse, MsalError> {
+    ) -> Result<UserToken, MsalError> {
         let mut all_scopes = vec!["openid", "profile", "offline_access"];
         all_scopes.extend(scopes);
         let scopes_str = all_scopes.join(" ");
@@ -302,6 +292,9 @@ impl PublicClientApplication {
         let params = [
             ("client_id", self.client_id.as_str()),
             ("scope", &scopes_str),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_info", "1"),
         ];
         let payload = params
             .iter()
@@ -311,10 +304,139 @@ impl PublicClientApplication {
 
         let resp = self
             .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/devicecode",
-                self.authority_host, self.tenant_id
-            ))
+            .post(format!("{}/oauth2/v2.0/token", self.authority))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+            Ok(token)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+}
+
+pub struct PublicClientApplication {
+    app: ClientApplication,
+}
+
+impl PublicClientApplication {
+    /// Create an instance of an application.
+    ///
+    /// # Arguments
+    ///
+    /// * `client_id` - Your app has a client_id after you register it on
+    ///   AAD.
+    ///
+    /// * `authority` - A URL that identifies a token authority. It should
+    ///   be of the format <https://login.microsoftonline.com/your_tenant> By
+    ///   default, we will use <https://login.microsoftonline.com/common>.
+    pub fn new(client_id: &str, authority: Option<&str>) -> Self {
+        PublicClientApplication {
+            app: ClientApplication::new(client_id, authority),
+        }
+    }
+
+    fn client(&self) -> &Client {
+        &self.app.client
+    }
+
+    fn client_id(&self) -> &str {
+        &self.app.client_id
+    }
+
+    fn authority(&self) -> &str {
+        &self.app.authority
+    }
+
+    /// Gets a token for a given resource via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_username_password(username, password, scopes)
+            .await
+    }
+
+    /// Acquire token(s) based on a refresh token (RT) obtained from elsewhere.
+    ///
+    /// # Arguments
+    ///
+    /// * `refresh_token` - The old refresh token, as a string.
+    ///
+    /// * `scopes` - The scopes associated with this old RT.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken, which means migration was successful.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_refresh_token(refresh_token, scopes)
+            .await
+    }
+
+    /// Initiate a Device Flow instance, which will be used in
+    /// acquire_token_by_device_flow.
+    ///
+    /// # Arguments
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// # Returns
+    ///
+    /// * Success: A DeviceAuthorizationResponse containing a user_code key,
+    ///   among others
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn initiate_device_flow(
+        &self,
+        scopes: Vec<&str>,
+    ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        let mut all_scopes = vec!["openid", "profile", "offline_access"];
+        all_scopes.extend(scopes);
+        let scopes_str = all_scopes.join(" ");
+
+        let params = [("client_id", self.client_id()), ("scope", &scopes_str)];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post(format!("{}/oauth2/v2.0/devicecode", self.authority()))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -336,12 +458,23 @@ impl PublicClientApplication {
         }
     }
 
+    /// Obtain token by a device flow object, with customizable polling effect.
+    ///
+    /// # Arguments
+    ///
+    /// * `flow` - A DeviceAuthorizationResponse previously generated by
+    /// initiate_device_flow.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
     pub async fn acquire_token_by_device_flow(
         &self,
         flow: DeviceAuthorizationResponse,
     ) -> Result<UserToken, MsalError> {
         let params = [
-            ("client_id", self.client_id.as_str()),
+            ("client_id", self.client_id()),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", &flow.device_code),
         ];
@@ -352,11 +485,8 @@ impl PublicClientApplication {
             .join("&");
 
         let resp = self
-            .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/token",
-                self.authority_host, self.tenant_id
-            ))
+            .client()
+            .post(format!("{}/oauth2/v2.0/token", self.authority()))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -378,65 +508,167 @@ impl PublicClientApplication {
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
+}
 
-    pub async fn acquire_token_silent(
+#[doc(cfg(feature = "prt"))]
+pub struct BrokerClientApplication {
+    app: PublicClientApplication,
+}
+
+#[doc(cfg(feature = "prt"))]
+impl BrokerClientApplication {
+    /// Create an instance of an application.
+    ///
+    /// # Arguments
+    ///
+    /// * `client_id` - Your app has a client_id after you register it on
+    ///   AAD.
+    ///
+    /// * `authority` - A URL that identifies a token authority. It should
+    ///   be of the format <https://login.microsoftonline.com/your_tenant> By
+    ///   default, we will use <https://login.microsoftonline.com/common>.
+    pub fn new(client_id: &str, authority: Option<&str>) -> Self {
+        BrokerClientApplication {
+            app: PublicClientApplication::new(client_id, authority),
+        }
+    }
+
+    /// Enroll the device in the directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `domain` - The domain the device is to be enrolled in.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - A LoadableIdentityKey which will be used to create the CSR
+    ///   for enrolling the device.
+    ///
+    /// # Returns
+    ///
+    /// * Success: The `id_key` (which has been loaded with a signed
+    ///   certificate), and a `device_id`.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn enroll_device(
+        &self,
+        username: &str,
+        password: &str,
+        domain: &str,
+        machine_key: &MachineKey,
+        tpm: &mut BoxedDynTpm,
+        id_key: &LoadableIdentityKey,
+    ) -> Result<(LoadableIdentityKey, String), MsalError> {
+        let token = self
+            .acquire_token_for_device_enrollment(username, password)
+            .await?;
+        register_device(&token.access_token, domain, machine_key, tpm, id_key).await
+    }
+
+    /// Gets a token for a given resource via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_username_password(username, password, scopes)
+            .await
+    }
+
+    /// Acquire token(s) based on a refresh token (RT) obtained from elsewhere.
+    ///
+    /// # Arguments
+    ///
+    /// * `refresh_token` - The old refresh token, as a string.
+    ///
+    /// * `scopes` - The scopes associated with this old RT.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken, which means migration was successful.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_refresh_token(refresh_token, scopes)
+            .await
+    }
+
+    /// Initiate a Device Flow instance, which will be used in
+    /// acquire_token_by_device_flow.
+    ///
+    /// # Arguments
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// # Returns
+    ///
+    /// * Success: A DeviceAuthorizationResponse containing a user_code key,
+    ///   among others
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn initiate_device_flow(
         &self,
         scopes: Vec<&str>,
-        refresh_token: &str,
-    ) -> Result<UserToken, MsalError> {
-        let mut all_scopes = vec!["openid", "profile", "offline_access"];
-        all_scopes.extend(scopes);
-        let scopes_str = all_scopes.join(" ");
-
-        let params = [
-            ("client_id", self.client_id.as_str()),
-            ("scope", &scopes_str),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_info", "1"),
-        ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
-
-        let resp = self
-            .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/token",
-                self.authority_host, self.tenant_id
-            ))
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header(header::ACCEPT, "application/json")
-            .body(payload)
-            .send()
-            .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_success() {
-            let token: UserToken = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-
-            Ok(token)
-        } else {
-            let json_resp: ErrorResponse = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            Err(MsalError::AcquireTokenFailed(json_resp))
-        }
+    ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        self.app.initiate_device_flow(scopes).await
     }
 
-    #[cfg(feature = "prt")]
+    async fn acquire_token_for_device_enrollment(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<UserToken, MsalError> {
+        let drs_scope = format!("{}/.default", DRS_APP_ID);
+        self.app
+            .acquire_token_by_username_password(username, password, vec![&drs_scope])
+            .await
+    }
+
+    /// Obtain token by a device flow object, with customizable polling effect.
+    ///
+    /// # Arguments
+    ///
+    /// * `flow` - A DeviceAuthorizationResponse previously generated by
+    /// initiate_device_flow.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_device_flow(
+        &self,
+        flow: DeviceAuthorizationResponse,
+    ) -> Result<UserToken, MsalError> {
+        self.app.acquire_token_by_device_flow(flow).await
+    }
+
     async fn request_nonce(&self) -> Result<String, MsalError> {
         let resp = self
-            .client
-            .post(format!(
-                "https://{}/common/oauth2/token",
-                self.authority_host
-            ))
+            .app
+            .client()
+            .post(format!("{}/oauth2/token", self.app.authority()))
             .body("grant_type=srv_challenge")
             .send()
             .await
@@ -456,7 +688,21 @@ impl PublicClientApplication {
         }
     }
 
-    #[cfg(feature = "prt")]
+    /// Gets a Primary Refresh Token (PRT) via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - The identity key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
+    /// * Failure: An MsalError, indicating the failure.
     pub async fn acquire_user_prt_by_username_password(
         &self,
         username: &str,
@@ -468,7 +714,7 @@ impl PublicClientApplication {
 
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&UsernamePasswordAuthenticationPayload::new(
-                &username, &password, &nonce,
+                username, password, &nonce,
             ))
             .map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing UsernamePassword JWT: {}", e))
@@ -480,8 +726,23 @@ impl PublicClientApplication {
         self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
     }
 
-    #[cfg(feature = "prt")]
-    pub async fn acquire_user_prt_silent(
+    /// Gets a Primary Refresh Token (PRT) via a refresh token (RT) obtained
+    /// previously.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - The identity key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_user_prt_by_refresh_token(
         &self,
         refresh_token: &str,
         tpm: &mut BoxedDynTpm,
@@ -491,7 +752,7 @@ impl PublicClientApplication {
 
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&RefreshTokenAuthenticationPayload::new(
-                &refresh_token,
+                refresh_token,
                 &nonce,
             ))
             .map_err(|e| {
@@ -504,7 +765,6 @@ impl PublicClientApplication {
         self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
     }
 
-    #[cfg(feature = "prt")]
     async fn acquire_user_prt_jwt(
         &self,
         jwt: &Jws,
@@ -541,11 +801,9 @@ impl PublicClientApplication {
             .join("&");
 
         let resp = self
-            .client
-            .post(format!(
-                "https://{}/{}/oauth2/token",
-                self.authority_host, self.tenant_id
-            ))
+            .app
+            .client()
+            .post(format!("{}/oauth2/token", self.app.authority()))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
