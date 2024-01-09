@@ -7,26 +7,26 @@ use serde_json::{from_str as json_from_str, Value};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use crate::enroll::register_device;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::crypto::JwsTpmSigner;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::jws::JwsBuilder;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::traits::JwsMutSigner;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use compact_jwt::Jws;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey, LoadableIdentityKey, MachineKey};
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use os_release::OsRelease;
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 use serde::Serialize;
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
@@ -131,7 +131,7 @@ pub struct UserToken {
     pub client_info: ClientInfo,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Serialize, Clone, Default)]
 struct UsernamePasswordAuthenticationPayload {
     client_id: String,
@@ -143,7 +143,7 @@ struct UsernamePasswordAuthenticationPayload {
     password: String,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 impl UsernamePasswordAuthenticationPayload {
     fn new(username: &str, password: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -165,7 +165,7 @@ impl UsernamePasswordAuthenticationPayload {
     }
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Serialize, Clone, Default)]
 struct RefreshTokenAuthenticationPayload {
     client_id: String,
@@ -176,7 +176,7 @@ struct RefreshTokenAuthenticationPayload {
     refresh_token: String,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 impl RefreshTokenAuthenticationPayload {
     fn new(refresh_token: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -197,14 +197,14 @@ impl RefreshTokenAuthenticationPayload {
     }
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Debug, Deserialize)]
 struct Nonce {
     #[serde(rename = "Nonce")]
     nonce: String,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrimaryRefreshToken {
     pub refresh_token: String,
@@ -510,12 +510,12 @@ impl PublicClientApplication {
     }
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 pub struct BrokerClientApplication {
     app: PublicClientApplication,
 }
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 impl BrokerClientApplication {
     /// Create an instance of an application.
     ///

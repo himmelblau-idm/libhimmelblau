@@ -9,7 +9,7 @@
 #![deny(clippy::await_holding_lock)]
 #![deny(clippy::needless_pass_by_value)]
 #![deny(clippy::trivially_copy_pass_by_ref)]
-#![feature(doc_auto_cfg)]
+#![feature(doc_cfg)]
 #![doc = include_str!("../README.md")]
 
 pub mod error;
@@ -17,8 +17,8 @@ pub mod error;
 pub mod auth;
 pub use auth::*;
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 pub(crate) mod enroll;
 
-#[cfg(feature = "prt")]
+#[doc(cfg(feature = "prt"))]
 pub(crate) mod discovery;
