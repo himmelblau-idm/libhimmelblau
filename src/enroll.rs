@@ -5,7 +5,6 @@ use crate::discovery::{
 use crate::error::MsalError;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
-use hostname;
 use kanidm_hsm_crypto::{BoxedDynTpm, LoadableIdentityKey, MachineKey, Tpm};
 use openssl::rsa::Rsa;
 use openssl::x509::X509;

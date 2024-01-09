@@ -714,7 +714,7 @@ impl BrokerClientApplication {
 
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&UsernamePasswordAuthenticationPayload::new(
-                &username, &password, &nonce,
+                username, password, &nonce,
             ))
             .map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing UsernamePassword JWT: {}", e))
@@ -752,7 +752,7 @@ impl BrokerClientApplication {
 
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&RefreshTokenAuthenticationPayload::new(
-                &refresh_token,
+                refresh_token,
                 &nonce,
             ))
             .map_err(|e| {
