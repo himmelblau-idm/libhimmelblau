@@ -211,16 +211,16 @@ pub struct PrimaryRefreshToken {
     pub id_token: String,
 }
 
-pub struct PublicClientApplication {
+struct ClientApplication {
     client: Client,
     client_id: String,
     tenant_id: String,
     authority_host: String,
 }
 
-impl PublicClientApplication {
-    pub fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
-        PublicClientApplication {
+impl ClientApplication {
+    fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
+        ClientApplication {
             client: reqwest::Client::new(),
             client_id: client_id.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -228,18 +228,7 @@ impl PublicClientApplication {
         }
     }
 
-    #[cfg(feature = "prt")]
-    pub async fn acquire_token_for_device_enrollment(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Result<UserToken, MsalError> {
-        let drs_scope = format!("{}/.default", DRS_APP_ID);
-        self.acquire_token_by_username_password(username, password, vec![&drs_scope])
-            .await
-    }
-
-    pub async fn acquire_token_by_username_password(
+    async fn acquire_token_by_username_password(
         &self,
         username: &str,
         password: &str,
@@ -291,98 +280,10 @@ impl PublicClientApplication {
         }
     }
 
-    pub async fn initiate_device_flow(
+    async fn acquire_token_by_refresh_token(
         &self,
-        scopes: Vec<&str>,
-    ) -> Result<DeviceAuthorizationResponse, MsalError> {
-        let mut all_scopes = vec!["openid", "profile", "offline_access"];
-        all_scopes.extend(scopes);
-        let scopes_str = all_scopes.join(" ");
-
-        let params = [
-            ("client_id", self.client_id.as_str()),
-            ("scope", &scopes_str),
-        ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
-
-        let resp = self
-            .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/devicecode",
-                self.authority_host, self.tenant_id
-            ))
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header(header::ACCEPT, "application/json")
-            .body(payload)
-            .send()
-            .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_success() {
-            let json_resp: DeviceAuthorizationResponse = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            Ok(json_resp)
-        } else {
-            let json_resp: ErrorResponse = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            Err(MsalError::AcquireTokenFailed(json_resp))
-        }
-    }
-
-    pub async fn acquire_token_by_device_flow(
-        &self,
-        flow: DeviceAuthorizationResponse,
-    ) -> Result<UserToken, MsalError> {
-        let params = [
-            ("client_id", self.client_id.as_str()),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ("device_code", &flow.device_code),
-        ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
-
-        let resp = self
-            .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/token",
-                self.authority_host, self.tenant_id
-            ))
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header(header::ACCEPT, "application/json")
-            .body(payload)
-            .send()
-            .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_success() {
-            let token: UserToken = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-
-            Ok(token)
-        } else {
-            let json_resp: ErrorResponse = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            Err(MsalError::AcquireTokenFailed(json_resp))
-        }
-    }
-
-    pub async fn acquire_token_silent(
-        &self,
-        scopes: Vec<&str>,
         refresh_token: &str,
+        scopes: Vec<&str>,
     ) -> Result<UserToken, MsalError> {
         let mut all_scopes = vec!["openid", "profile", "offline_access"];
         all_scopes.extend(scopes);
@@ -428,14 +329,210 @@ impl PublicClientApplication {
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
+}
 
-    #[cfg(feature = "prt")]
+pub struct PublicClientApplication {
+    app: ClientApplication,
+}
+
+impl PublicClientApplication {
+    pub fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
+        PublicClientApplication {
+            app: ClientApplication::new(client_id, tenant_id, authority_host),
+        }
+    }
+
+    fn client(&self) -> &Client {
+        &self.app.client
+    }
+
+    fn client_id(&self) -> &str {
+        &self.app.client_id
+    }
+
+    fn tenant_id(&self) -> &str {
+        &self.app.tenant_id
+    }
+
+    fn authority_host(&self) -> &str {
+        &self.app.authority_host
+    }
+
+    pub async fn acquire_token_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_username_password(username, password, scopes)
+            .await
+    }
+
+    pub async fn acquire_token_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_refresh_token(refresh_token, scopes)
+            .await
+    }
+
+    pub async fn initiate_device_flow(
+        &self,
+        scopes: Vec<&str>,
+    ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        let mut all_scopes = vec!["openid", "profile", "offline_access"];
+        all_scopes.extend(scopes);
+        let scopes_str = all_scopes.join(" ");
+
+        let params = [("client_id", self.client_id()), ("scope", &scopes_str)];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post(format!(
+                "https://{}/{}/oauth2/v2.0/devicecode",
+                self.authority_host(),
+                self.tenant_id()
+            ))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let json_resp: DeviceAuthorizationResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Ok(json_resp)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    pub async fn acquire_token_by_device_flow(
+        &self,
+        flow: DeviceAuthorizationResponse,
+    ) -> Result<UserToken, MsalError> {
+        let params = [
+            ("client_id", self.client_id()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ("device_code", &flow.device_code),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post(format!(
+                "https://{}/{}/oauth2/v2.0/token",
+                self.authority_host(),
+                self.tenant_id()
+            ))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+            Ok(token)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+}
+
+#[cfg(feature = "prt")]
+pub struct BrokerClientApplication {
+    app: PublicClientApplication,
+}
+
+#[cfg(feature = "prt")]
+impl BrokerClientApplication {
+    pub fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
+        BrokerClientApplication {
+            app: PublicClientApplication::new(client_id, tenant_id, authority_host),
+        }
+    }
+
+    pub async fn acquire_token_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_username_password(username, password, scopes)
+            .await
+    }
+
+    pub async fn acquire_token_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        scopes: Vec<&str>,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_refresh_token(refresh_token, scopes)
+            .await
+    }
+
+    pub async fn initiate_device_flow(
+        &self,
+        scopes: Vec<&str>,
+    ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        self.app.initiate_device_flow(scopes).await
+    }
+
+    pub async fn acquire_token_by_device_flow(
+        &self,
+        flow: DeviceAuthorizationResponse,
+    ) -> Result<UserToken, MsalError> {
+        self.app.acquire_token_by_device_flow(flow).await
+    }
+
+    pub async fn acquire_token_for_device_enrollment(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<UserToken, MsalError> {
+        let drs_scope = format!("{}/.default", DRS_APP_ID);
+        self.app
+            .acquire_token_by_username_password(username, password, vec![&drs_scope])
+            .await
+    }
+
     async fn request_nonce(&self) -> Result<String, MsalError> {
         let resp = self
-            .client
+            .app
+            .client()
             .post(format!(
                 "https://{}/common/oauth2/token",
-                self.authority_host
+                self.app.authority_host()
             ))
             .body("grant_type=srv_challenge")
             .send()
@@ -456,7 +553,6 @@ impl PublicClientApplication {
         }
     }
 
-    #[cfg(feature = "prt")]
     pub async fn acquire_user_prt_by_username_password(
         &self,
         username: &str,
@@ -480,8 +576,7 @@ impl PublicClientApplication {
         self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
     }
 
-    #[cfg(feature = "prt")]
-    pub async fn acquire_user_prt_silent(
+    pub async fn acquire_user_prt_by_refresh_token(
         &self,
         refresh_token: &str,
         tpm: &mut BoxedDynTpm,
@@ -504,7 +599,6 @@ impl PublicClientApplication {
         self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
     }
 
-    #[cfg(feature = "prt")]
     async fn acquire_user_prt_jwt(
         &self,
         jwt: &Jws,
@@ -541,10 +635,12 @@ impl PublicClientApplication {
             .join("&");
 
         let resp = self
-            .client
+            .app
+            .client()
             .post(format!(
                 "https://{}/{}/oauth2/token",
-                self.authority_host, self.tenant_id
+                self.app.authority_host(),
+                self.app.tenant_id()
             ))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
