@@ -214,17 +214,18 @@ pub struct PrimaryRefreshToken {
 struct ClientApplication {
     client: Client,
     client_id: String,
-    tenant_id: String,
-    authority_host: String,
+    authority: String,
 }
 
 impl ClientApplication {
-    fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
+    fn new(client_id: &str, authority: Option<&str>) -> Self {
         ClientApplication {
             client: reqwest::Client::new(),
             client_id: client_id.to_string(),
-            tenant_id: tenant_id.to_string(),
-            authority_host: authority_host.to_string(),
+            authority: match authority {
+                Some(authority) => authority.to_string(),
+                None => "https://login.microsoftonline.com/common".to_string(),
+            },
         }
     }
 
@@ -254,10 +255,7 @@ impl ClientApplication {
 
         let resp = self
             .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/token",
-                self.authority_host, self.tenant_id
-            ))
+            .post(format!("{}/oauth2/v2.0/token", self.authority))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -304,10 +302,7 @@ impl ClientApplication {
 
         let resp = self
             .client
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/token",
-                self.authority_host, self.tenant_id
-            ))
+            .post(format!("{}/oauth2/v2.0/token", self.authority))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -336,9 +331,9 @@ pub struct PublicClientApplication {
 }
 
 impl PublicClientApplication {
-    pub fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
+    pub fn new(client_id: &str, authority: Option<&str>) -> Self {
         PublicClientApplication {
-            app: ClientApplication::new(client_id, tenant_id, authority_host),
+            app: ClientApplication::new(client_id, authority),
         }
     }
 
@@ -350,12 +345,8 @@ impl PublicClientApplication {
         &self.app.client_id
     }
 
-    fn tenant_id(&self) -> &str {
-        &self.app.tenant_id
-    }
-
-    fn authority_host(&self) -> &str {
-        &self.app.authority_host
+    fn authority(&self) -> &str {
+        &self.app.authority
     }
 
     pub async fn acquire_token_by_username_password(
@@ -396,11 +387,7 @@ impl PublicClientApplication {
 
         let resp = self
             .client()
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/devicecode",
-                self.authority_host(),
-                self.tenant_id()
-            ))
+            .post(format!("{}/oauth2/v2.0/devicecode", self.authority()))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -439,11 +426,7 @@ impl PublicClientApplication {
 
         let resp = self
             .client()
-            .post(format!(
-                "https://{}/{}/oauth2/v2.0/token",
-                self.authority_host(),
-                self.tenant_id()
-            ))
+            .post(format!("{}/oauth2/v2.0/token", self.authority()))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -474,9 +457,9 @@ pub struct BrokerClientApplication {
 
 #[cfg(feature = "prt")]
 impl BrokerClientApplication {
-    pub fn new(client_id: &str, tenant_id: &str, authority_host: &str) -> Self {
+    pub fn new(client_id: &str, authority: Option<&str>) -> Self {
         BrokerClientApplication {
-            app: PublicClientApplication::new(client_id, tenant_id, authority_host),
+            app: PublicClientApplication::new(client_id, authority),
         }
     }
 
@@ -530,10 +513,7 @@ impl BrokerClientApplication {
         let resp = self
             .app
             .client()
-            .post(format!(
-                "https://{}/common/oauth2/token",
-                self.app.authority_host()
-            ))
+            .post(format!("{}/oauth2/token", self.app.authority()))
             .body("grant_type=srv_challenge")
             .send()
             .await
@@ -637,11 +617,7 @@ impl BrokerClientApplication {
         let resp = self
             .app
             .client()
-            .post(format!(
-                "https://{}/{}/oauth2/token",
-                self.app.authority_host(),
-                self.app.tenant_id()
-            ))
+            .post(format!("{}/oauth2/token", self.app.authority()))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
