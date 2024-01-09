@@ -19,8 +19,8 @@ use msal::PublicClientApplication;
 Create an instance of the PublicClientApplication, then authenticate:
 
 ```Rust
-let authority_host = "login.microsoftonline.com";
-let app = PublicClientApplication::new(client_id, tenant_id, &authority_host);
+let authority = format!("https://login.microsoftonline.com/{}", tenant_id);
+let app = PublicClientApplication::new(client_id, &authority);
 let scope = vec![];
 let token = app.acquire_token_by_username_password(username, password, scope).await?;
 ```
@@ -46,11 +46,8 @@ let token = app.acquire_token_by_device_flow(flow).await?;
 If msal is built with the `prt` feature, you can enroll the device, then request a PRT:
 
 ```Rust
-use msal::enroll::register_device;
-
-let app = BrokerClientApplication::new(client_id, tenant_id, &authority_host);
-let token = app.acquire_token_for_device_enrollment(username, password).await?;
-let (loadable_id_key, device_id) = register_device(token.access_token, domain, &machine_key, &tpm, &loadable_id_key).await?;
+let app = BrokerClientApplication::new(client_id, &authority);
+let (loadable_id_key, device_id) = app.enroll_device(username, password, domain, &machine_key, &tpm, &loadable_id_key).await?;
 let prt = app.acquire_user_prt_by_username_password(username, password, &tpm, &id_key).await?;
 ```
 
