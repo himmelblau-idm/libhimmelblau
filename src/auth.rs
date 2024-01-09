@@ -8,6 +8,8 @@ use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
 #[cfg(feature = "prt")]
+use crate::enroll::register_device;
+#[cfg(feature = "prt")]
 use compact_jwt::crypto::JwsTpmSigner;
 #[cfg(feature = "prt")]
 use compact_jwt::jws::JwsBuilder;
@@ -16,7 +18,7 @@ use compact_jwt::traits::JwsMutSigner;
 #[cfg(feature = "prt")]
 use compact_jwt::Jws;
 #[cfg(feature = "prt")]
-use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey};
+use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey, LoadableIdentityKey, MachineKey};
 #[cfg(feature = "prt")]
 use os_release::OsRelease;
 #[cfg(feature = "prt")]
@@ -596,6 +598,54 @@ impl BrokerClientApplication {
         self.app.initiate_device_flow(scopes).await
     }
 
+    async fn acquire_token_for_device_enrollment(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<UserToken, MsalError> {
+        let drs_scope = format!("{}/.default", DRS_APP_ID);
+        self.app
+            .acquire_token_by_username_password(username, password, vec![&drs_scope])
+            .await
+    }
+
+    /// Enroll the device in the directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `domain` - The domain the device is to be enrolled in.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - A LoadableIdentityKey which will be used to create the CSR
+    ///   for enrolling the device.
+    ///
+    /// # Returns
+    ///
+    /// * Success: The `id_key` (which has been loaded with a signed
+    ///   certificate), and a `device_id`.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn enroll_device(
+        &self,
+        username: &str,
+        password: &str,
+        domain: &str,
+        machine_key: &MachineKey,
+        tpm: &mut BoxedDynTpm,
+        id_key: &LoadableIdentityKey,
+    ) -> Result<(LoadableIdentityKey, String), MsalError> {
+        let token = self
+            .acquire_token_for_device_enrollment(username, password)
+            .await?;
+        register_device(&token.access_token, domain, machine_key, tpm, id_key).await
+    }
+
     /// Obtain token by a device flow object, with customizable polling effect.
     ///
     /// # Arguments
@@ -612,29 +662,6 @@ impl BrokerClientApplication {
         flow: DeviceAuthorizationResponse,
     ) -> Result<UserToken, MsalError> {
         self.app.acquire_token_by_device_flow(flow).await
-    }
-
-    /// Gets a token for the Device Registration Service resource via user
-    /// credentials.
-    ///
-    /// # Arguments
-    ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// * `password` - The password.
-    ///
-    /// # Returns
-    /// * Success: A UserToken containing an access_token.
-    /// * Failure: An MsalError, indicating the failure.
-    pub async fn acquire_token_for_device_enrollment(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Result<UserToken, MsalError> {
-        let drs_scope = format!("{}/.default", DRS_APP_ID);
-        self.app
-            .acquire_token_by_username_password(username, password, vec![&drs_scope])
-            .await
     }
 
     async fn request_nonce(&self) -> Result<String, MsalError> {

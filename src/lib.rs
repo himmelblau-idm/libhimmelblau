@@ -18,7 +18,7 @@ pub mod auth;
 pub use auth::*;
 
 #[cfg(feature = "prt")]
-pub mod enroll;
+pub(crate) mod enroll;
 
 #[cfg(feature = "prt")]
 pub(crate) mod discovery;
