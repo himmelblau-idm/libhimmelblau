@@ -533,6 +533,43 @@ impl BrokerClientApplication {
         }
     }
 
+    /// Enroll the device in the directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `domain` - The domain the device is to be enrolled in.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - A LoadableIdentityKey which will be used to create the CSR
+    ///   for enrolling the device.
+    ///
+    /// # Returns
+    ///
+    /// * Success: The `id_key` (which has been loaded with a signed
+    ///   certificate), and a `device_id`.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn enroll_device(
+        &self,
+        username: &str,
+        password: &str,
+        domain: &str,
+        machine_key: &MachineKey,
+        tpm: &mut BoxedDynTpm,
+        id_key: &LoadableIdentityKey,
+    ) -> Result<(LoadableIdentityKey, String), MsalError> {
+        let token = self
+            .acquire_token_for_device_enrollment(username, password)
+            .await?;
+        register_device(&token.access_token, domain, machine_key, tpm, id_key).await
+    }
+
     /// Gets a token for a given resource via user credentials.
     ///
     /// # Arguments
@@ -607,43 +644,6 @@ impl BrokerClientApplication {
         self.app
             .acquire_token_by_username_password(username, password, vec![&drs_scope])
             .await
-    }
-
-    /// Enroll the device in the directory.
-    ///
-    /// # Arguments
-    ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// * `password` - The password.
-    ///
-    /// * `domain` - The domain the device is to be enrolled in.
-    ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
-    ///
-    /// * `tpm` - The tpm object.
-    ///
-    /// * `id_key` - A LoadableIdentityKey which will be used to create the CSR
-    ///   for enrolling the device.
-    ///
-    /// # Returns
-    ///
-    /// * Success: The `id_key` (which has been loaded with a signed
-    ///   certificate), and a `device_id`.
-    /// * Failure: An MsalError, indicating the failure.
-    pub async fn enroll_device(
-        &self,
-        username: &str,
-        password: &str,
-        domain: &str,
-        machine_key: &MachineKey,
-        tpm: &mut BoxedDynTpm,
-        id_key: &LoadableIdentityKey,
-    ) -> Result<(LoadableIdentityKey, String), MsalError> {
-        let token = self
-            .acquire_token_for_device_enrollment(username, password)
-            .await?;
-        register_device(&token.access_token, domain, machine_key, tpm, id_key).await
     }
 
     /// Obtain token by a device flow object, with customizable polling effect.
