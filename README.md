@@ -20,7 +20,7 @@ Create an instance of the PublicClientApplication, then authenticate:
 
 ```Rust
 let authority = format!("https://login.microsoftonline.com/{}", tenant_id);
-let app = PublicClientApplication::new(client_id, &authority);
+let app = PublicClientApplication::new(client_id, Some(&authority));
 let scope = vec![];
 let token = app.acquire_token_by_username_password(username, password, scope).await?;
 ```
