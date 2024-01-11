@@ -33,4 +33,8 @@ pub enum MsalError {
     TPMFail(String),
     /// Failed whil formatting a URL
     URLFormatFailed(String),
+    /// Enrollment failure
+    DeviceEnrollmentFail(String),
+    /// Crypto failure
+    CryptoFail(String),
 }

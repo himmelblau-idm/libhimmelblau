@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [features]
 # default = ["broker"]
 broker = []
+tpm = []
 
 [dependencies]
 base64 = "^0.21.5"
