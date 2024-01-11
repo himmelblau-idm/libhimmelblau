@@ -15,8 +15,8 @@ name = "msal"
 path = "src/lib.rs"
 
 [features]
-# default = ["prt"]
-prt = []
+# default = ["broker"]
+broker = []
 
 [dependencies]
 base64 = "^0.21.5"

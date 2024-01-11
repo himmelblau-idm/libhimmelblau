@@ -43,7 +43,7 @@ let flow = app.initiate_device_flow(scope).await?;
 let token = app.acquire_token_by_device_flow(flow).await?;
 ```
 
-If msal is built with the `prt` feature, you can enroll the device, then request a PRT:
+If msal is built with the `broker` feature, you can enroll the device, then request a PRT:
 
 ```Rust
 let app = BrokerClientApplication::new(client_id, &authority);
