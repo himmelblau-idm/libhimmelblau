@@ -17,8 +17,10 @@ pub mod error;
 pub mod auth;
 pub use auth::*;
 
+#[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 pub(crate) mod enroll;
 
+#[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 pub(crate) mod discovery;
