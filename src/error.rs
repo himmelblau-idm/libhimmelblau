@@ -37,4 +37,6 @@ pub enum MsalError {
     DeviceEnrollmentFail(String),
     /// Crypto failure
     CryptoFail(String),
+    /// This functionality is not yet implemented
+    NotImplemented,
 }

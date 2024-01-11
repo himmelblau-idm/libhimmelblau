@@ -638,7 +638,6 @@ impl BrokerClientApplication {
     ///   certificate), and a `device_id`.
     /// * Failure: An MsalError, indicating the failure.
     #[cfg(feature = "tpm")]
-    #[doc(cfg(feature = "tpm"))]
     pub async fn enroll_device(
         &self,
         username: &str,
@@ -717,7 +716,7 @@ impl BrokerClientApplication {
     ///
     /// * `domain` - The domain the device is to be enrolled in.
     ///
-    /// * `transport_key` - An RSA private key which will be used to
+    /// * `id_key` - An RSA private key which will be used to
     ///   create the CSR and transport key for enrolling the device.
     ///
     /// # Returns
@@ -979,7 +978,7 @@ impl BrokerClientApplication {
         }
     }
 
-    pub async fn build_jwt_by_username_password(
+    async fn build_jwt_by_username_password(
         &self,
         username: &str,
         password: &str,
@@ -1014,7 +1013,6 @@ impl BrokerClientApplication {
     /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
     #[cfg(feature = "tpm")]
-    #[doc(cfg(feature = "tpm"))]
     pub async fn acquire_user_prt_by_username_password(
         &self,
         username: &str,
@@ -1080,9 +1078,7 @@ impl BrokerClientApplication {
     ///
     /// # Arguments
     ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// * `password` - The password.
+    /// * `refresh_token` - The old refresh token, as a string.
     ///
     /// * `tpm` - The tpm object.
     ///
@@ -1092,7 +1088,6 @@ impl BrokerClientApplication {
     /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
     #[cfg(feature = "tpm")]
-    #[doc(cfg(feature = "tpm"))]
     pub async fn acquire_user_prt_by_refresh_token(
         &self,
         refresh_token: &str,
@@ -1110,9 +1105,7 @@ impl BrokerClientApplication {
     ///
     /// # Arguments
     ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// * `password` - The password.
+    /// * `refresh_token` - The old refresh token, as a string.
     ///
     /// * `id_key` - The private key used during device enrollment.
     ///
@@ -1133,7 +1126,6 @@ impl BrokerClientApplication {
     }
 
     #[cfg(feature = "tpm")]
-    #[doc(cfg(feature = "tpm"))]
     async fn sign_jwt(
         &self,
         jwt: &Jws,
@@ -1159,7 +1151,6 @@ impl BrokerClientApplication {
     }
 
     #[cfg(not(feature = "tpm"))]
-    #[doc(cfg(not(feature = "tpm")))]
     async fn sign_jwt(&self, jwt: &Jws, id_key: &PKey<Private>) -> Result<String, MsalError> {
         let jws_rs256_signer = match JwsRs256Signer::from_rs256_der(
             &id_key

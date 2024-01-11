@@ -15,7 +15,7 @@ name = "msal"
 path = "src/lib.rs"
 
 [features]
-# default = ["broker"]
+default = ["broker"]
 broker = []
 tpm = []
 
