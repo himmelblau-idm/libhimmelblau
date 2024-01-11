@@ -595,15 +595,12 @@ impl BrokerClientApplication {
     ///
     /// # Arguments
     ///
-    /// * `client_id` - Your app has a client_id after you register it on
-    ///   AAD.
-    ///
     /// * `authority` - A URL that identifies a token authority. It should
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
-    pub fn new(client_id: &str, authority: Option<&str>) -> Self {
+    pub fn new(authority: Option<&str>) -> Self {
         BrokerClientApplication {
-            app: ClientApplication::new(client_id, authority),
+            app: ClientApplication::new(BROKER_CLIENT_IDENT, authority),
         }
     }
 
