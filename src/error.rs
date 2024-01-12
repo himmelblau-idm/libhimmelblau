@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const INVALID_CRED: u32 = 0xC3CE;
 pub const REQUIRES_MFA: u32 = 0xC39C;
@@ -8,14 +8,14 @@ pub const NO_GROUP_CONSENT: u32 = 0xFDEA;
 pub const NO_SECRET: u32 = 0x6AD09A;
 pub const AUTH_PENDING: u32 = 0x11180;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
     pub error_description: String,
     pub error_codes: Vec<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Debug)]
 pub enum MsalError {
     /// MSAL failed to parse a json input
     InvalidJson(String),

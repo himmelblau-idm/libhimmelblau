@@ -2,29 +2,38 @@ use crate::error::{ErrorResponse, MsalError};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::{header, Client};
-use serde::{Serialize, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, Value};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
-#[cfg(all(feature = "broker", not(feature = "tpm")))]
-#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::compact::JweCompact;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::crypto::JweRSAOAEPDecipher;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use compact_jwt::crypto::JwsRs256Signer;
 #[cfg(all(feature = "broker", feature = "tpm"))]
 #[doc(cfg(all(feature = "broker", feature = "tpm")))]
 use compact_jwt::crypto::JwsTpmSigner;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+use compact_jwt::jwe::Jwe;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use compact_jwt::jws::JwsBuilder;
 #[cfg(all(feature = "broker", feature = "tpm"))]
 #[doc(cfg(all(feature = "broker", feature = "tpm")))]
 use compact_jwt::traits::JwsMutSigner;
-#[cfg(all(feature = "broker", not(feature = "tpm")))]
-#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
-use compact_jwt::JwsSigner;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::Jws;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::JwsSigner;
 #[cfg(all(feature = "broker", feature = "tpm"))]
 #[doc(cfg(all(feature = "broker", feature = "tpm")))]
 use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey, LoadableIdentityKey, MachineKey, Tpm};
@@ -34,8 +43,8 @@ use openssl::hash::MessageDigest;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use openssl::pkey::Public;
-#[cfg(all(feature = "broker", not(feature = "tpm")))]
-#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use openssl::pkey::{PKey, Private};
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -52,6 +61,12 @@ use os_release::OsRelease;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use reqwest::Url;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use std::str::FromStr;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use tracing::debug;
@@ -269,6 +284,60 @@ impl RefreshTokenAuthenticationPayload {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+#[derive(Serialize, Clone, Default)]
+struct ExchangePRTPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iat: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exp: Option<i64>,
+    client_id: String,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
+    grant_type: String,
+    refresh_token: String,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl ExchangePRTPayload {
+    fn new(
+        prt: &PrimaryRefreshToken,
+        scope: &[&str],
+        resource: Option<String>,
+    ) -> Result<Self, MsalError> {
+        let (iat, exp): (Option<i64>, Option<i64>) =
+            match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(now) => match now.as_secs().try_into() {
+                    Ok(iat) => (Some(iat), Some(iat + 300)),
+                    Err(e) => {
+                        return Err(MsalError::GeneralFailure(format!(
+                            "Failed choosing iat and exp: {}",
+                            e
+                        )));
+                    }
+                },
+                Err(e) => {
+                    return Err(MsalError::GeneralFailure(format!(
+                        "Failed choosing iat and exp: {}",
+                        e
+                    )))
+                }
+            };
+        Ok(ExchangePRTPayload {
+            iat,
+            exp,
+            client_id: BROKER_CLIENT_IDENT.to_string(),
+            scope: format!("openid {}", scope.join(" ")),
+            resource,
+            grant_type: "refresh_token".to_string(),
+            refresh_token: prt.refresh_token.clone(),
+        })
+    }
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 #[derive(Debug, Deserialize)]
 struct Nonce {
     #[serde(rename = "Nonce")]
@@ -277,12 +346,54 @@ struct Nonce {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Debug, Clone, Deserialize)]
+fn decode_jwe<'de, D>(d: D) -> Result<JweCompact, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(d)?;
+    Ok(URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))
+        .and_then(|bytes| {
+            JweCompact::from_str(
+                &String::from_utf8(bytes)
+                    .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))?,
+            )
+            .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))
+        })?)
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+#[derive(Clone, Deserialize)]
 pub struct PrimaryRefreshToken {
     pub refresh_token: String,
     pub refresh_token_expires_in: u64,
-    pub session_key_jwe: String,
-    pub id_token: String,
+    #[serde(rename = "session_key_jwe")]
+    #[serde(deserialize_with = "decode_jwe")]
+    session_key: JweCompact,
+    #[serde(deserialize_with = "decode_id_token")]
+    pub id_token: IdToken,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl PrimaryRefreshToken {
+    pub fn session_key(&self, id_key: &PKey<Private>) -> Result<Vec<u8>, MsalError> {
+        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(
+            id_key
+                .rsa()
+                .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?,
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
+        let cek: Vec<u8> = rsa_oaep_decipher
+            .decipher_cek(&self.session_key)
+            .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
+
+        // The payload is intentionally empty with a session_key_jwe. What we
+        // need is the CEK (Content Encryption Key) from the header.
+        Ok(cek)
+    }
 }
 
 struct ClientApplication {
@@ -1203,6 +1314,96 @@ impl BrokerClientApplication {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Ok(json_resp)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    async fn sign_exchange_jwt(
+        &self,
+        jwt: &Jws,
+        session_key: &Vec<u8>,
+    ) -> Result<String, MsalError> {
+        let jws_rs256_signer = match JwsRs256Signer::from_rs256_der(session_key) {
+            Ok(jws_rs256_signer) => jws_rs256_signer,
+            Err(e) => {
+                return Err(MsalError::CryptoFail(format!(
+                    "Failed loading rs256 signer: {}",
+                    e
+                )))
+            }
+        };
+
+        let signed_jwt = match jws_rs256_signer.sign(jwt) {
+            Ok(signed_jwt) => signed_jwt,
+            Err(e) => return Err(MsalError::CryptoFail(format!("Failed signing jwk: {}", e))),
+        };
+
+        Ok(format!("{}", signed_jwt))
+    }
+
+    /// Given the primary refresh token, this method requests an access token.
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` -  A primary refresh token that was previously received from
+    ///   the server.
+    ///
+    /// * `scope` - The scope that the client requests for the access token.
+    ///
+    /// * `resource` - The resource for which the access token is requested.
+    ///
+    /// * `session_key` - The session key deciphered from the PRT
+    ///   session_key_jwe property. See `prt.session_key(id_key)`.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn exchange_prt_for_access_token(
+        &self,
+        prt: &PrimaryRefreshToken,
+        scope: Vec<&str>,
+        resource: Option<String>,
+        session_key: &Vec<u8>,
+    ) -> Result<UserToken, MsalError> {
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)).map_err(|e| {
+                MsalError::InvalidJson(format!("Failed serializing ExchangePRT JWT: {}", e))
+            })?,
+        )
+        .set_typ(Some("JWT"))
+        .build();
+        let signed_jwt = self.sign_exchange_jwt(&jwt, session_key).await?;
+
+        let params = [
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("request", &signed_jwt),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post(format!("{}/oauth2/token", self.authority()))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+            Ok(token)
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
