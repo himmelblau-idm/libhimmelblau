@@ -46,9 +46,18 @@ let token = app.acquire_token_by_device_flow(flow).await?;
 If msal is built with the `broker` feature, you can enroll the device, then request a PRT:
 
 ```Rust
-let app = BrokerClientApplication::new(client_id, &authority);
-let (loadable_id_key, device_id) = app.enroll_device(username, password, domain, &machine_key, &tpm, &loadable_id_key).await?;
-let prt = app.acquire_user_prt_by_username_password(username, password, &tpm, &id_key).await?;
-```
+use openssl::pkey::PKey;
+use openssl::rsa::Rsa;
 
-The tpm parameters come from Kanidm's hsm\_crypto crate. See the [Kanidm hsm\_crypto documentation](https://docs.rs/kanidm-hsm-crypto/0.1.5/kanidm_hsm_crypto/) for an understanding of how to use the tpm code.
+// First create an RSA2048 private key for enrolling the device.
+let id_key =
+    PKey::from_rsa(Rsa::generate(2048).expect("Failed generating 2048 bit RSA key"))
+        .expect("Failed generating 2048 bit RSA key");
+
+let app = BrokerClientApplication::new(client_id, &authority);
+
+// Use the RSA2048 private key for enrollment. This private key now represents
+// your device during authentication.
+let (loadable_id_key, device_id) = app.enroll_device(username, password, domain, &id_key).await?;
+let prt = app.acquire_user_prt_by_username_password(username, password, &id_key).await?;
+```
