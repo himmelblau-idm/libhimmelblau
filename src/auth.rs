@@ -108,6 +108,9 @@ struct JoinPayload {}
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+pub const BROKER_APP_ID: &str = "29d9ed98-a469-4536-ade2-f981bc1d605e";
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
@@ -727,7 +730,7 @@ impl BrokerClientApplication {
     ///   default, we will use <https://login.microsoftonline.com/common>.
     pub fn new(authority: Option<&str>) -> Self {
         BrokerClientApplication {
-            app: ClientApplication::new(BROKER_CLIENT_IDENT, authority),
+            app: ClientApplication::new(BROKER_APP_ID, authority),
         }
     }
 
