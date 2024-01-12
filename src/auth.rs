@@ -43,9 +43,12 @@ use openssl::hash::MessageDigest;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use openssl::pkey::Public;
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+use openssl::pkey::PKey;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-use openssl::pkey::{PKey, Private};
+use openssl::pkey::Private;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use openssl::rsa::Rsa;
@@ -384,13 +387,9 @@ pub struct PrimaryRefreshToken {
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 impl PrimaryRefreshToken {
-    pub fn session_key(&self, id_key: &PKey<Private>) -> Result<Vec<u8>, MsalError> {
-        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(
-            id_key
-                .rsa()
-                .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?,
-        )
-        .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
+    pub fn session_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
+        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(id_key.clone())
+            .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
         let cek: Vec<u8> = rsa_oaep_decipher
             .decipher_cek(&self.session_key)
             .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
@@ -400,13 +399,9 @@ impl PrimaryRefreshToken {
         Ok(cek)
     }
 
-    pub fn tgt_client_key(&self, id_key: &PKey<Private>) -> Result<Vec<u8>, MsalError> {
-        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(
-            id_key
-                .rsa()
-                .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?,
-        )
-        .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
+    pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
+        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(id_key.clone())
+            .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
         let tgt: Jwe = rsa_oaep_decipher
             .decipher(&self.tgt_client_key)
             .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
@@ -858,7 +853,7 @@ impl BrokerClientApplication {
         username: &str,
         password: &str,
         domain: &str,
-        id_key: &PKey<Private>,
+        id_key: &Rsa<Private>,
     ) -> Result<(X509, String), MsalError> {
         let token = self
             .acquire_token_for_device_enrollment(username, password)
@@ -879,12 +874,14 @@ impl BrokerClientApplication {
             .set_subject_name(&x509_name)
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
+        let id_pkey =
+            PKey::from_rsa(id_key.clone()).map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
         req_builder
-            .set_pubkey(id_key)
+            .set_pubkey(&id_pkey)
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
         req_builder
-            .sign(id_key, MessageDigest::sha256())
+            .sign(&id_pkey, MessageDigest::sha256())
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
         let csr_der = req_builder
@@ -894,7 +891,7 @@ impl BrokerClientApplication {
 
         let public_key = Rsa::public_key_from_der(
             &id_key
-                .raw_public_key()
+                .public_key_to_der()
                 .map_err(|e| MsalError::DeviceEnrollmentFail(format!("{}", e)))?,
         )
         .map_err(|e| MsalError::DeviceEnrollmentFail(format!("{}", e)))?;
@@ -1047,7 +1044,7 @@ impl BrokerClientApplication {
         username: &str,
         password: &str,
         scopes: Vec<&str>,
-        id_key: &PKey<Private>,
+        id_key: &Rsa<Private>,
     ) -> Result<UserToken, MsalError> {
         let prt = self
             .acquire_user_prt_by_username_password(username, password, id_key)
@@ -1106,7 +1103,7 @@ impl BrokerClientApplication {
         &self,
         refresh_token: &str,
         scopes: Vec<&str>,
-        id_key: &PKey<Private>,
+        id_key: &Rsa<Private>,
     ) -> Result<UserToken, MsalError> {
         let prt = self
             .acquire_user_prt_by_refresh_token(refresh_token, id_key)
@@ -1246,7 +1243,7 @@ impl BrokerClientApplication {
         &self,
         username: &str,
         password: &str,
-        id_key: &PKey<Private>,
+        id_key: &Rsa<Private>,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         let jwt = self
             .build_jwt_by_username_password(username, password)
@@ -1316,7 +1313,7 @@ impl BrokerClientApplication {
     pub async fn acquire_user_prt_by_refresh_token(
         &self,
         refresh_token: &str,
-        id_key: &PKey<Private>,
+        id_key: &Rsa<Private>,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         let jwt = self.build_jwt_by_refresh_token(refresh_token).await?;
         let signed_jwt = self.sign_jwt(&jwt, id_key).await?;
@@ -1350,7 +1347,7 @@ impl BrokerClientApplication {
     }
 
     #[cfg(not(feature = "tpm"))]
-    async fn sign_jwt(&self, jwt: &Jws, id_key: &PKey<Private>) -> Result<String, MsalError> {
+    async fn sign_jwt(&self, jwt: &Jws, id_key: &Rsa<Private>) -> Result<String, MsalError> {
         let jws_rs256_signer = match JwsRs256Signer::from_rs256_der(
             &id_key
                 .private_key_to_der()
