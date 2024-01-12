@@ -1032,17 +1032,84 @@ impl BrokerClientApplication {
     ///
     /// * `scopes` - Scopes requested to access a protected API (a resource).
     ///
+    /// * `id_key` - The private key used during device enrollment.
+    ///
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(not(feature = "tpm"))]
+    #[doc(cfg(not(feature = "tpm")))]
     pub async fn acquire_token_by_username_password(
         &self,
         username: &str,
         password: &str,
         scopes: Vec<&str>,
+        id_key: &PKey<Private>,
     ) -> Result<UserToken, MsalError> {
-        self.app
-            .acquire_token_by_username_password(username, password, scopes)
+        let prt = self
+            .acquire_user_prt_by_username_password(username, password, id_key)
+            .await?;
+        let session_key = prt.session_key(id_key)?;
+        self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
+            .await
+    }
+
+    /// Gets a token for a given resource via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - The identity key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "tpm")]
+    #[doc(cfg(feature = "tpm"))]
+    pub async fn acquire_token_by_username_password(
+        &self,
+        _username: &str,
+        _password: &str,
+        _scopes: Vec<&str>,
+        _tpm: &mut BoxedDynTpm,
+        _id_key: &IdentityKey,
+    ) -> Result<UserToken, MsalError> {
+        Err(MsalError::NotImplemented)
+    }
+
+    /// Acquire token(s) based on a refresh token (RT) obtained from elsewhere.
+    ///
+    /// # Arguments
+    ///
+    /// * `refresh_token` - The old refresh token, as a string.
+    ///
+    /// * `scopes` - The scopes associated with this old RT.
+    ///
+    /// * `id_key` - The private key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A UserToken, which means migration was successful.
+    /// * Failure: An MsalError, indicating the failure.
+    #[cfg(not(feature = "tpm"))]
+    #[doc(cfg(not(feature = "tpm")))]
+    pub async fn acquire_token_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        scopes: Vec<&str>,
+        id_key: &PKey<Private>,
+    ) -> Result<UserToken, MsalError> {
+        let prt = self
+            .acquire_user_prt_by_refresh_token(refresh_token, id_key)
+            .await?;
+        let session_key = prt.session_key(id_key)?;
+        self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
             .await
     }
 
@@ -1054,18 +1121,23 @@ impl BrokerClientApplication {
     ///
     /// * `scopes` - The scopes associated with this old RT.
     ///
-    /// # Returns
+    /// * `tpm` - The tpm object.
     ///
+    /// * `id_key` - The identity key used during device enrollment.
+    ///
+    /// # Returns
     /// * Success: A UserToken, which means migration was successful.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "tpm")]
+    #[doc(cfg(feature = "tpm"))]
     pub async fn acquire_token_by_refresh_token(
         &self,
-        refresh_token: &str,
-        scopes: Vec<&str>,
+        _refresh_token: &str,
+        _scopes: Vec<&str>,
+        _tpm: &mut BoxedDynTpm,
+        _id_key: &IdentityKey,
     ) -> Result<UserToken, MsalError> {
-        self.app
-            .acquire_token_by_refresh_token(refresh_token, scopes)
-            .await
+        Err(MsalError::NotImplemented)
     }
 
     async fn acquire_token_for_device_enrollment(
