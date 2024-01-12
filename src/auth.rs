@@ -374,6 +374,8 @@ pub struct PrimaryRefreshToken {
     session_key: JweCompact,
     #[serde(deserialize_with = "decode_id_token")]
     pub id_token: IdToken,
+    #[serde(deserialize_with = "decode_jwe")]
+    tgt_client_key: JweCompact,
 }
 
 #[cfg(feature = "broker")]
@@ -393,6 +395,20 @@ impl PrimaryRefreshToken {
         // The payload is intentionally empty with a session_key_jwe. What we
         // need is the CEK (Content Encryption Key) from the header.
         Ok(cek)
+    }
+
+    pub fn tgt_client_key(&self, id_key: &PKey<Private>) -> Result<Vec<u8>, MsalError> {
+        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(
+            id_key
+                .rsa()
+                .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?,
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
+        let tgt: Jwe = rsa_oaep_decipher
+            .decipher(&self.tgt_client_key)
+            .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
+
+        Ok(tgt.payload().to_vec())
     }
 }
 
