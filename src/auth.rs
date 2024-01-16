@@ -10,15 +10,15 @@ use uuid::Uuid;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::compact::JweCompact;
-#[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
-use compact_jwt::crypto::JweRSAOAEPDecipher;
-#[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
 use compact_jwt::crypto::JwsRs256Signer;
 #[cfg(all(feature = "broker", feature = "tpm"))]
 #[doc(cfg(all(feature = "broker", feature = "tpm")))]
 use compact_jwt::crypto::JwsTpmSigner;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::crypto::{JweRSAOAEPDecipher, MsOapxbcSessionKey};
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::jwe::Jwe;
@@ -40,15 +40,15 @@ use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey, LoadableIdentityKey, MachineKe
 #[cfg(all(feature = "broker", not(feature = "tpm")))]
 #[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
 use openssl::hash::MessageDigest;
-#[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
-use openssl::pkey::Public;
 #[cfg(all(feature = "broker", not(feature = "tpm")))]
 #[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
 use openssl::pkey::PKey;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use openssl::pkey::Private;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use openssl::pkey::Public;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use openssl::rsa::Rsa;
@@ -387,16 +387,12 @@ pub struct PrimaryRefreshToken {
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 impl PrimaryRefreshToken {
-    pub fn session_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
-        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(id_key.clone())
-            .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
-        let cek: Vec<u8> = rsa_oaep_decipher
-            .decipher_cek(&self.session_key)
-            .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
+    pub fn session_key(&self, id_key: &Rsa<Private>) -> Result<MsOapxbcSessionKey, MsalError> {
+        let client_key =
+            MsOapxbcSessionKey::complete_rsa_oaep_key_agreement(id_key.clone(), &self.session_key)
+                .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
 
-        // The payload is intentionally empty with a session_key_jwe. What we
-        // need is the CEK (Content Encryption Key) from the header.
-        Ok(cek)
+        Ok(client_key)
     }
 
     pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
@@ -1414,19 +1410,9 @@ impl BrokerClientApplication {
     async fn sign_exchange_jwt(
         &self,
         jwt: &Jws,
-        session_key: &Vec<u8>,
+        session_key: &MsOapxbcSessionKey,
     ) -> Result<String, MsalError> {
-        let jws_rs256_signer = match JwsRs256Signer::from_rs256_der(session_key) {
-            Ok(jws_rs256_signer) => jws_rs256_signer,
-            Err(e) => {
-                return Err(MsalError::CryptoFail(format!(
-                    "Failed loading rs256 signer: {}",
-                    e
-                )))
-            }
-        };
-
-        let signed_jwt = match jws_rs256_signer.sign(jwt) {
+        let signed_jwt = match session_key.sign(jwt) {
             Ok(signed_jwt) => signed_jwt,
             Err(e) => return Err(MsalError::CryptoFail(format!("Failed signing jwk: {}", e))),
         };
@@ -1456,7 +1442,7 @@ impl BrokerClientApplication {
         prt: &PrimaryRefreshToken,
         scope: Vec<&str>,
         resource: Option<String>,
-        session_key: &Vec<u8>,
+        session_key: &MsOapxbcSessionKey,
     ) -> Result<UserToken, MsalError> {
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)).map_err(|e| {

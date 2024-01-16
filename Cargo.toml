@@ -30,5 +30,5 @@ uuid = { version = "^1.4.1", features = [ "v4" ] }
 os-release = "^0.1.0"
 hostname = "^0.3.1"
 openssl = "^0.10.55"
-compact_jwt = { version = "0.3.3", git = "https://github.com/kanidm/compact-jwt.git", branch = "main", features = ["hsm-crypto"] }
+compact_jwt = { version = "0.3.3", git = "https://github.com/kanidm/compact-jwt.git", branch = "20240116-ms-extensions", features = ["hsm-crypto"] }
 kanidm-hsm-crypto = "^0.1.5"
