@@ -366,16 +366,8 @@ where
     D: Deserializer<'de>,
 {
     let s: String = Deserialize::deserialize(d)?;
-    Ok(URL_SAFE_NO_PAD
-        .decode(s)
-        .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))
-        .and_then(|bytes| {
-            JweCompact::from_str(
-                &String::from_utf8(bytes)
-                    .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))?,
-            )
-            .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))
-        })?)
+    Ok(JweCompact::from_str(&s)
+        .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))?)
 }
 
 #[cfg(feature = "broker")]
