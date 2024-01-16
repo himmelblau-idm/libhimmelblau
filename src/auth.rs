@@ -142,7 +142,7 @@ pub struct DeviceAuthorizationResponse {
 pub struct IdToken {
     pub name: String,
     pub oid: String,
-    pub preferred_username: String,
+    pub preferred_username: Option<String>,
     pub puid: Option<String>,
     pub tenant_region_scope: Option<String>,
     pub tid: String,
