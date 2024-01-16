@@ -46,8 +46,8 @@ use openssl::pkey::PKey;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use openssl::pkey::Private;
-#[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
+#[cfg(all(feature = "broker", feature = "tpm"))]
+#[doc(cfg(all(feature = "broker", feature = "tpm")))]
 use openssl::pkey::Public;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -73,6 +73,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use tracing::debug;
+
+/* The following is permitted because Rsa<Private> is a superset of
+ * Rsa<Public>. */
+#[cfg(all(feature = "broker", feature = "tpm"))]
+#[doc(cfg(all(feature = "broker", feature = "tpm")))]
+type EnrollmentKey = Rsa<Public>;
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+type EnrollmentKey = Rsa<Private>;
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -885,14 +894,7 @@ impl BrokerClientApplication {
             .to_der()
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
-        let public_key = Rsa::public_key_from_der(
-            &id_key
-                .public_key_to_der()
-                .map_err(|e| MsalError::DeviceEnrollmentFail(format!("{}", e)))?,
-        )
-        .map_err(|e| MsalError::DeviceEnrollmentFail(format!("{}", e)))?;
-
-        self.enroll_device_internal(&token.access_token, domain, &public_key, &csr_der)
+        self.enroll_device_internal(&token.access_token, domain, id_key, &csr_der)
             .await
     }
 
@@ -900,7 +902,7 @@ impl BrokerClientApplication {
         &self,
         access_token: &str,
         domain: &str,
-        transport_key: &Rsa<Public>,
+        transport_key: &EnrollmentKey,
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
         let enrollment_services =
