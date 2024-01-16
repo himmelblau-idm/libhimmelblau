@@ -1043,9 +1043,10 @@ impl BrokerClientApplication {
         password: &str,
         scopes: Vec<&str>,
         id_key: &Rsa<Private>,
+        cert: &X509,
     ) -> Result<UserToken, MsalError> {
         let prt = self
-            .acquire_user_prt_by_username_password(username, password, id_key)
+            .acquire_user_prt_by_username_password(username, password, id_key, cert)
             .await?;
         let session_key = prt.session_key(id_key)?;
         self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
@@ -1102,9 +1103,10 @@ impl BrokerClientApplication {
         refresh_token: &str,
         scopes: Vec<&str>,
         id_key: &Rsa<Private>,
+        cert: &X509,
     ) -> Result<UserToken, MsalError> {
         let prt = self
-            .acquire_user_prt_by_refresh_token(refresh_token, id_key)
+            .acquire_user_prt_by_refresh_token(refresh_token, id_key, cert)
             .await?;
         let session_key = prt.session_key(id_key)?;
         self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
@@ -1176,10 +1178,11 @@ impl BrokerClientApplication {
         &self,
         username: &str,
         password: &str,
+        cert: Option<&X509>,
     ) -> Result<Jws, MsalError> {
         let nonce = self.request_nonce().await?;
 
-        Ok(JwsBuilder::from(
+        let mut builder = JwsBuilder::from(
             serde_json::to_vec(&UsernamePasswordAuthenticationPayload::new(
                 username, password, &nonce,
             ))
@@ -1187,8 +1190,15 @@ impl BrokerClientApplication {
                 MsalError::InvalidJson(format!("Failed serializing UsernamePassword JWT: {}", e))
             })?,
         )
-        .set_typ(Some("JWT"))
-        .build())
+        .set_typ(Some("JWT"));
+
+        if let Some(cert) = cert {
+            builder = builder.set_x5c(Some(vec![cert
+                .to_der()
+                .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?]));
+        }
+
+        Ok(builder.build())
     }
 
     /// Gets a Primary Refresh Token (PRT) via user credentials.
@@ -1215,7 +1225,7 @@ impl BrokerClientApplication {
         id_key: &IdentityKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         let jwt = self
-            .build_jwt_by_username_password(username, password)
+            .build_jwt_by_username_password(username, password, None)
             .await?;
         let signed_jwt = self.sign_jwt(&jwt, tpm, id_key).await?;
 
@@ -1242,19 +1252,24 @@ impl BrokerClientApplication {
         username: &str,
         password: &str,
         id_key: &Rsa<Private>,
+        cert: &X509,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         let jwt = self
-            .build_jwt_by_username_password(username, password)
+            .build_jwt_by_username_password(username, password, Some(cert))
             .await?;
         let signed_jwt = self.sign_jwt(&jwt, id_key).await?;
 
         self.acquire_user_prt_jwt(&signed_jwt).await
     }
 
-    async fn build_jwt_by_refresh_token(&self, refresh_token: &str) -> Result<Jws, MsalError> {
+    async fn build_jwt_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        cert: Option<&X509>,
+    ) -> Result<Jws, MsalError> {
         let nonce = self.request_nonce().await?;
 
-        Ok(JwsBuilder::from(
+        let mut builder = JwsBuilder::from(
             serde_json::to_vec(&RefreshTokenAuthenticationPayload::new(
                 refresh_token,
                 &nonce,
@@ -1263,8 +1278,15 @@ impl BrokerClientApplication {
                 MsalError::InvalidJson(format!("Failed serializing RefreshToken JWT: {}", e))
             })?,
         )
-        .set_typ(Some("JWT"))
-        .build())
+        .set_typ(Some("JWT"));
+
+        if let Some(cert) = cert {
+            builder = builder.set_x5c(Some(vec![cert
+                .to_der()
+                .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?]));
+        }
+
+        Ok(builder.build())
     }
 
     /// Gets a Primary Refresh Token (PRT) via a refresh token (RT) obtained
@@ -1288,7 +1310,7 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         id_key: &IdentityKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
-        let jwt = self.build_jwt_by_refresh_token(refresh_token).await?;
+        let jwt = self.build_jwt_by_refresh_token(refresh_token, None).await?;
         let signed_jwt = self.sign_jwt(&jwt, tpm, id_key).await?;
 
         self.acquire_user_prt_jwt(&signed_jwt).await
@@ -1312,8 +1334,11 @@ impl BrokerClientApplication {
         &self,
         refresh_token: &str,
         id_key: &Rsa<Private>,
+        cert: &X509,
     ) -> Result<PrimaryRefreshToken, MsalError> {
-        let jwt = self.build_jwt_by_refresh_token(refresh_token).await?;
+        let jwt = self
+            .build_jwt_by_refresh_token(refresh_token, Some(cert))
+            .await?;
         let signed_jwt = self.sign_jwt(&jwt, id_key).await?;
 
         self.acquire_user_prt_jwt(&signed_jwt).await
