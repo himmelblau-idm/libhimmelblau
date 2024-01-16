@@ -18,10 +18,7 @@ use compact_jwt::crypto::JwsRs256Signer;
 use compact_jwt::crypto::JwsTpmSigner;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-use compact_jwt::crypto::{JweRSAOAEPDecipher, MsOapxbcSessionKey};
-#[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
-use compact_jwt::jwe::Jwe;
+use compact_jwt::crypto::MsOapxbcSessionKey;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::jws::JwsBuilder;
@@ -381,8 +378,8 @@ pub struct PrimaryRefreshToken {
     session_key: JweCompact,
     #[serde(deserialize_with = "decode_id_token")]
     pub id_token: IdToken,
-    #[serde(deserialize_with = "decode_jwe")]
-    tgt_client_key: JweCompact,
+    /*#[serde(deserialize_with = "decode_jwe")]
+    tgt_client_key: JweCompact,*/
 }
 
 #[cfg(feature = "broker")]
@@ -396,7 +393,7 @@ impl PrimaryRefreshToken {
         Ok(client_key)
     }
 
-    pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
+    /*pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
         let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(id_key.clone())
             .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
         let tgt: Jwe = rsa_oaep_decipher
@@ -404,7 +401,7 @@ impl PrimaryRefreshToken {
             .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
 
         Ok(tgt.payload().to_vec())
-    }
+    }*/
 }
 
 struct ClientApplication {
