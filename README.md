@@ -43,21 +43,21 @@ let flow = app.initiate_device_flow(scope).await?;
 let token = app.acquire_token_by_device_flow(flow).await?;
 ```
 
-If msal is built with the `broker` feature, you can enroll the device, then request a PRT:
+If msal is built with the `broker` feature, you can enroll the device, then request an authentication token:
 
 ```Rust
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
 
 // First create an RSA2048 private key for enrolling the device.
-let id_key =
-    PKey::from_rsa(Rsa::generate(2048).expect("Failed generating 2048 bit RSA key"))
-        .expect("Failed generating 2048 bit RSA key");
+let id_key = Rsa::generate(2048).expect("Failed generating 2048 bit RSA key");
 
-let app = BrokerClientApplication::new(client_id, &authority);
+let app = BrokerClientApplication::new(Some(&authority));
 
 // Use the RSA2048 private key for enrollment. This private key now represents
 // your device during authentication.
-let (loadable_id_key, device_id) = app.enroll_device(username, password, domain, &id_key).await?;
-let prt = app.acquire_user_prt_by_username_password(username, password, &id_key).await?;
+let (cert, device_id) = app.enroll_device(username, password, domain, &id_key).await?;
+
+// Request an authentication token
+let token = app.acquire_token_by_username_password(username, password, scope, &id_key, &cert).await?;
 ```
