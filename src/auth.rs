@@ -2,31 +2,124 @@ use crate::error::{ErrorResponse, MsalError};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::{header, Client};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, Value};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
-#[doc(cfg(feature = "prt"))]
-use crate::enroll::register_device;
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::compact::JweCompact;
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+use compact_jwt::crypto::JwsRs256Signer;
+#[cfg(all(feature = "broker", feature = "tpm"))]
+#[doc(cfg(all(feature = "broker", feature = "tpm")))]
 use compact_jwt::crypto::JwsTpmSigner;
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::crypto::MsOapxbcSessionKey;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use compact_jwt::jws::JwsBuilder;
-#[doc(cfg(feature = "prt"))]
+#[cfg(all(feature = "broker", feature = "tpm"))]
+#[doc(cfg(all(feature = "broker", feature = "tpm")))]
 use compact_jwt::traits::JwsMutSigner;
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use compact_jwt::Jws;
-#[doc(cfg(feature = "prt"))]
-use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey, LoadableIdentityKey, MachineKey};
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::JwsSigner;
+#[cfg(all(feature = "broker", feature = "tpm"))]
+#[doc(cfg(all(feature = "broker", feature = "tpm")))]
+use kanidm_hsm_crypto::{BoxedDynTpm, IdentityKey, LoadableIdentityKey, MachineKey, Tpm};
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+use openssl::hash::MessageDigest;
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+use openssl::pkey::PKey;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use openssl::pkey::Private;
+#[cfg(all(feature = "broker", feature = "tpm"))]
+#[doc(cfg(all(feature = "broker", feature = "tpm")))]
+use openssl::pkey::Public;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use openssl::rsa::Rsa;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use openssl::x509::X509;
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+use openssl::x509::{X509NameBuilder, X509ReqBuilder};
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use os_release::OsRelease;
-#[doc(cfg(feature = "prt"))]
-use serde::Serialize;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use reqwest::Url;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use std::str::FromStr;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use tracing::debug;
 
-#[doc(cfg(feature = "prt"))]
+/* The following is permitted because Rsa<Private> is a superset of
+ * Rsa<Public>. */
+#[cfg(all(feature = "broker", feature = "tpm"))]
+#[doc(cfg(all(feature = "broker", feature = "tpm")))]
+type EnrollmentKey = Rsa<Public>;
+#[cfg(all(feature = "broker", not(feature = "tpm")))]
+#[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+type EnrollmentKey = Rsa<Private>;
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use crate::discovery::{
+    discover_enrollment_services, DISCOVERY_URL, DRS_CLIENT_NAME_HEADER_FIELD,
+    DRS_CLIENT_VERSION_HEADER_FIELD,
+};
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use base64::engine::general_purpose::{STANDARD, URL_SAFE};
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use serde_json::{json, to_string_pretty};
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+#[derive(Debug, Deserialize)]
+struct Certificate {
+    #[serde(rename = "RawBody")]
+    raw_body: String,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+#[derive(Debug, Deserialize)]
+struct DRSResponse {
+    #[serde(rename = "Certificate")]
+    certificate: Certificate,
+}
+
+#[derive(Serialize, Clone, Default)]
+struct JoinPayload {}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+pub const BROKER_APP_ID: &str = "29d9ed98-a469-4536-ade2-f981bc1d605e";
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
@@ -46,7 +139,7 @@ pub struct DeviceAuthorizationResponse {
 pub struct IdToken {
     pub name: String,
     pub oid: String,
-    pub preferred_username: String,
+    pub preferred_username: Option<String>,
     pub puid: Option<String>,
     pub tenant_region_scope: Option<String>,
     pub tid: String,
@@ -131,7 +224,8 @@ pub struct UserToken {
     pub client_info: ClientInfo,
 }
 
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default)]
 struct UsernamePasswordAuthenticationPayload {
     client_id: String,
@@ -143,7 +237,8 @@ struct UsernamePasswordAuthenticationPayload {
     password: String,
 }
 
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 impl UsernamePasswordAuthenticationPayload {
     fn new(username: &str, password: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -165,7 +260,8 @@ impl UsernamePasswordAuthenticationPayload {
     }
 }
 
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default)]
 struct RefreshTokenAuthenticationPayload {
     client_id: String,
@@ -176,7 +272,8 @@ struct RefreshTokenAuthenticationPayload {
     refresh_token: String,
 }
 
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 impl RefreshTokenAuthenticationPayload {
     fn new(refresh_token: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -197,20 +294,114 @@ impl RefreshTokenAuthenticationPayload {
     }
 }
 
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+#[derive(Serialize, Clone, Default)]
+struct ExchangePRTPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iat: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exp: Option<i64>,
+    client_id: String,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
+    grant_type: String,
+    refresh_token: String,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl ExchangePRTPayload {
+    fn new(
+        prt: &PrimaryRefreshToken,
+        scope: &[&str],
+        resource: Option<String>,
+    ) -> Result<Self, MsalError> {
+        let (iat, exp): (Option<i64>, Option<i64>) =
+            match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(now) => match now.as_secs().try_into() {
+                    Ok(iat) => (Some(iat), Some(iat + 300)),
+                    Err(e) => {
+                        return Err(MsalError::GeneralFailure(format!(
+                            "Failed choosing iat and exp: {}",
+                            e
+                        )));
+                    }
+                },
+                Err(e) => {
+                    return Err(MsalError::GeneralFailure(format!(
+                        "Failed choosing iat and exp: {}",
+                        e
+                    )))
+                }
+            };
+        Ok(ExchangePRTPayload {
+            iat,
+            exp,
+            client_id: BROKER_CLIENT_IDENT.to_string(),
+            scope: format!("openid {}", scope.join(" ")),
+            resource,
+            grant_type: "refresh_token".to_string(),
+            refresh_token: prt.refresh_token.clone(),
+        })
+    }
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 #[derive(Debug, Deserialize)]
 struct Nonce {
     #[serde(rename = "Nonce")]
     nonce: String,
 }
 
-#[doc(cfg(feature = "prt"))]
-#[derive(Debug, Clone, Deserialize)]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+fn decode_jwe<'de, D>(d: D) -> Result<JweCompact, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(d)?;
+    Ok(JweCompact::from_str(&s)
+        .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))?)
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+#[derive(Clone, Deserialize)]
 pub struct PrimaryRefreshToken {
     pub refresh_token: String,
     pub refresh_token_expires_in: u64,
-    pub session_key_jwe: String,
-    pub id_token: String,
+    #[serde(rename = "session_key_jwe")]
+    #[serde(deserialize_with = "decode_jwe")]
+    session_key: JweCompact,
+    #[serde(deserialize_with = "decode_id_token")]
+    pub id_token: IdToken,
+    /*#[serde(deserialize_with = "decode_jwe")]
+    tgt_client_key: JweCompact,*/
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl PrimaryRefreshToken {
+    pub fn session_key(&self, id_key: &Rsa<Private>) -> Result<MsOapxbcSessionKey, MsalError> {
+        let client_key =
+            MsOapxbcSessionKey::complete_rsa_oaep_key_agreement(id_key.clone(), &self.session_key)
+                .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
+
+        Ok(client_key)
+    }
+
+    /*pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
+        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(id_key.clone())
+            .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
+        let tgt: Jwe = rsa_oaep_decipher
+            .decipher(&self.tgt_client_key)
+            .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
+
+        Ok(tgt.payload().to_vec())
+    }*/
 }
 
 struct ClientApplication {
@@ -510,27 +701,34 @@ impl PublicClientApplication {
     }
 }
 
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 pub struct BrokerClientApplication {
-    app: PublicClientApplication,
+    app: ClientApplication,
 }
 
-#[doc(cfg(feature = "prt"))]
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 impl BrokerClientApplication {
     /// Create an instance of an application.
     ///
     /// # Arguments
     ///
-    /// * `client_id` - Your app has a client_id after you register it on
-    ///   AAD.
-    ///
     /// * `authority` - A URL that identifies a token authority. It should
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
-    pub fn new(client_id: &str, authority: Option<&str>) -> Self {
+    pub fn new(authority: Option<&str>) -> Self {
         BrokerClientApplication {
-            app: PublicClientApplication::new(client_id, authority),
+            app: ClientApplication::new(BROKER_APP_ID, authority),
         }
+    }
+
+    fn client(&self) -> &Client {
+        &self.app.client
+    }
+
+    fn authority(&self) -> &str {
+        &self.app.authority
     }
 
     /// Enroll the device in the directory.
@@ -547,14 +745,15 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `id_key` - A LoadableIdentityKey which will be used to create the CSR
-    ///   for enrolling the device.
+    /// * `loadable_id_key` - A LoadableIdentityKey which will be used to
+    ///   create the CSR and transport key for enrolling the device.
     ///
     /// # Returns
     ///
     /// * Success: The `id_key` (which has been loaded with a signed
     ///   certificate), and a `device_id`.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "tpm")]
     pub async fn enroll_device(
         &self,
         username: &str,
@@ -562,12 +761,252 @@ impl BrokerClientApplication {
         domain: &str,
         machine_key: &MachineKey,
         tpm: &mut BoxedDynTpm,
-        id_key: &LoadableIdentityKey,
+        loadable_id_key: &LoadableIdentityKey,
     ) -> Result<(LoadableIdentityKey, String), MsalError> {
         let token = self
             .acquire_token_for_device_enrollment(username, password)
             .await?;
-        register_device(&token.access_token, domain, machine_key, tpm, id_key).await
+
+        // Create the CSR
+        let csr_der = match tpm.identity_key_certificate_request(
+            machine_key,
+            loadable_id_key,
+            "7E980AD9-B86D-4306-9425-9AC066FB014A",
+        ) {
+            Ok(csr_der) => csr_der,
+            Err(e) => return Err(MsalError::TPMFail(format!("Failed creating CSR: {:?}", e))),
+        };
+
+        // Load the transport key
+        let id_key = match tpm.identity_key_load(machine_key, loadable_id_key) {
+            Ok(id_key) => id_key,
+            Err(e) => {
+                return Err(MsalError::TPMFail(format!(
+                    "Failed loading id key: {:?}",
+                    e
+                )))
+            }
+        };
+        let transport_key_der = match tpm.identity_key_public_as_der(&id_key) {
+            Ok(transport_key_pem) => transport_key_pem,
+            Err(e) => {
+                return Err(MsalError::TPMFail(format!(
+                    "Failed getting transport key as der: {:?}",
+                    e
+                )))
+            }
+        };
+        let transport_key_rsa = Rsa::public_key_from_der(&transport_key_der)
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        let (cert, device_id) = self
+            .enroll_device_internal(&token.access_token, domain, &transport_key_rsa, &csr_der)
+            .await?;
+
+        let new_loadable_id_key = match tpm.identity_key_associate_certificate(
+            machine_key,
+            loadable_id_key,
+            &cert
+                .to_der()
+                .map_err(|e| MsalError::TPMFail(format!("{}", e)))?,
+        ) {
+            Ok(loadable_id_key) => loadable_id_key,
+            Err(e) => {
+                return Err(MsalError::TPMFail(format!(
+                    "Failed creating loadable identity key: {:?}",
+                    e
+                )))
+            }
+        };
+
+        Ok((new_loadable_id_key, device_id.to_string()))
+    }
+
+    /// Enroll the device in the directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `domain` - The domain the device is to be enrolled in.
+    ///
+    /// * `id_key` - An RSA private key which will be used to
+    ///   create the CSR and transport key for enrolling the device.
+    ///
+    /// # Returns
+    ///
+    /// * Success: An x509 certificate signed during enrollment, and a
+    ///   `device_id`.
+    /// * Failure: An MsalError, indicating the failure.
+    #[cfg(not(feature = "tpm"))]
+    #[doc(cfg(not(feature = "tpm")))]
+    pub async fn enroll_device(
+        &self,
+        username: &str,
+        password: &str,
+        domain: &str,
+        id_key: &Rsa<Private>,
+    ) -> Result<(X509, String), MsalError> {
+        let token = self
+            .acquire_token_for_device_enrollment(username, password)
+            .await?;
+
+        let mut req_builder =
+            X509ReqBuilder::new().map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        let mut x509_name =
+            X509NameBuilder::new().map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        x509_name
+            .append_entry_by_text("CN", "7E980AD9-B86D-4306-9425-9AC066FB014A")
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        let x509_name = x509_name.build();
+        req_builder
+            .set_subject_name(&x509_name)
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        let id_pkey =
+            PKey::from_rsa(id_key.clone()).map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+        req_builder
+            .set_pubkey(&id_pkey)
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        req_builder
+            .sign(&id_pkey, MessageDigest::sha256())
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        let csr_der = req_builder
+            .build()
+            .to_der()
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+
+        self.enroll_device_internal(&token.access_token, domain, id_key, &csr_der)
+            .await
+    }
+
+    async fn enroll_device_internal(
+        &self,
+        access_token: &str,
+        domain: &str,
+        transport_key: &EnrollmentKey,
+        csr_der: &Vec<u8>,
+    ) -> Result<(X509, String), MsalError> {
+        let enrollment_services =
+            discover_enrollment_services(&self.client(), access_token, domain).await?;
+        let (join_endpoint, service_version) = match enrollment_services.device_join_service {
+            Some(device_join_service) => {
+                let join_endpoint = match device_join_service.endpoint {
+                    Some(join_endpoint) => join_endpoint,
+                    None => format!("{}/EnrollmentServer/device/", DISCOVERY_URL).to_string(),
+                };
+                let service_version = match device_join_service.service_version {
+                    Some(service_version) => service_version,
+                    None => "2.0".to_string(),
+                };
+                (join_endpoint, service_version)
+            }
+            None => (
+                format!("{}/EnrollmentServer/device/", DISCOVERY_URL).to_string(),
+                "2.0".to_string(),
+            ),
+        };
+
+        let url = Url::parse_with_params(&join_endpoint, &[("api-version", service_version)])
+            .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+
+        let host: String = match hostname::get()
+            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+            .to_str()
+        {
+            Some(host) => String::from(host),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "Failed to get machine hostname for enrollment".to_string(),
+                ))
+            }
+        };
+
+        let os_release =
+            OsRelease::new().map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+
+        let transport_key_der = transport_key
+            .public_key_to_der()
+            .map_err(|e| MsalError::DeviceEnrollmentFail(format!("{}", e)))?;
+        let jwk = json!({
+            "kty": "RSA",
+            "kid": Uuid::new_v4(),
+            "e": URL_SAFE_NO_PAD.encode(transport_key.e().to_vec()),
+            "n": URL_SAFE_NO_PAD.encode(transport_key_der)
+        });
+        let encoded_stk = URL_SAFE.encode(jwk.to_string());
+
+        let payload = json!({
+            "CertificateRequest": {
+                "Type": "pkcs10",
+                "Data": STANDARD.encode(csr_der)
+            },
+            "DeviceDisplayName": host,
+            "DeviceType": "Linux",
+            "JoinType": 0,
+            "OSVersion": format!("{} {}", os_release.pretty_name, os_release.version_id),
+            "TargetDomain": domain,
+            "TransportKey": encoded_stk,
+            "Attributes": {
+                "ReuseDevice": "true",
+                "ReturnClientSid": "true"
+            }
+        });
+        if let Ok(pretty) = to_string_pretty(&payload) {
+            debug!("POST {}: {}", url, pretty);
+        }
+        let resp = self
+            .client()
+            .post(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(DRS_CLIENT_NAME_HEADER_FIELD, env!("CARGO_PKG_NAME"))
+            .header(DRS_CLIENT_VERSION_HEADER_FIELD, env!("CARGO_PKG_VERSION"))
+            .header(header::ACCEPT, "application/json, text/plain, */*")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let res: DRSResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            let cert = X509::from_pem(
+                format!(
+                    "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
+                    res.certificate.raw_body
+                )
+                .as_bytes(),
+            )
+            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+            let subject_name = cert.subject_name();
+            let device_id = match subject_name.entries().next() {
+                Some(entry) => entry
+                    .data()
+                    .as_utf8()
+                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+                None => {
+                    return Err(MsalError::GeneralFailure(
+                        "The device id was missing from the certificate response".to_string(),
+                    ))
+                }
+            };
+            Ok((cert, device_id.to_string()))
+        } else {
+            Err(MsalError::GeneralFailure(
+                resp.text()
+                    .await
+                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+            ))
+        }
     }
 
     /// Gets a token for a given resource via user credentials.
@@ -580,17 +1019,86 @@ impl BrokerClientApplication {
     ///
     /// * `scopes` - Scopes requested to access a protected API (a resource).
     ///
+    /// * `id_key` - The private key used during device enrollment.
+    ///
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(not(feature = "tpm"))]
+    #[doc(cfg(not(feature = "tpm")))]
     pub async fn acquire_token_by_username_password(
         &self,
         username: &str,
         password: &str,
         scopes: Vec<&str>,
+        id_key: &Rsa<Private>,
+        cert: &X509,
     ) -> Result<UserToken, MsalError> {
-        self.app
-            .acquire_token_by_username_password(username, password, scopes)
+        let prt = self
+            .acquire_user_prt_by_username_password(username, password, id_key, cert)
+            .await?;
+        let session_key = prt.session_key(id_key)?;
+        self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
+            .await
+    }
+
+    /// Gets a token for a given resource via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - The identity key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "tpm")]
+    #[doc(cfg(feature = "tpm"))]
+    pub async fn acquire_token_by_username_password(
+        &self,
+        _username: &str,
+        _password: &str,
+        _scopes: Vec<&str>,
+        _tpm: &mut BoxedDynTpm,
+        _id_key: &IdentityKey,
+    ) -> Result<UserToken, MsalError> {
+        Err(MsalError::NotImplemented)
+    }
+
+    /// Acquire token(s) based on a refresh token (RT) obtained from elsewhere.
+    ///
+    /// # Arguments
+    ///
+    /// * `refresh_token` - The old refresh token, as a string.
+    ///
+    /// * `scopes` - The scopes associated with this old RT.
+    ///
+    /// * `id_key` - The private key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A UserToken, which means migration was successful.
+    /// * Failure: An MsalError, indicating the failure.
+    #[cfg(not(feature = "tpm"))]
+    #[doc(cfg(not(feature = "tpm")))]
+    pub async fn acquire_token_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        scopes: Vec<&str>,
+        id_key: &Rsa<Private>,
+        cert: &X509,
+    ) -> Result<UserToken, MsalError> {
+        let prt = self
+            .acquire_user_prt_by_refresh_token(refresh_token, id_key, cert)
+            .await?;
+        let session_key = prt.session_key(id_key)?;
+        self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
             .await
     }
 
@@ -602,37 +1110,23 @@ impl BrokerClientApplication {
     ///
     /// * `scopes` - The scopes associated with this old RT.
     ///
-    /// # Returns
+    /// * `tpm` - The tpm object.
     ///
+    /// * `id_key` - The identity key used during device enrollment.
+    ///
+    /// # Returns
     /// * Success: A UserToken, which means migration was successful.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "tpm")]
+    #[doc(cfg(feature = "tpm"))]
     pub async fn acquire_token_by_refresh_token(
         &self,
-        refresh_token: &str,
-        scopes: Vec<&str>,
+        _refresh_token: &str,
+        _scopes: Vec<&str>,
+        _tpm: &mut BoxedDynTpm,
+        _id_key: &IdentityKey,
     ) -> Result<UserToken, MsalError> {
-        self.app
-            .acquire_token_by_refresh_token(refresh_token, scopes)
-            .await
-    }
-
-    /// Initiate a Device Flow instance, which will be used in
-    /// acquire_token_by_device_flow.
-    ///
-    /// # Arguments
-    ///
-    /// * `scopes` - Scopes requested to access a protected API (a resource).
-    ///
-    /// # Returns
-    ///
-    /// * Success: A DeviceAuthorizationResponse containing a user_code key,
-    ///   among others
-    /// * Failure: An MsalError, indicating the failure.
-    pub async fn initiate_device_flow(
-        &self,
-        scopes: Vec<&str>,
-    ) -> Result<DeviceAuthorizationResponse, MsalError> {
-        self.app.initiate_device_flow(scopes).await
+        Err(MsalError::NotImplemented)
     }
 
     async fn acquire_token_for_device_enrollment(
@@ -646,29 +1140,10 @@ impl BrokerClientApplication {
             .await
     }
 
-    /// Obtain token by a device flow object, with customizable polling effect.
-    ///
-    /// # Arguments
-    ///
-    /// * `flow` - A DeviceAuthorizationResponse previously generated by
-    /// initiate_device_flow.
-    ///
-    /// # Returns
-    ///
-    /// * Success: A UserToken containing an access_token.
-    /// * Failure: An MsalError, indicating the failure.
-    pub async fn acquire_token_by_device_flow(
-        &self,
-        flow: DeviceAuthorizationResponse,
-    ) -> Result<UserToken, MsalError> {
-        self.app.acquire_token_by_device_flow(flow).await
-    }
-
     async fn request_nonce(&self) -> Result<String, MsalError> {
         let resp = self
-            .app
             .client()
-            .post(format!("{}/oauth2/token", self.app.authority()))
+            .post(format!("{}/oauth2/token", self.authority()))
             .body("grant_type=srv_challenge")
             .send()
             .await
@@ -688,6 +1163,33 @@ impl BrokerClientApplication {
         }
     }
 
+    async fn build_jwt_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        cert: Option<&X509>,
+    ) -> Result<Jws, MsalError> {
+        let nonce = self.request_nonce().await?;
+
+        let mut builder = JwsBuilder::from(
+            serde_json::to_vec(&UsernamePasswordAuthenticationPayload::new(
+                username, password, &nonce,
+            ))
+            .map_err(|e| {
+                MsalError::InvalidJson(format!("Failed serializing UsernamePassword JWT: {}", e))
+            })?,
+        )
+        .set_typ(Some("JWT"));
+
+        if let Some(cert) = cert {
+            builder = builder.set_x5c(Some(vec![cert
+                .to_der()
+                .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?]));
+        }
+
+        Ok(builder.build())
+    }
+
     /// Gets a Primary Refresh Token (PRT) via user credentials.
     ///
     /// # Arguments
@@ -703,6 +1205,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "tpm")]
     pub async fn acquire_user_prt_by_username_password(
         &self,
         username: &str,
@@ -710,24 +1213,15 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         id_key: &IdentityKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
-        let nonce = self.request_nonce().await?;
+        let jwt = self
+            .build_jwt_by_username_password(username, password, None)
+            .await?;
+        let signed_jwt = self.sign_jwt(&jwt, tpm, id_key).await?;
 
-        let jwt = JwsBuilder::from(
-            serde_json::to_vec(&UsernamePasswordAuthenticationPayload::new(
-                username, password, &nonce,
-            ))
-            .map_err(|e| {
-                MsalError::InvalidJson(format!("Failed serializing UsernamePassword JWT: {}", e))
-            })?,
-        )
-        .set_typ(Some("JWT"))
-        .build();
-
-        self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
+        self.acquire_user_prt_jwt(&signed_jwt).await
     }
 
-    /// Gets a Primary Refresh Token (PRT) via a refresh token (RT) obtained
-    /// previously.
+    /// Gets a Primary Refresh Token (PRT) via user credentials.
     ///
     /// # Arguments
     ///
@@ -735,22 +1229,36 @@ impl BrokerClientApplication {
     ///
     /// * `password` - The password.
     ///
-    /// * `tpm` - The tpm object.
-    ///
-    /// * `id_key` - The identity key used during device enrollment.
+    /// * `id_key` - The private key used during device enrollment.
     ///
     /// # Returns
     /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
-    pub async fn acquire_user_prt_by_refresh_token(
+    #[cfg(not(feature = "tpm"))]
+    #[doc(cfg(not(feature = "tpm")))]
+    pub async fn acquire_user_prt_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        id_key: &Rsa<Private>,
+        cert: &X509,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        let jwt = self
+            .build_jwt_by_username_password(username, password, Some(cert))
+            .await?;
+        let signed_jwt = self.sign_jwt(&jwt, id_key).await?;
+
+        self.acquire_user_prt_jwt(&signed_jwt).await
+    }
+
+    async fn build_jwt_by_refresh_token(
         &self,
         refresh_token: &str,
-        tpm: &mut BoxedDynTpm,
-        id_key: &IdentityKey,
-    ) -> Result<PrimaryRefreshToken, MsalError> {
+        cert: Option<&X509>,
+    ) -> Result<Jws, MsalError> {
         let nonce = self.request_nonce().await?;
 
-        let jwt = JwsBuilder::from(
+        let mut builder = JwsBuilder::from(
             serde_json::to_vec(&RefreshTokenAuthenticationPayload::new(
                 refresh_token,
                 &nonce,
@@ -759,19 +1267,79 @@ impl BrokerClientApplication {
                 MsalError::InvalidJson(format!("Failed serializing RefreshToken JWT: {}", e))
             })?,
         )
-        .set_typ(Some("JWT"))
-        .build();
+        .set_typ(Some("JWT"));
 
-        self.acquire_user_prt_jwt(&jwt, tpm, id_key).await
+        if let Some(cert) = cert {
+            builder = builder.set_x5c(Some(vec![cert
+                .to_der()
+                .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?]));
+        }
+
+        Ok(builder.build())
     }
 
-    async fn acquire_user_prt_jwt(
+    /// Gets a Primary Refresh Token (PRT) via a refresh token (RT) obtained
+    /// previously.
+    ///
+    /// # Arguments
+    ///
+    /// * `refresh_token` - The old refresh token, as a string.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `id_key` - The identity key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
+    /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "tpm")]
+    pub async fn acquire_user_prt_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        tpm: &mut BoxedDynTpm,
+        id_key: &IdentityKey,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        let jwt = self.build_jwt_by_refresh_token(refresh_token, None).await?;
+        let signed_jwt = self.sign_jwt(&jwt, tpm, id_key).await?;
+
+        self.acquire_user_prt_jwt(&signed_jwt).await
+    }
+
+    /// Gets a Primary Refresh Token (PRT) via a refresh token (RT) obtained
+    /// previously.
+    ///
+    /// # Arguments
+    ///
+    /// * `refresh_token` - The old refresh token, as a string.
+    ///
+    /// * `id_key` - The private key used during device enrollment.
+    ///
+    /// # Returns
+    /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
+    /// * Failure: An MsalError, indicating the failure.
+    #[cfg(not(feature = "tpm"))]
+    #[doc(cfg(not(feature = "tpm")))]
+    pub async fn acquire_user_prt_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        id_key: &Rsa<Private>,
+        cert: &X509,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        let jwt = self
+            .build_jwt_by_refresh_token(refresh_token, Some(cert))
+            .await?;
+        let signed_jwt = self.sign_jwt(&jwt, id_key).await?;
+
+        self.acquire_user_prt_jwt(&signed_jwt).await
+    }
+
+    #[cfg(feature = "tpm")]
+    async fn sign_jwt(
         &self,
         jwt: &Jws,
         tpm: &mut BoxedDynTpm,
         id_key: &IdentityKey,
-    ) -> Result<PrimaryRefreshToken, MsalError> {
-        // [MS-OAPXBC] 3.2.5.1.2 POST (Request for Primary Refresh Token)
+    ) -> Result<String, MsalError> {
         let mut jws_tpm_signer = match JwsTpmSigner::new(tpm, id_key) {
             Ok(jws_tpm_signer) => jws_tpm_signer,
             Err(e) => {
@@ -787,10 +1355,42 @@ impl BrokerClientApplication {
             Err(e) => return Err(MsalError::TPMFail(format!("Failed signing jwk: {}", e))),
         };
 
+        Ok(format!("{}", signed_jwt))
+    }
+
+    #[cfg(not(feature = "tpm"))]
+    async fn sign_jwt(&self, jwt: &Jws, id_key: &Rsa<Private>) -> Result<String, MsalError> {
+        let jws_rs256_signer = match JwsRs256Signer::from_rs256_der(
+            &id_key
+                .private_key_to_der()
+                .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?,
+        ) {
+            Ok(jws_rs256_signer) => jws_rs256_signer,
+            Err(e) => {
+                return Err(MsalError::CryptoFail(format!(
+                    "Failed loading rs256 signer: {}",
+                    e
+                )))
+            }
+        };
+
+        let signed_jwt = match jws_rs256_signer.sign(jwt) {
+            Ok(signed_jwt) => signed_jwt,
+            Err(e) => return Err(MsalError::CryptoFail(format!("Failed signing jwk: {}", e))),
+        };
+
+        Ok(format!("{}", signed_jwt))
+    }
+
+    async fn acquire_user_prt_jwt(
+        &self,
+        signed_jwt: &str,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        // [MS-OAPXBC] 3.2.5.1.2 POST (Request for Primary Refresh Token)
         let params = [
             ("windows_api_version", "2.0"),
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("request", &format!("{}", signed_jwt)),
+            ("request", &signed_jwt),
             ("client_info", "1"),
             ("tgt", "true"),
         ];
@@ -801,9 +1401,8 @@ impl BrokerClientApplication {
             .join("&");
 
         let resp = self
-            .app
             .client()
-            .post(format!("{}/oauth2/token", self.app.authority()))
+            .post(format!("{}/oauth2/token", self.authority()))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
@@ -815,6 +1414,86 @@ impl BrokerClientApplication {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Ok(json_resp)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    async fn sign_exchange_jwt(
+        &self,
+        jwt: &Jws,
+        session_key: &MsOapxbcSessionKey,
+    ) -> Result<String, MsalError> {
+        let signed_jwt = match session_key.sign(jwt) {
+            Ok(signed_jwt) => signed_jwt,
+            Err(e) => return Err(MsalError::CryptoFail(format!("Failed signing jwk: {}", e))),
+        };
+
+        Ok(format!("{}", signed_jwt))
+    }
+
+    /// Given the primary refresh token, this method requests an access token.
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` -  A primary refresh token that was previously received from
+    ///   the server.
+    ///
+    /// * `scope` - The scope that the client requests for the access token.
+    ///
+    /// * `resource` - The resource for which the access token is requested.
+    ///
+    /// * `session_key` - The session key deciphered from the PRT
+    ///   session_key_jwe property. See `prt.session_key(id_key)`.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn exchange_prt_for_access_token(
+        &self,
+        prt: &PrimaryRefreshToken,
+        scope: Vec<&str>,
+        resource: Option<String>,
+        session_key: &MsOapxbcSessionKey,
+    ) -> Result<UserToken, MsalError> {
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)).map_err(|e| {
+                MsalError::InvalidJson(format!("Failed serializing ExchangePRT JWT: {}", e))
+            })?,
+        )
+        .set_typ(Some("JWT"))
+        .build();
+        let signed_jwt = self.sign_exchange_jwt(&jwt, session_key).await?;
+
+        let params = [
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("request", &signed_jwt),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post(format!("{}/oauth2/token", self.authority()))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+            Ok(token)
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
