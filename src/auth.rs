@@ -701,6 +701,62 @@ impl PublicClientApplication {
     }
 }
 
+pub struct EnrollAttrs {
+    device_display_name: String,
+    device_type: String,
+    join_type: u32,
+    os_version: String,
+    target_domain: String,
+}
+
+impl EnrollAttrs {
+    pub fn new(
+        target_domain: String,
+        device_display_name: Option<String>,
+        device_type: Option<String>,
+        join_type: Option<u32>,
+        os_version: Option<String>,
+    ) -> Result<Self, MsalError> {
+        let device_display_name_int = match device_display_name {
+            Some(device_display_name) => device_display_name,
+            None => match hostname::get()
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+                .to_str()
+            {
+                Some(host) => String::from(host),
+                None => {
+                    return Err(MsalError::GeneralFailure(
+                        "Failed to get machine hostname for enrollment".to_string(),
+                    ))
+                }
+            },
+        };
+        let device_type_int = match device_type {
+            Some(device_type) => device_type,
+            None => "Linux".to_string(),
+        };
+        let join_type_int = match join_type {
+            Some(join_type) => join_type,
+            None => 0,
+        };
+        let os_version_int = match os_version {
+            Some(os_version) => os_version,
+            None => {
+                let os_release =
+                    OsRelease::new().map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+                format!("{} {}", os_release.pretty_name, os_release.version_id)
+            }
+        };
+        Ok(EnrollAttrs {
+            device_display_name: device_display_name_int,
+            device_type: device_type_int,
+            join_type: join_type_int,
+            os_version: os_version_int,
+            target_domain,
+        })
+    }
+}
+
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 pub struct BrokerClientApplication {
@@ -758,7 +814,7 @@ impl BrokerClientApplication {
         &self,
         username: &str,
         password: &str,
-        domain: &str,
+        attrs: EnrollAttrs,
         machine_key: &MachineKey,
         tpm: &mut BoxedDynTpm,
         loadable_id_key: &LoadableIdentityKey,
@@ -800,7 +856,7 @@ impl BrokerClientApplication {
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
         let (cert, device_id) = self
-            .enroll_device_internal(&token.access_token, domain, &transport_key_rsa, &csr_der)
+            .enroll_device_internal(&token.access_token, attrs, &transport_key_rsa, &csr_der)
             .await?;
 
         let new_loadable_id_key = match tpm.identity_key_associate_certificate(
@@ -846,7 +902,7 @@ impl BrokerClientApplication {
         &self,
         username: &str,
         password: &str,
-        domain: &str,
+        attrs: EnrollAttrs,
         id_key: &Rsa<Private>,
     ) -> Result<(X509, String), MsalError> {
         let token = self
@@ -883,19 +939,20 @@ impl BrokerClientApplication {
             .to_der()
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
-        self.enroll_device_internal(&token.access_token, domain, id_key, &csr_der)
+        self.enroll_device_internal(&token.access_token, attrs, id_key, &csr_der)
             .await
     }
 
     async fn enroll_device_internal(
         &self,
         access_token: &str,
-        domain: &str,
+        attrs: EnrollAttrs,
         transport_key: &EnrollmentKey,
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
         let enrollment_services =
-            discover_enrollment_services(&self.client(), access_token, domain).await?;
+            discover_enrollment_services(&self.client(), access_token, &attrs.target_domain)
+                .await?;
         let (join_endpoint, service_version) = match enrollment_services.device_join_service {
             Some(device_join_service) => {
                 let join_endpoint = match device_join_service.endpoint {
@@ -917,21 +974,6 @@ impl BrokerClientApplication {
         let url = Url::parse_with_params(&join_endpoint, &[("api-version", service_version)])
             .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
 
-        let host: String = match hostname::get()
-            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
-            .to_str()
-        {
-            Some(host) => String::from(host),
-            None => {
-                return Err(MsalError::GeneralFailure(
-                    "Failed to get machine hostname for enrollment".to_string(),
-                ))
-            }
-        };
-
-        let os_release =
-            OsRelease::new().map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
-
         let transport_key_der = transport_key
             .public_key_to_der()
             .map_err(|e| MsalError::DeviceEnrollmentFail(format!("{}", e)))?;
@@ -948,11 +990,11 @@ impl BrokerClientApplication {
                 "Type": "pkcs10",
                 "Data": STANDARD.encode(csr_der)
             },
-            "DeviceDisplayName": host,
-            "DeviceType": "Linux",
-            "JoinType": 0,
-            "OSVersion": format!("{} {}", os_release.pretty_name, os_release.version_id),
-            "TargetDomain": domain,
+            "DeviceDisplayName": attrs.device_display_name,
+            "DeviceType": attrs.device_type,
+            "JoinType": attrs.join_type,
+            "OSVersion": attrs.os_version,
+            "TargetDomain": attrs.target_domain,
             "TransportKey": encoded_stk,
             "Attributes": {
                 "ReuseDevice": "true",
