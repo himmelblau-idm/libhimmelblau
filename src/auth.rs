@@ -88,7 +88,7 @@ use crate::discovery::{
 };
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-use base64::engine::general_purpose::{STANDARD, URL_SAFE};
+use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use serde_json::{json, to_string_pretty};
@@ -757,6 +757,26 @@ impl EnrollAttrs {
     }
 }
 
+fn ms_cng_blob(exponent: &Vec<u8>, modulus: &Vec<u8>) -> Result<Vec<u8>, MsalError> {
+    let mut cng_blob = b"RSA1".to_vec();
+    let magic: [u8; 7] = *b"\x00\x08\x00\x00\x03\x00\x00";
+    cng_blob.extend_from_slice(&magic);
+    let key_len: u32 = modulus
+        .len()
+        .try_into()
+        .map_err(|e| MsalError::GeneralFailure(format!("Key len into u32 failed{:?}", e)))?;
+    cng_blob.extend_from_slice(&key_len.to_be_bytes());
+    let reserved: [u8; 9] = *b"\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    cng_blob.extend_from_slice(&reserved);
+    let e: [u8; 3] = exponent
+        .as_slice()
+        .try_into()
+        .map_err(|e| MsalError::GeneralFailure(format!("Exponent from slice failed {:?}", e)))?;
+    cng_blob.extend_from_slice(&e);
+    cng_blob.extend_from_slice(modulus.as_slice());
+    Ok(cng_blob)
+}
+
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 pub struct BrokerClientApplication {
@@ -974,16 +994,8 @@ impl BrokerClientApplication {
         let url = Url::parse_with_params(&join_endpoint, &[("api-version", service_version)])
             .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
 
-        let transport_key_der = transport_key
-            .public_key_to_der()
-            .map_err(|e| MsalError::DeviceEnrollmentFail(format!("{}", e)))?;
-        let jwk = json!({
-            "kty": "RSA",
-            "kid": Uuid::new_v4(),
-            "e": URL_SAFE_NO_PAD.encode(transport_key.e().to_vec()),
-            "n": URL_SAFE_NO_PAD.encode(transport_key_der)
-        });
-        let encoded_stk = URL_SAFE.encode(jwk.to_string());
+        let transport_key_blob =
+            ms_cng_blob(&transport_key.e().to_vec(), &transport_key.n().to_vec())?;
 
         let payload = json!({
             "CertificateRequest": {
@@ -995,7 +1007,7 @@ impl BrokerClientApplication {
             "JoinType": attrs.join_type,
             "OSVersion": attrs.os_version,
             "TargetDomain": attrs.target_domain,
-            "TransportKey": encoded_stk,
+            "TransportKey": STANDARD.encode(transport_key_blob),
             "Attributes": {
                 "ReuseDevice": "true",
                 "ReturnClientSid": "true"
