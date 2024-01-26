@@ -1580,7 +1580,7 @@ impl BrokerClientApplication {
         session_key: &MsOapxbcSessionKey,
     ) -> Result<UserToken, MsalError> {
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)).map_err(|e| {
+            serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)?).map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing ExchangePRT JWT: {}", e))
             })?,
         )
