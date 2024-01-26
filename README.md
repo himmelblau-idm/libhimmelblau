@@ -54,9 +54,14 @@ let id_key = Rsa::generate(2048).expect("Failed generating 2048 bit RSA key");
 
 let app = BrokerClientApplication::new(Some(&authority));
 
+// Obtain a token for authentication. If authenticating here without MFA, the PRT and
+// user token will not have the mfa claim. Use initiate_device_flow_for_device_enrollment()
+// and acquire_token_by_device_flow() to authenticate with the
+// mfa claim.
+let token = app.acquire_token_by_username_password_for_device_enrollment(username, password).await?;
 // Use the RSA2048 private key for enrollment. This private key now represents
 // your device during authentication.
-let (cert, device_id) = app.enroll_device(username, password, domain, &id_key).await?;
+let (cert, device_id) = app.enroll_device(&token, domain, &id_key).await?;
 
 // Request an authentication token
 let token = app.acquire_token_by_username_password(username, password, scope, &id_key, &cert).await?;
