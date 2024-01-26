@@ -63,6 +63,9 @@ use os_release::OsRelease;
 use reqwest::Url;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+use std::convert::TryInto;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use std::str::FromStr;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -757,24 +760,54 @@ impl EnrollAttrs {
     }
 }
 
-fn ms_cng_blob(exponent: &Vec<u8>, modulus: &Vec<u8>) -> Result<Vec<u8>, MsalError> {
-    let mut cng_blob = b"RSA1".to_vec();
-    let magic: [u8; 7] = *b"\x00\x08\x00\x00\x03\x00\x00";
-    cng_blob.extend_from_slice(&magic);
-    let key_len: u32 = modulus
-        .len()
-        .try_into()
-        .map_err(|e| MsalError::GeneralFailure(format!("Key len into u32 failed{:?}", e)))?;
-    cng_blob.extend_from_slice(&key_len.to_be_bytes());
-    let reserved: [u8; 9] = *b"\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-    cng_blob.extend_from_slice(&reserved);
-    let e: [u8; 3] = exponent
-        .as_slice()
-        .try_into()
-        .map_err(|e| MsalError::GeneralFailure(format!("Exponent from slice failed {:?}", e)))?;
-    cng_blob.extend_from_slice(&e);
-    cng_blob.extend_from_slice(modulus.as_slice());
-    Ok(cng_blob)
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+struct BcryptRsaKeyBlob {
+    bit_length: u32,
+    exponent: Vec<u8>,
+    modulus: Vec<u8>,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl BcryptRsaKeyBlob {
+    fn new(bit_length: u32, exponent: &[u8], modulus: &[u8]) -> Self {
+        BcryptRsaKeyBlob {
+            bit_length,
+            exponent: exponent.to_vec(),
+            modulus: modulus.to_vec(),
+        }
+    }
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl TryInto<Vec<u8>> for BcryptRsaKeyBlob {
+    type Error = MsalError;
+
+    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
+        let mut cng_blob = b"RSA1".to_vec(); // Magic
+        cng_blob.extend_from_slice(&self.bit_length.to_le_bytes()); // BitLength
+        let exponent_len: u32 = self.exponent.len().try_into().map_err(|e| {
+            MsalError::GeneralFailure(format!("Exponent len into u32 failed: {:?}", e))
+        })?;
+        cng_blob.extend_from_slice(&exponent_len.to_le_bytes()); // cbPublicExpLength
+        let modulus_len: u32 = self.modulus.len().try_into().map_err(|e| {
+            MsalError::GeneralFailure(format!("Modulus len into u32 failed: {:?}", e))
+        })?;
+        cng_blob.extend_from_slice(&modulus_len.to_le_bytes()); // cbModulusLength
+
+        // MS reserves spots for P and Q lengths, but doesn't permit P and Q in
+        // the blob itself. Requests will be rejected if P and Q are specified.
+        let prime1_len: u32 = 0;
+        cng_blob.extend_from_slice(&prime1_len.to_le_bytes()); // cbPrime1Length
+        let prime2_len: u32 = 0;
+        cng_blob.extend_from_slice(&prime2_len.to_le_bytes()); // cbPrime2Length
+
+        cng_blob.extend_from_slice(self.exponent.as_slice()); // cbPublicExp
+        cng_blob.extend_from_slice(self.modulus.as_slice()); // cbModulus
+        Ok(cng_blob)
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -994,8 +1027,12 @@ impl BrokerClientApplication {
         let url = Url::parse_with_params(&join_endpoint, &[("api-version", service_version)])
             .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
 
-        let transport_key_blob =
-            ms_cng_blob(&transport_key.e().to_vec(), &transport_key.n().to_vec())?;
+        let transport_key_blob: Vec<u8> = BcryptRsaKeyBlob::new(
+            2048,
+            &transport_key.e().to_vec(),
+            &transport_key.n().to_vec(),
+        )
+        .try_into()?;
 
         let payload = json!({
             "CertificateRequest": {
