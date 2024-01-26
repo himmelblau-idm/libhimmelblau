@@ -366,8 +366,8 @@ where
     D: Deserializer<'de>,
 {
     let s: String = Deserialize::deserialize(d)?;
-    Ok(JweCompact::from_str(&s)
-        .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))?)
+    JweCompact::from_str(&s)
+        .map_err(|e| serde::de::Error::custom(format!("Failed parsing jwe: {}", e)))
 }
 
 #[cfg(feature = "broker")]
@@ -738,10 +738,7 @@ impl EnrollAttrs {
             Some(device_type) => device_type,
             None => "Linux".to_string(),
         };
-        let join_type_int = match join_type {
-            Some(join_type) => join_type,
-            None => 0,
-        };
+        let join_type_int = join_type.unwrap_or(0);
         let os_version_int = match os_version {
             Some(os_version) => os_version,
             None => {
