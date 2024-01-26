@@ -813,7 +813,7 @@ impl TryInto<Vec<u8>> for BcryptRsaKeyBlob {
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 pub struct BrokerClientApplication {
-    app: ClientApplication,
+    app: PublicClientApplication,
 }
 
 #[cfg(feature = "broker")]
@@ -828,25 +828,25 @@ impl BrokerClientApplication {
     ///   default, we will use <https://login.microsoftonline.com/common>.
     pub fn new(authority: Option<&str>) -> Self {
         BrokerClientApplication {
-            app: ClientApplication::new(BROKER_APP_ID, authority),
+            app: PublicClientApplication::new(BROKER_APP_ID, authority),
         }
     }
 
     fn client(&self) -> &Client {
-        &self.app.client
+        self.app.client()
     }
 
     fn authority(&self) -> &str {
-        &self.app.authority
+        self.app.authority()
     }
 
     /// Enroll the device in the directory.
     ///
     /// # Arguments
     ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// * `password` - The password.
+    /// * `token` - Token obtained via either
+    ///   acquire_token_by_username_password_for_device_enrollment
+    ///   or acquire_token_by_device_flow.
     ///
     /// * `domain` - The domain the device is to be enrolled in.
     ///
@@ -865,17 +865,12 @@ impl BrokerClientApplication {
     #[cfg(feature = "tpm")]
     pub async fn enroll_device(
         &self,
-        username: &str,
-        password: &str,
+        token: &UserToken,
         attrs: EnrollAttrs,
         machine_key: &MachineKey,
         tpm: &mut BoxedDynTpm,
         loadable_id_key: &LoadableIdentityKey,
     ) -> Result<(LoadableIdentityKey, String), MsalError> {
-        let token = self
-            .acquire_token_for_device_enrollment(username, password)
-            .await?;
-
         // Create the CSR
         let csr_der = match tpm.identity_key_certificate_request(
             machine_key,
@@ -935,9 +930,9 @@ impl BrokerClientApplication {
     ///
     /// # Arguments
     ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// * `password` - The password.
+    /// * `token` - Token obtained via either
+    ///   acquire_token_by_username_password_for_device_enrollment
+    ///   or acquire_token_by_device_flow.
     ///
     /// * `domain` - The domain the device is to be enrolled in.
     ///
@@ -953,15 +948,10 @@ impl BrokerClientApplication {
     #[doc(cfg(not(feature = "tpm")))]
     pub async fn enroll_device(
         &self,
-        username: &str,
-        password: &str,
+        token: &UserToken,
         attrs: EnrollAttrs,
         id_key: &Rsa<Private>,
     ) -> Result<(X509, String), MsalError> {
-        let token = self
-            .acquire_token_for_device_enrollment(username, password)
-            .await?;
-
         let mut req_builder =
             X509ReqBuilder::new().map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
@@ -1004,8 +994,7 @@ impl BrokerClientApplication {
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
         let enrollment_services =
-            discover_enrollment_services(&self.client(), access_token, &attrs.target_domain)
-                .await?;
+            discover_enrollment_services(self.client(), access_token, &attrs.target_domain).await?;
         let (join_endpoint, service_version) = match enrollment_services.device_join_service {
             Some(device_join_service) => {
                 let join_endpoint = match device_join_service.endpoint {
@@ -1220,7 +1209,18 @@ impl BrokerClientApplication {
         Err(MsalError::NotImplemented)
     }
 
-    async fn acquire_token_for_device_enrollment(
+    /// Gets a token for enrollment via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_username_password_for_device_enrollment(
         &self,
         username: &str,
         password: &str,
@@ -1229,6 +1229,40 @@ impl BrokerClientApplication {
         self.app
             .acquire_token_by_username_password(username, password, vec![&drs_scope])
             .await
+    }
+
+    /// Initiate a Device Flow instance for enrollment, which will be
+    /// used in acquire_token_by_device_flow.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A DeviceAuthorizationResponse containing a user_code key,
+    ///   among others
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn initiate_device_flow_for_device_enrollment(
+        &self,
+    ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        let drs_scope = format!("{}/.default", DRS_APP_ID);
+        self.app.initiate_device_flow(vec![&drs_scope]).await
+    }
+
+    /// Obtain token for enrollment by a device flow object, with customizable
+    /// polling effect.
+    ///
+    /// # Arguments
+    ///
+    /// * `flow` - A DeviceAuthorizationResponse previously generated by
+    /// initiate_device_flow.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_device_flow(
+        &self,
+        flow: DeviceAuthorizationResponse,
+    ) -> Result<UserToken, MsalError> {
+        self.app.acquire_token_by_device_flow(flow).await
     }
 
     async fn request_nonce(&self) -> Result<String, MsalError> {
