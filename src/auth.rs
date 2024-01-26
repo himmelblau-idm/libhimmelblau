@@ -301,10 +301,8 @@ impl RefreshTokenAuthenticationPayload {
 #[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default)]
 struct ExchangePRTPayload {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    iat: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exp: Option<i64>,
+    iat: i64,
+    exp: i64,
     client_id: String,
     scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,24 +319,23 @@ impl ExchangePRTPayload {
         scope: &[&str],
         resource: Option<String>,
     ) -> Result<Self, MsalError> {
-        let (iat, exp): (Option<i64>, Option<i64>) =
-            match SystemTime::now().duration_since(UNIX_EPOCH) {
-                Ok(now) => match now.as_secs().try_into() {
-                    Ok(iat) => (Some(iat), Some(iat + 300)),
-                    Err(e) => {
-                        return Err(MsalError::GeneralFailure(format!(
-                            "Failed choosing iat and exp: {}",
-                            e
-                        )));
-                    }
-                },
+        let (iat, exp): (i64, i64) = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(now) => match now.as_secs().try_into() {
+                Ok(iat) => (iat, iat + 300),
                 Err(e) => {
                     return Err(MsalError::GeneralFailure(format!(
                         "Failed choosing iat and exp: {}",
                         e
-                    )))
+                    )));
                 }
-            };
+            },
+            Err(e) => {
+                return Err(MsalError::GeneralFailure(format!(
+                    "Failed choosing iat and exp: {}",
+                    e
+                )))
+            }
+        };
         Ok(ExchangePRTPayload {
             iat,
             exp,
