@@ -10,6 +10,9 @@ use uuid::Uuid;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::compact::JweCompact;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::crypto::JweRSAOAEPDecipher;
 #[cfg(all(feature = "broker", not(feature = "tpm")))]
 #[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
 use compact_jwt::crypto::JwsRs256Signer;
@@ -19,6 +22,9 @@ use compact_jwt::crypto::JwsTpmSigner;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::crypto::MsOapxbcSessionKey;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::jwe::Jwe;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::jws::JwsBuilder;
@@ -301,10 +307,8 @@ impl RefreshTokenAuthenticationPayload {
 #[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default)]
 struct ExchangePRTPayload {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    iat: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exp: Option<i64>,
+    iat: i64,
+    exp: i64,
     client_id: String,
     scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,24 +325,23 @@ impl ExchangePRTPayload {
         scope: &[&str],
         resource: Option<String>,
     ) -> Result<Self, MsalError> {
-        let (iat, exp): (Option<i64>, Option<i64>) =
-            match SystemTime::now().duration_since(UNIX_EPOCH) {
-                Ok(now) => match now.as_secs().try_into() {
-                    Ok(iat) => (Some(iat), Some(iat + 300)),
-                    Err(e) => {
-                        return Err(MsalError::GeneralFailure(format!(
-                            "Failed choosing iat and exp: {}",
-                            e
-                        )));
-                    }
-                },
+        let (iat, exp): (i64, i64) = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(now) => match now.as_secs().try_into() {
+                Ok(iat) => (iat, iat + 300),
                 Err(e) => {
                     return Err(MsalError::GeneralFailure(format!(
                         "Failed choosing iat and exp: {}",
                         e
-                    )))
+                    )));
                 }
-            };
+            },
+            Err(e) => {
+                return Err(MsalError::GeneralFailure(format!(
+                    "Failed choosing iat and exp: {}",
+                    e
+                )))
+            }
+        };
         Ok(ExchangePRTPayload {
             iat,
             exp,
@@ -373,7 +376,37 @@ where
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 #[derive(Clone, Deserialize)]
+pub struct JWEOption {
+    #[serde(deserialize_with = "decode_jwe")]
+    child: JweCompact,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+#[derive(Clone, Deserialize)]
+pub struct TGTCloud {
+    #[serde(rename = "clientKey")]
+    pub client_key: String,
+    #[serde(rename = "keyType")]
+    pub key_type: u32,
+    #[serde(rename = "messageBuffer")]
+    pub message_buffer: String,
+    pub realm: String,
+    pub sn: String,
+    pub cn: String,
+    #[serde(rename = "sessionKeyType")]
+    pub session_key_type: u32,
+    #[serde(rename = "accountType")]
+    pub account_type: u32,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+#[derive(Clone, Deserialize)]
 pub struct PrimaryRefreshToken {
+    pub expires_in: u64,
+    pub ext_expires_in: u64,
+    pub expires_on: u64,
     pub refresh_token: String,
     pub refresh_token_expires_in: u64,
     #[serde(rename = "session_key_jwe")]
@@ -381,8 +414,13 @@ pub struct PrimaryRefreshToken {
     session_key: JweCompact,
     #[serde(deserialize_with = "decode_id_token")]
     pub id_token: IdToken,
-    /*#[serde(deserialize_with = "decode_jwe")]
-    tgt_client_key: JweCompact,*/
+    #[serde(deserialize_with = "decode_client_info", default)]
+    pub client_info: ClientInfo,
+    pub device_tenant_id: String,
+    pub tgt_error_message: Option<String>,
+    pub tgt_cloud: Option<TGTCloud>,
+    tgt_client_key: Option<JWEOption>,
+    pub kerberos_top_level_names: Option<String>,
 }
 
 #[cfg(feature = "broker")]
@@ -396,15 +434,29 @@ impl PrimaryRefreshToken {
         Ok(client_key)
     }
 
-    /*pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
-        let rsa_oaep_decipher = JweRSAOAEPDecipher::try_from(id_key.clone())
-            .map_err(|e| MsalError::CryptoFail(format!("Unable to create decipher: {}", e)))?;
-        let tgt: Jwe = rsa_oaep_decipher
-            .decipher(&self.tgt_client_key)
-            .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
+    pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
+        match self.tgt_client_key {
+            Some(ref tgt_client_key) => {
+                let rsa_oaep_decipher =
+                    JweRSAOAEPDecipher::try_from(id_key.clone()).map_err(|e| {
+                        MsalError::CryptoFail(format!("Unable to create decipher: {}", e))
+                    })?;
+                let tgt: Jwe = rsa_oaep_decipher
+                    .decipher(&tgt_client_key.child)
+                    .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
 
-        Ok(tgt.payload().to_vec())
-    }*/
+                Ok(tgt.payload().to_vec())
+            }
+            None => match &self.tgt_error_message {
+                Some(tgt_error_message) => {
+                    Err(MsalError::CryptoFail(tgt_error_message.to_string()))
+                }
+                None => Err(MsalError::CryptoFail(
+                    "tgt_client_key missing from PRT".to_string(),
+                )),
+            },
+        }
+    }
 }
 
 struct ClientApplication {
@@ -1583,7 +1635,7 @@ impl BrokerClientApplication {
         session_key: &MsOapxbcSessionKey,
     ) -> Result<UserToken, MsalError> {
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)).map_err(|e| {
+            serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)?).map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing ExchangePRT JWT: {}", e))
             })?,
         )
