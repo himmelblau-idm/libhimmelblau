@@ -307,6 +307,7 @@ impl RefreshTokenAuthenticationPayload {
 #[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default)]
 struct ExchangePRTPayload {
+    iss: String,
     iat: i64,
     exp: i64,
     client_id: String,
@@ -343,6 +344,7 @@ impl ExchangePRTPayload {
             }
         };
         Ok(ExchangePRTPayload {
+            iss: BROKER_APP_ID.to_string(),
             iat,
             exp,
             client_id: BROKER_CLIENT_IDENT.to_string(),
