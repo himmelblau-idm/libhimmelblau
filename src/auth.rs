@@ -375,6 +375,17 @@ where
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+fn decode_tgt_cloud<'de, D>(d: D) -> Result<TGTCloud, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(d)?;
+    json_from_str(&s)
+        .map_err(|e| serde::de::Error::custom(format!("Failed parsing tgt_cloud: {}", e)))
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 #[derive(Clone, Deserialize)]
 pub struct JWEOption {
     #[serde(deserialize_with = "decode_jwe")]
@@ -383,7 +394,7 @@ pub struct JWEOption {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 pub struct TGTCloud {
     #[serde(rename = "clientKey")]
     pub client_key: String,
@@ -404,9 +415,9 @@ pub struct TGTCloud {
 #[doc(cfg(feature = "broker"))]
 #[derive(Clone, Deserialize)]
 pub struct PrimaryRefreshToken {
-    pub expires_in: u64,
-    pub ext_expires_in: u64,
-    pub expires_on: u64,
+    pub expires_in: String,
+    pub ext_expires_in: String,
+    pub expires_on: String,
     pub refresh_token: String,
     pub refresh_token_expires_in: u64,
     #[serde(rename = "session_key_jwe")]
@@ -418,7 +429,8 @@ pub struct PrimaryRefreshToken {
     pub client_info: ClientInfo,
     pub device_tenant_id: String,
     pub tgt_error_message: Option<String>,
-    pub tgt_cloud: Option<TGTCloud>,
+    #[serde(deserialize_with = "decode_tgt_cloud", default)]
+    pub tgt_cloud: TGTCloud,
     tgt_client_key: Option<JWEOption>,
     pub kerberos_top_level_names: Option<String>,
 }
