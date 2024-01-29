@@ -1659,7 +1659,7 @@ impl BrokerClientApplication {
 
         let params = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("prt_protocol_version", "3.0"),
+            ("windows_api_version", "2.0"),
             ("request", &signed_jwt),
         ];
         let payload = params
