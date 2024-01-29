@@ -3,7 +3,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::{header, Client};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{from_str as json_from_str, Value};
+use serde_json::{from_str as json_from_str, to_string as json_to_string, Value};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
@@ -1702,13 +1702,42 @@ impl BrokerClientApplication {
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            JweCompact::from_str(
-                &resp
-                    .text()
-                    .await
-                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+            let enc = resp
+                .text()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+            /* A PrtV2 (windows_api_version == 2.0) claims to be encrypted with
+             * A256GCM, but really it's a A256CBC. We need to swap the enc here
+             * to force the decryptor to work correctly. */
+            let enc_parts: Vec<&str> = enc.split('.').collect();
+            let str_header = match enc_parts.first() {
+                Some(header) => header,
+                None => return Err(MsalError::InvalidParse("Jwe header was empty!".to_string())),
+            };
+            let mut header: Value = json_from_str(
+                &String::from_utf8(
+                    URL_SAFE_NO_PAD
+                        .decode(match enc.split('.').collect::<Vec<&str>>().first() {
+                            Some(header) => header,
+                            None => {
+                                return Err(MsalError::InvalidParse(
+                                    "Jwe header was empty!".to_string(),
+                                ))
+                            }
+                        })
+                        .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
             )
-            .map_err(|e| MsalError::InvalidParse(format!("{}", e)))
+            .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            if let Some(enc) = header.get_mut("enc") {
+                *enc = Value::String("A128CBC-HS256".to_string());
+            }
+            let rheader = URL_SAFE_NO_PAD.encode(
+                json_to_string(&header).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?,
+            );
+            let mod_enc = enc.replace(str_header, &rheader);
+            JweCompact::from_str(&mod_enc).map_err(|e| MsalError::InvalidParse(format!("{}", e)))
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
