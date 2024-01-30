@@ -417,6 +417,7 @@ pub struct TGTCloud {
 #[doc(cfg(feature = "broker"))]
 #[derive(Clone, Deserialize)]
 pub struct PrimaryRefreshToken {
+    pub token_type: String,
     pub expires_in: String,
     pub ext_expires_in: String,
     pub expires_on: String,
@@ -1181,8 +1182,20 @@ impl BrokerClientApplication {
             .acquire_user_prt_by_username_password(username, password, id_key, cert)
             .await?;
         let session_key = prt.session_key(id_key)?;
-        self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
-            .await
+        let enc_access_token = self
+            .exchange_prt_for_access_token(&prt, scopes.clone(), None, &session_key)
+            .await?;
+        let token: UserToken = json_from_str(
+            std::str::from_utf8(
+                session_key
+                    .decipher(&enc_access_token)
+                    .map_err(|e| MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e)))?
+                    .payload(),
+            )
+            .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+        )
+        .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+        Ok(token)
     }
 
     /// Gets a token for a given resource via user credentials.
@@ -1241,8 +1254,20 @@ impl BrokerClientApplication {
             .acquire_user_prt_by_refresh_token(refresh_token, id_key, cert)
             .await?;
         let session_key = prt.session_key(id_key)?;
-        self.exchange_prt_for_access_token(&prt, scopes, None, &session_key)
-            .await
+        let enc_access_token = self
+            .exchange_prt_for_access_token(&prt, scopes.clone(), None, &session_key)
+            .await?;
+        let token: UserToken = json_from_str(
+            std::str::from_utf8(
+                session_key
+                    .decipher(&enc_access_token)
+                    .map_err(|e| MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e)))?
+                    .payload(),
+            )
+            .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+        )
+        .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+        Ok(token)
     }
 
     /// Acquire token(s) based on a refresh token (RT) obtained from elsewhere.
@@ -1647,7 +1672,7 @@ impl BrokerClientApplication {
         scope: Vec<&str>,
         resource: Option<String>,
         session_key: &MsOapxbcSessionKey,
-    ) -> Result<UserToken, MsalError> {
+    ) -> Result<JweCompact, MsalError> {
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&ExchangePRTPayload::new(prt, &scope, resource)?).map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing ExchangePRT JWT: {}", e))
@@ -1659,7 +1684,7 @@ impl BrokerClientApplication {
 
         let params = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("prt_protocol_version", "3.0"),
+            ("windows_api_version", "2.0"),
             ("request", &signed_jwt),
         ];
         let payload = params
@@ -1677,12 +1702,13 @@ impl BrokerClientApplication {
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let token: UserToken = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-
-            Ok(token)
+            JweCompact::from_str(
+                &resp
+                    .text()
+                    .await
+                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+            )
+            .map_err(|e| MsalError::InvalidParse(format!("{}", e)))
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
