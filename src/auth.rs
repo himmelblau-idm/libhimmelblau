@@ -3,7 +3,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::{header, Client};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{from_str as json_from_str, to_string as json_to_string, Value};
+use serde_json::{from_str as json_from_str, Value};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 
@@ -219,13 +219,29 @@ where
     })
 }
 
+fn decode_number_from_string<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Value = Deserialize::deserialize(d)?;
+    match v {
+        Value::Number(n) => Ok(n.as_u64().unwrap() as u32),
+        Value::String(s) => s
+            .parse::<u32>()
+            .map_err(|e| serde::de::Error::custom(format!("{}", e))),
+        _ => Err(serde::de::Error::custom("Expected number or string")),
+    }
+}
+
 #[derive(Clone, Deserialize)]
 pub struct UserToken {
     pub token_type: String,
-    pub scope: String,
+    pub scope: Option<String>,
+    #[serde(deserialize_with = "decode_number_from_string")]
     pub expires_in: u32,
+    #[serde(deserialize_with = "decode_number_from_string")]
     pub ext_expires_in: u32,
-    pub access_token: String,
+    pub access_token: Option<String>,
     pub refresh_token: String,
     #[serde(deserialize_with = "decode_id_token")]
     pub id_token: IdToken,
@@ -967,9 +983,17 @@ impl BrokerClientApplication {
         let transport_key_rsa = Rsa::public_key_from_der(&transport_key_der)
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
-        let (cert, device_id) = self
-            .enroll_device_internal(&token.access_token, attrs, &transport_key_rsa, &csr_der)
-            .await?;
+        let (cert, device_id) = match &token.access_token {
+            Some(access_token) => {
+                self.enroll_device_internal(access_token, attrs, &transport_key_rsa, &csr_der)
+                    .await?
+            }
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "Access token not found".to_string(),
+                ))
+            }
+        };
 
         let new_loadable_id_key = match tpm.identity_key_associate_certificate(
             machine_key,
@@ -1046,8 +1070,14 @@ impl BrokerClientApplication {
             .to_der()
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
-        self.enroll_device_internal(&token.access_token, attrs, id_key, &csr_der)
-            .await
+        if let Some(access_token) = &token.access_token {
+            self.enroll_device_internal(access_token, attrs, id_key, &csr_der)
+                .await
+        } else {
+            Err(MsalError::GeneralFailure(
+                "Access token not found".to_string(),
+            ))
+        }
     }
 
     async fn enroll_device_internal(
@@ -1706,38 +1736,7 @@ impl BrokerClientApplication {
                 .text()
                 .await
                 .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
-            /* A PrtV2 (windows_api_version == 2.0) claims to be encrypted with
-             * A256GCM, but really it's a A256CBC. We need to swap the enc here
-             * to force the decryptor to work correctly. */
-            let enc_parts: Vec<&str> = enc.split('.').collect();
-            let str_header = match enc_parts.first() {
-                Some(header) => header,
-                None => return Err(MsalError::InvalidParse("Jwe header was empty!".to_string())),
-            };
-            let mut header: Value = json_from_str(
-                &String::from_utf8(
-                    URL_SAFE_NO_PAD
-                        .decode(match enc.split('.').collect::<Vec<&str>>().first() {
-                            Some(header) => header,
-                            None => {
-                                return Err(MsalError::InvalidParse(
-                                    "Jwe header was empty!".to_string(),
-                                ))
-                            }
-                        })
-                        .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?,
-                )
-                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
-            )
-            .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            if let Some(enc) = header.get_mut("enc") {
-                *enc = Value::String("A128CBC-HS256".to_string());
-            }
-            let rheader = URL_SAFE_NO_PAD.encode(
-                json_to_string(&header).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?,
-            );
-            let mod_enc = enc.replace(str_header, &rheader);
-            JweCompact::from_str(&mod_enc).map_err(|e| MsalError::InvalidParse(format!("{}", e)))
+            JweCompact::from_str(&enc).map_err(|e| MsalError::InvalidParse(format!("{}", e)))
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
