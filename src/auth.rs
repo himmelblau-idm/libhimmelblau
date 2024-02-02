@@ -1376,6 +1376,25 @@ impl BrokerClientApplication {
             .await
     }
 
+    /// Gets a token for enrollment via refresh token.
+    ///
+    /// # Arguments
+    ///
+    /// * `refresh_token` - The old refresh token, as a string.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_refresh_token_for_device_enrollment(
+        &self,
+        refresh_token: &str,
+    ) -> Result<UserToken, MsalError> {
+        let drs_scope = format!("{}/.default", DRS_APP_ID);
+        self.app
+            .acquire_token_by_refresh_token(refresh_token, vec![&drs_scope])
+            .await
+    }
+
     /// Initiate a Device Flow instance for enrollment, which will be
     /// used in acquire_token_by_device_flow.
     ///
