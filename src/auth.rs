@@ -250,6 +250,9 @@ pub struct UserToken {
     pub id_token: IdToken,
     #[serde(deserialize_with = "decode_client_info", default)]
     pub client_info: ClientInfo,
+    #[cfg(all(feature = "broker", not(feature = "tpm")))]
+    #[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
+    prt: Option<PrimaryRefreshToken>,
 }
 
 #[cfg(feature = "broker")]
@@ -1253,7 +1256,8 @@ impl BrokerClientApplication {
         let mut token = self
             .exchange_prt_for_access_token(&prt, scopes.clone(), &session_key, id_key, cert)
             .await?;
-        token.client_info = prt.client_info;
+        token.client_info = prt.client_info.clone();
+        token.prt = Some(prt);
         Ok(token)
     }
 
@@ -1318,7 +1322,8 @@ impl BrokerClientApplication {
         let mut token = self
             .exchange_prt_for_access_token(&prt, scopes.clone(), &session_key, id_key, cert)
             .await?;
-        token.client_info = prt.client_info;
+        token.client_info = prt.client_info.clone();
+        token.prt = Some(prt);
         Ok(token)
     }
 
