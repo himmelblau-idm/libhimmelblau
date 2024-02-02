@@ -21,6 +21,8 @@ pub enum MsalError {
     InvalidJson(String),
     /// MSAL failed to parse a base64 input
     InvalidBase64(String),
+    /// MSAL failed to parse a regex
+    InvalidRegex(String),
     /// MSAL failed to parse something
     InvalidParse(String),
     /// MSAL failed when acquiring a token
