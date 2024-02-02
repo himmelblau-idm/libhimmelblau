@@ -781,6 +781,8 @@ impl PublicClientApplication {
     }
 }
 
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 pub struct EnrollAttrs {
     device_display_name: String,
     device_type: String,
@@ -789,6 +791,8 @@ pub struct EnrollAttrs {
     target_domain: String,
 }
 
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 impl EnrollAttrs {
     pub fn new(
         target_domain: String,
