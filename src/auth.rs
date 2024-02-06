@@ -137,7 +137,7 @@ const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 /* RFC8628: 3.2. Device Authorization Response */
 #[derive(Default, Clone, Deserialize)]
 pub struct DeviceAuthorizationResponse {
-    device_code: String,
+    pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
     // MS doesn't implement verification_uri_complete yet
