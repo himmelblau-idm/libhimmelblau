@@ -238,6 +238,8 @@ where
 
 #[derive(Clone, Deserialize)]
 pub struct UserToken {
+    #[serde(skip)]
+    spn: Option<String>,
     pub token_type: String,
     pub scope: Option<String>,
     #[serde(deserialize_with = "decode_number_from_string")]
@@ -253,6 +255,59 @@ pub struct UserToken {
     #[cfg(all(feature = "broker", not(feature = "tpm")))]
     #[doc(cfg(all(feature = "broker", not(feature = "tpm"))))]
     prt: Option<PrimaryRefreshToken>,
+}
+
+impl UserToken {
+    pub fn uuid(&self) -> Result<Uuid, MsalError> {
+        Uuid::parse_str(&self.id_token.oid).map_err(|e| MsalError::InvalidParse(format!("{}", e)))
+    }
+
+    pub fn spn(&mut self) -> Result<String, MsalError> {
+        match &self.spn {
+            Some(spn) => Ok(spn.clone()),
+            None => match &self.id_token.preferred_username {
+                Some(spn) => {
+                    self.spn = Some(spn.clone());
+                    Ok(spn.to_string())
+                }
+                // If all else fails, extract the upn from the access_token
+                None => match &self.access_token {
+                    Some(access_token) => {
+                        let mut siter = access_token.splitn(3, '.');
+                        siter.next(); // Ignore the header
+                        let payload: Value = json_from_str(
+                            &String::from_utf8(
+                                URL_SAFE_NO_PAD
+                                    .decode(siter.next().ok_or_else(|| {
+                                        MsalError::InvalidParse("Payload not present".to_string())
+                                    })?)
+                                    .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?,
+                            )
+                            .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+                        )
+                        .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                        match payload.get("upn") {
+                            Some(upn) => match upn.as_str() {
+                                Some(upn) => {
+                                    self.spn = Some(upn.to_string());
+                                    Ok(upn.to_string())
+                                }
+                                None => Err(MsalError::GeneralFailure(
+                                    "No spn available for UserToken".to_string(),
+                                )),
+                            },
+                            None => Err(MsalError::GeneralFailure(
+                                "No spn available for UserToken".to_string(),
+                            )),
+                        }
+                    }
+                    None => Err(MsalError::GeneralFailure(
+                        "No spn available for UserToken".to_string(),
+                    )),
+                },
+            },
+        }
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -577,10 +632,11 @@ impl ClientApplication {
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let token: UserToken = resp
+            let mut token: UserToken = resp
                 .json()
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            token.spn = Some(username.to_string());
 
             Ok(token)
         } else {
@@ -1258,6 +1314,7 @@ impl BrokerClientApplication {
             .await?;
         token.client_info = prt.client_info.clone();
         token.prt = Some(prt);
+        token.spn = Some(username.to_string());
         Ok(token)
     }
 
