@@ -16,8 +16,8 @@ path = "src/lib.rs"
 
 [features]
 default = ["broker"]
-broker = []
-tpm = []
+broker = ["dep:compact_jwt", "compact_jwt/msextensions"]
+tpm = ["broker", "dep:kanidm-hsm-crypto", "compact_jwt/hsm-crypto", "kanidm-hsm-crypto/msextensions"] #, "kanidm-hsm-crypto/tpm"] # Currently only using soft tpm, since msextensions aren't implemented for tpm.
 
 [dependencies]
 base64 = "^0.21.5"
@@ -30,6 +30,6 @@ uuid = { version = "^1.4.1", features = [ "v4" ] }
 os-release = "^0.1.0"
 hostname = "^0.3.1"
 openssl = "^0.10.55"
-compact_jwt = { version = "0.3.3", git = "https://github.com/kanidm/compact-jwt.git", branch = "main", features = ["hsm-crypto", "msextensions"] }
-kanidm-hsm-crypto = "^0.1.5"
+compact_jwt = { version = "0.3.4", optional = true }
+kanidm-hsm-crypto = { version = "^0.1.6", optional = true }
 regex = "^1.10.3"
