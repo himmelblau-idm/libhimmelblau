@@ -1019,6 +1019,10 @@ impl BrokerClientApplication {
         }
     }
 
+    pub fn set_transport_key(&mut self, transport_key: Option<LoadableMsOapxbcRsaKey>) {
+        self.transport_key = transport_key;
+    }
+
     fn cert_key(
         &self,
         tpm: &mut BoxedDynTpm,
@@ -1034,6 +1038,10 @@ impl BrokerClientApplication {
             },
             None => Err(MsalError::ConfigError("The certificate key was not found. Please provide the certificate key during initialize of the BrokerClientApplication, or enroll the device.".to_string())),
         }
+    }
+
+    pub fn set_cert_key(&mut self, cert_key: Option<LoadableIdentityKey>) {
+        self.cert_key = cert_key;
     }
 
     /// Enroll the device in the directory.
