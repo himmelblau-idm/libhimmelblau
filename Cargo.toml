@@ -16,8 +16,8 @@ path = "src/lib.rs"
 
 [features]
 default = ["broker"]
-broker = ["dep:compact_jwt", "compact_jwt/msextensions"]
-tpm = ["broker", "dep:kanidm-hsm-crypto", "compact_jwt/hsm-crypto", "kanidm-hsm-crypto/msextensions"] #, "kanidm-hsm-crypto/tpm"] # Currently only using soft tpm, since msextensions aren't implemented for tpm.
+broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto", "compact_jwt/hsm-crypto", "kanidm-hsm-crypto/msextensions"]
+tpm = ["broker", "kanidm-hsm-crypto/tpm"]
 
 [dependencies]
 base64 = "^0.21.5"
