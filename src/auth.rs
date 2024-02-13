@@ -35,7 +35,7 @@ use compact_jwt::Jws;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use kanidm_hsm_crypto::{
-    BoxedDynTpm, IdentityKey, KeyAlgorithm, LoadableIdentityKey, MachineKey, Tpm,
+    BoxedDynTpm, IdentityKey, KeyAlgorithm, LoadableIdentityKey, MachineKey, SealedData, Tpm,
 };
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -58,6 +58,9 @@ use regex::Regex;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use reqwest::Url;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use serde_json::{from_slice as json_from_slice, to_vec as json_to_vec};
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use std::convert::TryInto;
@@ -236,7 +239,8 @@ pub struct UserToken {
     pub client_info: ClientInfo,
     #[cfg(feature = "broker")]
     #[doc(cfg(feature = "broker"))]
-    prt: Option<PrimaryRefreshToken>,
+    #[zeroize(skip)]
+    pub prt: Option<SealedData>,
 }
 
 impl UserToken {
@@ -504,36 +508,37 @@ pub struct TGTCloud {
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
-pub struct PrimaryRefreshToken {
-    pub token_type: String,
-    pub expires_in: String,
-    pub ext_expires_in: String,
-    pub expires_on: String,
-    pub refresh_token: String,
-    pub refresh_token_expires_in: u64,
+#[allow(dead_code)]
+struct PrimaryRefreshToken {
+    token_type: String,
+    expires_in: String,
+    ext_expires_in: String,
+    expires_on: String,
+    refresh_token: String,
+    refresh_token_expires_in: u64,
     #[serde(rename = "session_key_jwe")]
     #[serde(deserialize_with = "decode_jwe", serialize_with = "encode_jwe")]
     #[zeroize(skip)]
     session_key: JweCompact,
     #[serde(deserialize_with = "decode_id_token")]
     #[zeroize(skip)]
-    pub id_token: IdToken,
+    id_token: IdToken,
     #[serde(deserialize_with = "decode_client_info", default)]
     #[zeroize(skip)]
-    pub client_info: ClientInfo,
-    pub device_tenant_id: String,
-    pub tgt_error_message: Option<String>,
+    client_info: ClientInfo,
+    device_tenant_id: String,
+    tgt_error_message: Option<String>,
     #[serde(deserialize_with = "decode_tgt_cloud", default)]
-    pub tgt_cloud: TGTCloud,
+    tgt_cloud: TGTCloud,
     #[zeroize(skip)]
     tgt_client_key: Option<JWEOption>,
-    pub kerberos_top_level_names: Option<String>,
+    kerberos_top_level_names: Option<String>,
 }
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 impl PrimaryRefreshToken {
-    pub fn session_key(
+    fn session_key(
         &self,
         tpm: &mut BoxedDynTpm,
         id_key: &MsOapxbcRsaKey,
@@ -545,7 +550,8 @@ impl PrimaryRefreshToken {
         Ok(client_key)
     }
 
-    pub fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
+    #[allow(dead_code)]
+    fn tgt_client_key(&self, id_key: &Rsa<Private>) -> Result<Vec<u8>, MsalError> {
         match self.tgt_client_key {
             Some(ref tgt_client_key) => {
                 let rsa_oaep_decipher =
@@ -1296,15 +1302,21 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
         let prt = self
-            .acquire_user_prt_by_username_password(username, password, tpm, machine_key)
+            .acquire_user_prt_by_username_password_internal(username, password, tpm, machine_key)
             .await?;
         let transport_key = self.transport_key(tpm, machine_key)?;
         let session_key = prt.session_key(tpm, &transport_key)?;
         let mut token = self
-            .exchange_prt_for_access_token(&prt, scopes.clone(), &session_key, tpm, machine_key)
+            .exchange_prt_for_access_token_front(
+                &prt,
+                scopes.clone(),
+                &session_key,
+                tpm,
+                machine_key,
+            )
             .await?;
         token.client_info = prt.client_info.clone();
-        token.prt = Some(prt);
+        token.prt = Some(self.seal_user_prt(&prt, tpm, &transport_key)?);
         Ok(token)
     }
 
@@ -1331,15 +1343,21 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
         let prt = self
-            .acquire_user_prt_by_refresh_token(refresh_token, tpm, machine_key)
+            .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, machine_key)
             .await?;
         let transport_key = self.transport_key(tpm, machine_key)?;
         let session_key = prt.session_key(tpm, &transport_key)?;
         let mut token = self
-            .exchange_prt_for_access_token(&prt, scopes.clone(), &session_key, tpm, machine_key)
+            .exchange_prt_for_access_token_front(
+                &prt,
+                scopes.clone(),
+                &session_key,
+                tpm,
+                machine_key,
+            )
             .await?;
         token.client_info = prt.client_info.clone();
-        token.prt = Some(prt);
+        token.prt = Some(self.seal_user_prt(&prt, tpm, &transport_key)?);
         Ok(token)
     }
 
@@ -1481,9 +1499,23 @@ impl BrokerClientApplication {
     /// * `machine_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
-    /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
+    /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
     pub async fn acquire_user_prt_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<SealedData, MsalError> {
+        let prt = self
+            .acquire_user_prt_by_username_password_internal(username, password, tpm, machine_key)
+            .await?;
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        self.seal_user_prt(&prt, tpm, &transport_key)
+    }
+
+    async fn acquire_user_prt_by_username_password_internal(
         &self,
         username: &str,
         password: &str,
@@ -1537,9 +1569,22 @@ impl BrokerClientApplication {
     /// * `machine_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
-    /// * Success: A PrimaryRefreshToken, containing a refresh_token and tgt.
+    /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
     pub async fn acquire_user_prt_by_refresh_token(
+        &self,
+        refresh_token: &str,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<SealedData, MsalError> {
+        let prt = self
+            .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, machine_key)
+            .await?;
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        self.seal_user_prt(&prt, tpm, &transport_key)
+    }
+
+    async fn acquire_user_prt_by_refresh_token_internal(
         &self,
         refresh_token: &str,
         tpm: &mut BoxedDynTpm,
@@ -1786,9 +1831,6 @@ impl BrokerClientApplication {
     ///
     /// * `scope` - The scope that the client requests for the access token.
     ///
-    /// * `session_key` - The session key deciphered from the PRT
-    ///   session_key_jwe property.
-    ///
     /// * `tpm` - The tpm object.
     ///
     /// * `machine_key` - The TPM MachineKey associated with this application.
@@ -1797,6 +1839,20 @@ impl BrokerClientApplication {
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
     pub async fn exchange_prt_for_access_token(
+        &self,
+        sealed_prt: &SealedData,
+        scope: Vec<&str>,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<UserToken, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let session_key = prt.session_key(tpm, &transport_key)?;
+        self.exchange_prt_for_access_token_front(&prt, scope, &session_key, tpm, machine_key)
+            .await
+    }
+
+    async fn exchange_prt_for_access_token_front(
         &self,
         prt: &PrimaryRefreshToken,
         scope: Vec<&str>,
@@ -1809,5 +1865,30 @@ impl BrokerClientApplication {
             .await?;
         self.exchange_prt_for_access_token_internal(scope, authorization_code)
             .await
+    }
+
+    fn seal_user_prt(
+        &self,
+        prt: &PrimaryRefreshToken,
+        tpm: &mut BoxedDynTpm,
+        key: &MsOapxbcRsaKey,
+    ) -> Result<SealedData, MsalError> {
+        let prt_data = json_to_vec(prt)
+            .map_err(|e| MsalError::InvalidJson(format!("Failed serializing PRT {:?}", e)))?;
+        tpm.msoapxbc_rsa_seal_data(key, &prt_data)
+            .map_err(|e| MsalError::TPMFail(format!("Failed sealing PRT {:?}", e)))
+    }
+
+    fn unseal_user_prt(
+        &self,
+        sealed_data: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        key: &MsOapxbcRsaKey,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        let prt_data = tpm
+            .msoapxbc_rsa_unseal_data(key, sealed_data)
+            .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
+        json_from_slice(&prt_data)
+            .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))
     }
 }
