@@ -69,6 +69,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use tracing::debug;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use serde::Serializer;
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -125,7 +128,7 @@ pub struct DeviceAuthorizationResponse {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct IdToken {
     pub name: String,
     pub oid: String,
@@ -163,7 +166,7 @@ where
     Ok(payload)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize)]
 pub struct ClientInfo {
     pub uid: Option<Uuid>,
     pub utid: Option<Uuid>,
@@ -450,6 +453,15 @@ where
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+fn encode_jwe<S>(v: &JweCompact, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("{}", v))
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 fn decode_tgt_cloud<'de, D>(d: D) -> Result<TGTCloud, D::Error>
 where
     D: Deserializer<'de>,
@@ -461,15 +473,15 @@ where
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct JWEOption {
-    #[serde(deserialize_with = "decode_jwe")]
+    #[serde(deserialize_with = "decode_jwe", serialize_with = "encode_jwe")]
     child: JweCompact,
 }
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Default, Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize, Serialize)]
 pub struct TGTCloud {
     #[serde(rename = "clientKey")]
     pub client_key: String,
@@ -488,7 +500,7 @@ pub struct TGTCloud {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct PrimaryRefreshToken {
     pub token_type: String,
     pub expires_in: String,
@@ -497,7 +509,7 @@ pub struct PrimaryRefreshToken {
     pub refresh_token: String,
     pub refresh_token_expires_in: u64,
     #[serde(rename = "session_key_jwe")]
-    #[serde(deserialize_with = "decode_jwe")]
+    #[serde(deserialize_with = "decode_jwe", serialize_with = "encode_jwe")]
     session_key: JweCompact,
     #[serde(deserialize_with = "decode_id_token")]
     pub id_token: IdToken,
