@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, Value};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -88,7 +89,7 @@ use serde_json::{json, to_string_pretty};
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct Certificate {
     #[serde(rename = "RawBody")]
     raw_body: String,
@@ -96,7 +97,7 @@ struct Certificate {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct DRSResponse {
     #[serde(rename = "Certificate")]
     certificate: Certificate,
@@ -116,7 +117,7 @@ pub const BROKER_APP_ID: &str = "29d9ed98-a469-4536-ade2-f981bc1d605e";
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
-#[derive(Default, Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct DeviceAuthorizationResponse {
     pub device_code: String,
     pub user_code: String,
@@ -217,7 +218,7 @@ where
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct UserToken {
     pub token_type: String,
     pub scope: Option<String>,
@@ -228,8 +229,10 @@ pub struct UserToken {
     pub access_token: Option<String>,
     pub refresh_token: String,
     #[serde(deserialize_with = "decode_id_token")]
+    #[zeroize(skip)]
     pub id_token: IdToken,
     #[serde(deserialize_with = "decode_client_info", default)]
+    #[zeroize(skip)]
     pub client_info: ClientInfo,
     #[cfg(feature = "broker")]
     #[doc(cfg(feature = "broker"))]
@@ -282,7 +285,7 @@ impl UserToken {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct UsernamePasswordAuthenticationPayload {
     client_id: String,
     request_nonce: String,
@@ -318,7 +321,7 @@ impl UsernamePasswordAuthenticationPayload {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct RefreshTokenAuthenticationPayload {
     client_id: String,
     request_nonce: String,
@@ -352,7 +355,7 @@ impl RefreshTokenAuthenticationPayload {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct RefreshTokenCredentialPayload {
     iat: Option<i64>,
     refresh_token: String,
@@ -396,7 +399,7 @@ impl RefreshTokenCredentialPayload {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct DeviceCredentialPayload {
     grant_type: String,
     iss: String,
@@ -481,7 +484,7 @@ pub struct JWEOption {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Default, Clone, Deserialize, Serialize)]
+#[derive(Default, Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct TGTCloud {
     #[serde(rename = "clientKey")]
     pub client_key: String,
@@ -500,7 +503,7 @@ pub struct TGTCloud {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct PrimaryRefreshToken {
     pub token_type: String,
     pub expires_in: String,
@@ -510,15 +513,19 @@ pub struct PrimaryRefreshToken {
     pub refresh_token_expires_in: u64,
     #[serde(rename = "session_key_jwe")]
     #[serde(deserialize_with = "decode_jwe", serialize_with = "encode_jwe")]
+    #[zeroize(skip)]
     session_key: JweCompact,
     #[serde(deserialize_with = "decode_id_token")]
+    #[zeroize(skip)]
     pub id_token: IdToken,
     #[serde(deserialize_with = "decode_client_info", default)]
+    #[zeroize(skip)]
     pub client_info: ClientInfo,
     pub device_tenant_id: String,
     pub tgt_error_message: Option<String>,
     #[serde(deserialize_with = "decode_tgt_cloud", default)]
     pub tgt_cloud: TGTCloud,
+    #[zeroize(skip)]
     tgt_client_key: Option<JWEOption>,
     pub kerberos_top_level_names: Option<String>,
 }
@@ -919,6 +926,7 @@ impl EnrollAttrs {
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+#[derive(Zeroize, ZeroizeOnDrop)]
 struct BcryptRsaKeyBlob {
     bit_length: u32,
     exponent: Vec<u8>,

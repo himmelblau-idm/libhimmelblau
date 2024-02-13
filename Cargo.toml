@@ -33,3 +33,4 @@ openssl = "^0.10.55"
 compact_jwt = { version = "0.3.4", optional = true }
 kanidm-hsm-crypto = { version = "^0.1.6", optional = true }
 regex = "^1.10.3"
+zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
