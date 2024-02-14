@@ -213,7 +213,7 @@ where
 {
     let v: Value = Deserialize::deserialize(d)?;
     match v {
-        Value::Number(n) => Ok(n.as_u64().unwrap() as u32),
+        Value::Number(n) => Ok(n.as_u64().ok_or(serde::de::Error::custom("Expected number or string"))? as u32),
         Value::String(s) => s
             .parse::<u32>()
             .map_err(|e| serde::de::Error::custom(format!("{}", e))),
@@ -1071,7 +1071,7 @@ impl BrokerClientApplication {
     ) -> Result<MsOapxbcRsaKey, MsalError> {
         match &self.transport_key {
             Some(transport_key) => {
-                let transport_key = tpm.msoapxbc_rsa_key_load(machine_key, &transport_key)
+                let transport_key = tpm.msoapxbc_rsa_key_load(machine_key, transport_key)
             .map_err(|e| {
                 MsalError::TPMFail(format!("Failed to load IdentityKey: {:?}", e))
             })?;
@@ -1098,7 +1098,7 @@ impl BrokerClientApplication {
     ) -> Result<IdentityKey, MsalError> {
         match &self.cert_key {
             Some(cert_key) => {
-                let cert_key = tpm.identity_key_load(machine_key, &cert_key)
+                let cert_key = tpm.identity_key_load(machine_key, cert_key)
             .map_err(|e| {
                 MsalError::TPMFail(format!("Failed to load IdentityKey: {:?}", e))
             })?;
