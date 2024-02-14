@@ -244,10 +244,22 @@ pub struct UserToken {
 }
 
 impl UserToken {
+    /// Fetch the UUID from the user token
+    ///
+    /// # Returns
+    ///
+    /// * Success: The user Azure UUID
+    /// * Failure: An MsalError, indicating the failure.
     pub fn uuid(&self) -> Result<Uuid, MsalError> {
         Uuid::parse_str(&self.id_token.oid).map_err(|e| MsalError::InvalidParse(format!("{}", e)))
     }
 
+    /// Fetch the spn from the user token
+    ///
+    /// # Returns
+    ///
+    /// * Success: The user Azure spn
+    /// * Failure: An MsalError, indicating the failure.
     pub fn spn(&self) -> Result<String, MsalError> {
         match &self.id_token.preferred_username {
             Some(spn) => Ok(spn.to_string()),
@@ -886,6 +898,30 @@ pub struct EnrollAttrs {
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 impl EnrollAttrs {
+    /// Initialize attributes for device enrollment
+    ///
+    /// # Arguments
+    ///
+    /// * `target_domain` - The domain to be enrolled in.
+    ///
+    /// * `device_display_name` - An optional chosen display name for the
+    ///   enrolled device. Defaults to the system hostname.
+    ///
+    /// * `device_type` - An optional device type. Defaults to 'Linux'. This
+    ///   effects which Intune policies are distributed to the client.
+    ///
+    /// * `join_type` - An optional join type. Defaults to 0. Possible values
+    ///   are:
+    ///     - 0: Azure AD join.
+    ///     - 4: Azure AD register only.
+    ///     - 6: Azure AD hybrid join.
+    ///     - 8: Azure AD join.
+    ///
+    /// * `os_version` - An optional OS version. Defaults to the contents of
+    ///   /etc/os-release.
+    ///
+    /// * Success: A new EnrollAttrs for device enrollment.
+    /// * Failure: An MsalError, indicating the failure.
     pub fn new(
         target_domain: String,
         device_display_name: Option<String>,
@@ -1001,10 +1037,10 @@ impl BrokerClientApplication {
     ///   default, we will use <https://login.microsoftonline.com/common>.
     ///
     /// * `transport_key` - An optional LoadableMsOapxbcRsaKey transport key
-    ///   for enrolling the device.
+    ///   from enrolling the device.
     ///
-    /// * `cert_key` - An optional LoadableIdentityKey which will be used to
-    ///   create the CSR.
+    /// * `cert_key` - An optional LoadableIdentityKey which was used to create
+    ///   the enrollment CSR.
     ///
     /// NOTE: If `transport_key` and `cert_key` are not provided from a previous
     /// device enrollment, then enrollment will be required.
@@ -1045,6 +1081,12 @@ impl BrokerClientApplication {
         }
     }
 
+    /// Set the enrollment transport key
+    ///
+    /// # Arguments
+    ///
+    /// * `transport_key` - An optional LoadableMsOapxbcRsaKey transport key
+    ///   from enrolling the device.
     pub fn set_transport_key(&mut self, transport_key: Option<LoadableMsOapxbcRsaKey>) {
         self.transport_key = transport_key;
     }
@@ -1066,6 +1108,12 @@ impl BrokerClientApplication {
         }
     }
 
+    /// Set the enrollment certificate key
+    ///
+    /// # Arguments
+    ///
+    /// * `cert_key` - An optional LoadableIdentityKey which was used to create
+    ///   the enrollment CSR.
     pub fn set_cert_key(&mut self, cert_key: Option<LoadableIdentityKey>) {
         self.cert_key = cert_key;
     }
