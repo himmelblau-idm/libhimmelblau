@@ -60,7 +60,10 @@ use regex::Regex;
 use reqwest::Url;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
-use serde_json::{from_slice as json_from_slice, to_vec as json_to_vec};
+use serde::Serializer;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use serde_json::to_vec as json_to_vec;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use std::convert::TryInto;
@@ -73,9 +76,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use tracing::debug;
-#[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
-use serde::Serializer;
 
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
@@ -213,7 +213,10 @@ where
 {
     let v: Value = Deserialize::deserialize(d)?;
     match v {
-        Value::Number(n) => Ok(n.as_u64().ok_or(serde::de::Error::custom("Expected number or string"))? as u32),
+        Value::Number(n) => Ok(n
+            .as_u64()
+            .ok_or(serde::de::Error::custom("Expected number or string"))?
+            as u32),
         Value::String(s) => s
             .parse::<u32>()
             .map_err(|e| serde::de::Error::custom(format!("{}", e))),
@@ -585,6 +588,196 @@ impl PrimaryRefreshToken {
                 )),
             },
         }
+    }
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl FromStr for PrimaryRefreshToken {
+    type Err = MsalError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let json: Value = json_from_str(s)
+            .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))?;
+        Ok(PrimaryRefreshToken {
+            token_type: json
+                .get("token_type")
+                .ok_or(MsalError::InvalidJson("token_type missing".to_string()))?
+                .to_string(),
+            expires_in: json
+                .get("expires_in")
+                .ok_or(MsalError::InvalidJson("expires_in missing".to_string()))?
+                .to_string(),
+            ext_expires_in: json
+                .get("ext_expires_in")
+                .ok_or(MsalError::InvalidJson("ext_expires_in missing".to_string()))?
+                .to_string(),
+            expires_on: json
+                .get("expires_on")
+                .ok_or(MsalError::InvalidJson("expires_on missing".to_string()))?
+                .to_string(),
+            refresh_token: json
+                .get("refresh_token")
+                .ok_or(MsalError::InvalidJson("refresh_token missing".to_string()))?
+                .to_string(),
+            refresh_token_expires_in: json
+                .get("refresh_token_expires_in")
+                .ok_or(MsalError::InvalidJson(
+                    "refresh_token_expires_in missing".to_string(),
+                ))?
+                .as_u64()
+                .ok_or(MsalError::InvalidJson(
+                    "refresh_token_expires_in type invalid".to_string(),
+                ))?,
+            session_key: JweCompact::from_str(&match json.get("session_key_jwe") {
+                Some(v) => v
+                    .as_str()
+                    .map(|v| v.to_string())
+                    .ok_or(MsalError::InvalidJson("session_key missing".to_string()))?,
+                None => return Err(MsalError::InvalidJson("session_key missing".to_string())),
+            })
+            .map_err(|e| MsalError::InvalidJson(format!("Failed parsing jwe: {}", e)))?,
+            id_token: match json.get("id_token") {
+                Some(v) => IdToken {
+                    name: v
+                        .get("name")
+                        .ok_or(MsalError::InvalidJson("name missing".to_string()))?
+                        .to_string(),
+                    oid: v
+                        .get("oid")
+                        .ok_or(MsalError::InvalidJson("oid missing".to_string()))?
+                        .to_string(),
+                    preferred_username: v.get("preferred_username").map(|v| v.to_string()),
+                    puid: v.get("puid").map(|v| v.to_string()),
+                    tenant_region_scope: v.get("tenant_region_scope").map(|v| v.to_string()),
+                    tid: v
+                        .get("tid")
+                        .ok_or(MsalError::InvalidJson("tid missing".to_string()))?
+                        .to_string(),
+                },
+                None => return Err(MsalError::InvalidJson("id_token missing".to_string())),
+            },
+            client_info: match json.get("client_info") {
+                Some(v) => ClientInfo {
+                    uid: v
+                        .get("uid")
+                        .map(|v| Uuid::from_str(&v.to_string()).ok())
+                        .ok_or(MsalError::InvalidParse("Failed to parse uid".to_string()))?,
+                    utid: v
+                        .get("utid")
+                        .map(|v| Uuid::from_str(&v.to_string()).ok())
+                        .ok_or(MsalError::InvalidParse("Failed to parse utid".to_string()))?,
+                },
+                None => return Err(MsalError::InvalidJson("client_info missing".to_string())),
+            },
+            device_tenant_id: json
+                .get("device_tenant_id")
+                .ok_or(MsalError::InvalidJson(
+                    "device_tenant_id missing".to_string(),
+                ))?
+                .to_string(),
+            tgt_error_message: match json.get("device_tenant_id") {
+                Some(v) => v.as_str().map(|v| v.to_string()),
+                None => None,
+            },
+            tgt_cloud: match json.get("tgt_cloud") {
+                Some(v) => TGTCloud {
+                    client_key: v
+                        .get("clientKey")
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud client_key missing".to_string(),
+                        ))?
+                        .to_string(),
+                    key_type: v
+                        .get("keyType")
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud key_type missing".to_string(),
+                        ))?
+                        .as_u64()
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud key_type invalid type".to_string(),
+                        ))?
+                        .try_into()
+                        .map_err(|e| {
+                            MsalError::InvalidJson(format!("tgt_cloud key_type error: {}", e))
+                        })?,
+                    message_buffer: v
+                        .get("messageBuffer")
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud message_buffer missing".to_string(),
+                        ))?
+                        .to_string(),
+                    realm: v
+                        .get("realm")
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud realm missing".to_string(),
+                        ))?
+                        .to_string(),
+                    sn: v
+                        .get("sn")
+                        .ok_or(MsalError::InvalidJson("tgt_cloud sn missing".to_string()))?
+                        .to_string(),
+                    cn: v
+                        .get("cn")
+                        .ok_or(MsalError::InvalidJson("tgt_cloud cn missing".to_string()))?
+                        .to_string(),
+                    session_key_type: v
+                        .get("sessionKeyType")
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud session_key_type missing".to_string(),
+                        ))?
+                        .as_u64()
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud session_key_type invalid type".to_string(),
+                        ))?
+                        .try_into()
+                        .map_err(|e| {
+                            MsalError::InvalidJson(format!(
+                                "tgt_cloud session_key_type error: {}",
+                                e
+                            ))
+                        })?,
+                    account_type: v
+                        .get("accountType")
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud account_type missing".to_string(),
+                        ))?
+                        .as_u64()
+                        .ok_or(MsalError::InvalidJson(
+                            "tgt_cloud account_type invalid type".to_string(),
+                        ))?
+                        .try_into()
+                        .map_err(|e| {
+                            MsalError::InvalidJson(format!("tgt_cloud account_type error: {}", e))
+                        })?,
+                },
+                None => return Err(MsalError::InvalidJson("tgt_cloud missing".to_string())),
+            },
+            tgt_client_key: match json.get("tgt_client_key") {
+                Some(v) => {
+                    if v.is_null() {
+                        None
+                    } else {
+                        Some(JWEOption {
+                            child: JweCompact::from_str(v.as_str().ok_or(
+                                MsalError::InvalidJson("tgt_client_key invalid".to_string()),
+                            )?)
+                            .map_err(|e| {
+                                MsalError::InvalidJson(format!(
+                                    "tgt_client_key parse failed: {}",
+                                    e
+                                ))
+                            })?,
+                        })
+                    }
+                }
+                None => None,
+            },
+            kerberos_top_level_names: match json.get("kerberos_top_level_names") {
+                Some(v) => v.as_str().map(|v| v.to_string()),
+                None => None,
+            },
+        })
     }
 }
 
@@ -1936,7 +2129,8 @@ impl BrokerClientApplication {
         let prt_data = tpm
             .msoapxbc_rsa_unseal_data(key, sealed_data)
             .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
-        json_from_slice(&prt_data)
-            .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))
+        let prt_str = std::str::from_utf8(&prt_data)
+            .map_err(|e| MsalError::InvalidParse(format!("Failed decoding PRT {:?}", e)))?;
+        PrimaryRefreshToken::from_str(prt_str)
     }
 }
