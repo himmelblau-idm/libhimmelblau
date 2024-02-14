@@ -16,8 +16,8 @@ path = "src/lib.rs"
 
 [features]
 default = ["broker"]
-broker = []
-tpm = []
+broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto", "compact_jwt/hsm-crypto", "kanidm-hsm-crypto/msextensions"]
+tpm = ["broker", "kanidm-hsm-crypto/tpm"]
 
 [dependencies]
 base64 = "^0.21.5"
@@ -26,10 +26,11 @@ serde = { version = "^1.0.180", features = ["derive"] }
 serde_json = "^1.0.96"
 tracing = "^0.1.37"
 urlencoding = "2.1.3"
-uuid = { version = "^1.4.1", features = [ "v4" ] }
+uuid = { version = "^1.4.1", features = [ "v4", "serde" ] }
 os-release = "^0.1.0"
 hostname = "^0.3.1"
 openssl = "^0.10.55"
-compact_jwt = { version = "0.3.3", git = "https://github.com/kanidm/compact-jwt.git", branch = "main", features = ["hsm-crypto", "msextensions"] }
-kanidm-hsm-crypto = "^0.1.5"
+compact_jwt = { version = "0.3.4", optional = true }
+kanidm-hsm-crypto = { version = "^0.1.6", optional = true }
 regex = "^1.10.3"
+zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }

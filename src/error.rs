@@ -43,4 +43,6 @@ pub enum MsalError {
     CryptoFail(String),
     /// This functionality is not yet implemented
     NotImplemented,
+    /// A configuration error was detected
+    ConfigError(String),
 }
