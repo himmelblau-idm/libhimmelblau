@@ -22,10 +22,16 @@ use compact_jwt::crypto::JwsTpmSigner;
 use compact_jwt::crypto::MsOapxbcSessionKey;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
+use compact_jwt::jwe::Jwe;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
 use compact_jwt::jws::JwsBuilder;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::traits::JwsMutSigner;
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+use compact_jwt::traits::JwsSignable;
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 use compact_jwt::Jws;
@@ -516,24 +522,66 @@ struct PrimaryRefreshToken {
 #[cfg(feature = "broker")]
 #[doc(cfg(feature = "broker"))]
 impl PrimaryRefreshToken {
-    fn session_key(
-        &self,
-        tpm: &mut BoxedDynTpm,
-        id_key: &MsOapxbcRsaKey,
-    ) -> Result<MsOapxbcSessionKey, MsalError> {
-        let jwe = match &self.session_key_jwe {
-            Some(session_key_jwe) => JweCompact::from_str(session_key_jwe)
-                .map_err(|e| MsalError::InvalidParse(format!("Failed parsing jwe: {}", e)))?,
-            None => return Err(MsalError::CryptoFail("session_key_jwe missing".to_string())),
-        };
-        let client_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(tpm, id_key, &jwe)
-            .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher jwe: {}", e)))?;
-
-        Ok(client_key)
+    fn session_key(&self) -> Result<SessionKey, MsalError> {
+        match &self.session_key_jwe {
+            Some(session_key_jwe) => SessionKey::new(session_key_jwe),
+            None => Err(MsalError::CryptoFail("session_key_jwe missing".to_string())),
+        }
     }
 
     fn clone_session_key(&self, new_prt: &mut PrimaryRefreshToken) {
         new_prt.session_key_jwe = self.session_key_jwe.clone();
+    }
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+struct SessionKey {
+    session_key_jwe: JweCompact,
+}
+
+#[cfg(feature = "broker")]
+#[doc(cfg(feature = "broker"))]
+impl SessionKey {
+    fn new(session_key_jwe: &str) -> Result<Self, MsalError> {
+        Ok(SessionKey {
+            session_key_jwe: JweCompact::from_str(session_key_jwe)
+                .map_err(|e| MsalError::InvalidParse(format!("Failed parsing jwe: {}", e)))?,
+        })
+    }
+
+    fn decipher_prt_v2(
+        &self,
+        tpm: &mut BoxedDynTpm,
+        transport_key: &MsOapxbcRsaKey,
+        jwe: &JweCompact,
+    ) -> Result<Jwe, MsalError> {
+        let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
+            tpm,
+            transport_key,
+            &self.session_key_jwe,
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
+        session_key
+            .decipher_prt_v2(tpm, transport_key, jwe)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e)))
+    }
+
+    fn sign<V: JwsSignable>(
+        &self,
+        tpm: &mut BoxedDynTpm,
+        transport_key: &MsOapxbcRsaKey,
+        jws: &V,
+    ) -> Result<V::Signed, MsalError> {
+        let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
+            tpm,
+            transport_key,
+            &self.session_key_jwe,
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
+        session_key
+            .sign(tpm, transport_key, jws)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed signing jwk: {}", e)))
     }
 }
 
@@ -1302,7 +1350,7 @@ impl BrokerClientApplication {
             .acquire_user_prt_by_username_password_internal(username, password, tpm, machine_key)
             .await?;
         let transport_key = self.transport_key(tpm, machine_key)?;
-        let session_key = prt.session_key(tpm, &transport_key)?;
+        let session_key = prt.session_key()?;
         let mut token = self
             .exchange_prt_for_access_token_internal(
                 &prt,
@@ -1345,7 +1393,7 @@ impl BrokerClientApplication {
             .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, machine_key)
             .await?;
         let transport_key = self.transport_key(tpm, machine_key)?;
-        let session_key = prt.session_key(tpm, &transport_key)?;
+        let session_key = prt.session_key()?;
         let mut token = self
             .exchange_prt_for_access_token_internal(
                 &prt,
@@ -1668,13 +1716,10 @@ impl BrokerClientApplication {
         jwt: &Jws,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
-        session_key: &MsOapxbcSessionKey,
+        session_key: &SessionKey,
     ) -> Result<String, MsalError> {
         let transport_key = self.transport_key(tpm, machine_key)?;
-        let signed_jwt = match session_key.sign(tpm, &transport_key, jwt) {
-            Ok(signed_jwt) => signed_jwt,
-            Err(e) => return Err(MsalError::CryptoFail(format!("Failed signing jwk: {}", e))),
-        };
+        let signed_jwt = session_key.sign(tpm, &transport_key, jwt)?;
 
         Ok(format!("{}", signed_jwt))
     }
@@ -1708,7 +1753,7 @@ impl BrokerClientApplication {
     ) -> Result<UserToken, MsalError> {
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
-        let session_key = prt.session_key(tpm, &transport_key)?;
+        let session_key = prt.session_key()?;
         self.exchange_prt_for_access_token_internal(
             &prt,
             scope,
@@ -1728,7 +1773,7 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
         transport_key: &MsOapxbcRsaKey,
-        session_key: &MsOapxbcSessionKey,
+        session_key: &SessionKey,
         request_resource: Option<String>,
     ) -> Result<UserToken, MsalError> {
         let resource = match request_resource {
@@ -1784,10 +1829,7 @@ impl BrokerClientApplication {
             let token: UserToken = json_from_str(
                 std::str::from_utf8(
                     session_key
-                        .decipher_prt_v2(tpm, transport_key, &jwe)
-                        .map_err(|e| {
-                            MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e))
-                        })?
+                        .decipher_prt_v2(tpm, transport_key, &jwe)?
                         .payload(),
                 )
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
@@ -1830,7 +1872,7 @@ impl BrokerClientApplication {
     ) -> Result<SealedData, MsalError> {
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
-        let session_key = prt.session_key(tpm, &transport_key)?;
+        let session_key = prt.session_key()?;
         let nonce = self.request_nonce().await?;
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&ExchangePRTPayload::new(&prt, &[], &nonce, None, true)?).map_err(
@@ -1876,10 +1918,7 @@ impl BrokerClientApplication {
             let mut new_prt: PrimaryRefreshToken = json_from_str(
                 std::str::from_utf8(
                     session_key
-                        .decipher_prt_v2(tpm, &transport_key, &jwe)
-                        .map_err(|e| {
-                            MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e))
-                        })?
+                        .decipher_prt_v2(tpm, &transport_key, &jwe)?
                         .payload(),
                 )
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
