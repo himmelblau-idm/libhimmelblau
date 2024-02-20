@@ -12,80 +12,57 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::compact::JweCompact;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::crypto::JwsTpmSigner;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::crypto::MsOapxbcSessionKey;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::jwe::Jwe;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::jws::JwsBuilder;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::traits::JwsMutSigner;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::traits::JwsSignable;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use compact_jwt::Jws;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use kanidm_hsm_crypto::{
     BoxedDynTpm, IdentityKey, KeyAlgorithm, LoadableIdentityKey, MachineKey, SealedData, Tpm,
 };
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use kanidm_hsm_crypto::{LoadableMsOapxbcRsaKey, MsOapxbcRsaKey};
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use openssl::pkey::Public;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use openssl::rsa::Rsa;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use openssl::x509::X509;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use os_release::OsRelease;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use reqwest::Url;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use serde_json::{from_slice as json_from_slice, to_vec as json_to_vec};
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use std::convert::TryInto;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use std::str::FromStr;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use tracing::debug;
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use crate::discovery::{
     discover_enrollment_services, DISCOVERY_URL, DRS_CLIENT_NAME_HEADER_FIELD,
     DRS_CLIENT_VERSION_HEADER_FIELD,
 };
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 use serde_json::{json, to_string_pretty};
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct Certificate {
     #[serde(rename = "RawBody")]
@@ -93,7 +70,6 @@ struct Certificate {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct DRSResponse {
     #[serde(rename = "Certificate")]
@@ -104,13 +80,10 @@ struct DRSResponse {
 struct JoinPayload {}
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 pub const BROKER_APP_ID: &str = "29d9ed98-a469-4536-ade2-f981bc1d605e";
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
@@ -275,7 +248,6 @@ pub struct UserToken {
     #[zeroize(skip)]
     pub client_info: ClientInfo,
     #[cfg(feature = "broker")]
-    #[doc(cfg(feature = "broker"))]
     #[zeroize(skip)]
     pub prt: Option<SealedData>,
 }
@@ -337,7 +309,6 @@ impl UserToken {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct UsernamePasswordAuthenticationPayload {
     client_id: String,
@@ -350,7 +321,6 @@ struct UsernamePasswordAuthenticationPayload {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl UsernamePasswordAuthenticationPayload {
     fn new(username: &str, password: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -373,7 +343,6 @@ impl UsernamePasswordAuthenticationPayload {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct RefreshTokenAuthenticationPayload {
     client_id: String,
@@ -385,7 +354,6 @@ struct RefreshTokenAuthenticationPayload {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl RefreshTokenAuthenticationPayload {
     fn new(refresh_token: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
@@ -407,7 +375,6 @@ impl RefreshTokenAuthenticationPayload {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Serialize, Clone, Default)]
 struct ExchangePRTPayload {
     win_ver: Option<String>,
@@ -422,7 +389,6 @@ struct ExchangePRTPayload {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl ExchangePRTPayload {
     fn new(
         prt: &PrimaryRefreshToken,
@@ -457,7 +423,6 @@ impl ExchangePRTPayload {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Debug, Deserialize)]
 struct Nonce {
     #[serde(rename = "Nonce")]
@@ -465,7 +430,6 @@ struct Nonce {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl FromStr for TGT {
     type Err = MsalError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -474,7 +438,6 @@ impl FromStr for TGT {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Default, Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct TGT {
     #[serde(rename = "clientKey")]
@@ -494,7 +457,6 @@ pub struct TGT {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 #[allow(dead_code)]
 struct PrimaryRefreshToken {
@@ -520,7 +482,6 @@ struct PrimaryRefreshToken {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl PrimaryRefreshToken {
     fn session_key(&self) -> Result<SessionKey, MsalError> {
         match &self.session_key_jwe {
@@ -535,13 +496,11 @@ impl PrimaryRefreshToken {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 struct SessionKey {
     session_key_jwe: JweCompact,
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl SessionKey {
     fn new(session_key_jwe: &str) -> Result<Self, MsalError> {
         Ok(SessionKey {
@@ -883,7 +842,6 @@ impl PublicClientApplication {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 pub struct EnrollAttrs {
     device_display_name: String,
     device_type: String,
@@ -893,7 +851,6 @@ pub struct EnrollAttrs {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl EnrollAttrs {
     /// Initialize attributes for device enrollment
     ///
@@ -964,7 +921,6 @@ impl EnrollAttrs {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct BcryptRsaKeyBlob {
     bit_length: u32,
@@ -973,7 +929,6 @@ struct BcryptRsaKeyBlob {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl BcryptRsaKeyBlob {
     fn new(bit_length: u32, exponent: &[u8], modulus: &[u8]) -> Self {
         BcryptRsaKeyBlob {
@@ -985,7 +940,6 @@ impl BcryptRsaKeyBlob {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl TryInto<Vec<u8>> for BcryptRsaKeyBlob {
     type Error = MsalError;
 
@@ -1015,7 +969,6 @@ impl TryInto<Vec<u8>> for BcryptRsaKeyBlob {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 pub struct BrokerClientApplication {
     app: PublicClientApplication,
     transport_key: Option<LoadableMsOapxbcRsaKey>,
@@ -1023,7 +976,6 @@ pub struct BrokerClientApplication {
 }
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 impl BrokerClientApplication {
     /// Create an instance of an application.
     ///

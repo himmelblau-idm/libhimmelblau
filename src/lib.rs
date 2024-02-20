@@ -9,7 +9,6 @@
 #![deny(clippy::await_holding_lock)]
 #![deny(clippy::needless_pass_by_value)]
 #![deny(clippy::trivially_copy_pass_by_ref)]
-#![feature(doc_cfg)]
 #![doc = include_str!("../README.md")]
 
 pub mod error;
@@ -18,5 +17,4 @@ pub mod auth;
 pub use auth::*;
 
 #[cfg(feature = "broker")]
-#[doc(cfg(feature = "broker"))]
 pub mod discovery;
