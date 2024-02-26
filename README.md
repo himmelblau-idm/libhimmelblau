@@ -24,7 +24,7 @@ Create an instance of the PublicClientApplication, then authenticate:
 
 ```Rust
 let authority = format!("https://login.microsoftonline.com/{}", tenant_id);
-let app = PublicClientApplication::new(client_id, Some(&authority));
+let app = PublicClientApplication::new(client_id, Some(&authority)).expect("Failed creating app");
 let scope = vec![];
 let token = app.acquire_token_by_username_password(username, password, scope).await?;
 ```
@@ -64,7 +64,7 @@ let machine_key = tpm
     .machine_key_load(&auth_value, &loadable_machine_key)
     .expect("Unable to load machine key");
 
-let app = BrokerClientApplication::new(Some(&authority), None, None);
+let app = BrokerClientApplication::new(Some(&authority), None, None).expect("Failed creating app");
 
 // Obtain a token for authentication. If authenticating here without MFA, the PRT and
 // user token will not have the mfa claim. Use initiate_device_flow_for_device_enrollment()
@@ -103,5 +103,5 @@ let machine_key = tpm
     .machine_key_load(&auth_value, &loadable_machine_key)
     .expect("Unable to load machine key");
 
-let app = BrokerClientApplication::new(Some(&authority), Some(&transport_key), Some(&cert_key));
+let app = BrokerClientApplication::new(Some(&authority), Some(&transport_key), Some(&cert_key)).expect("Failed creating app");
 ```

@@ -1,12 +1,17 @@
 use crate::error::{ErrorResponse, MsalError};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use reqwest::{header, Client};
+use reqwest::{header, Client, Url};
+use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{from_str as json_from_str, Value};
+use serde_json::{from_str as json_from_str, json, Value};
 use std::fmt;
 use std::marker::PhantomData;
+use std::str::FromStr;
+use std::thread::sleep;
+use std::time::Duration;
+use tracing::info;
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -42,13 +47,9 @@ use openssl::x509::X509;
 #[cfg(feature = "broker")]
 use os_release::OsRelease;
 #[cfg(feature = "broker")]
-use reqwest::Url;
-#[cfg(feature = "broker")]
 use serde_json::{from_slice as json_from_slice, to_vec as json_to_vec};
 #[cfg(feature = "broker")]
 use std::convert::TryInto;
-#[cfg(feature = "broker")]
-use std::str::FromStr;
 #[cfg(feature = "broker")]
 use tracing::debug;
 
@@ -60,7 +61,7 @@ use crate::discovery::{
 #[cfg(feature = "broker")]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
-use serde_json::{json, to_string_pretty};
+use serde_json::to_string_pretty;
 
 #[cfg(feature = "broker")]
 #[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -97,6 +98,89 @@ pub struct DeviceAuthorizationResponse {
     pub expires_in: u32,
     pub interval: Option<u32>,
     pub message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ArrUserProofs {
+    #[serde(rename = "authMethodId")]
+    auth_method_id: String,
+    #[serde(rename = "isDefault")]
+    is_default: bool,
+    display: String,
+}
+
+#[derive(Deserialize)]
+struct AuthConfig {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "sFT")]
+    sft: Option<String>,
+    #[serde(rename = "sCtx")]
+    sctx: Option<String>,
+    #[serde(rename = "urlPost")]
+    url_post: Option<String>,
+    canary: String,
+    #[serde(rename = "strServiceExceptionMessage")]
+    service_exception_msg: Option<String>,
+    pgid: Option<String>,
+    #[serde(rename = "iRemainingDaysToSkipMfaRegistration")]
+    remaining_days_to_skip_mfa_reg: Option<u32>,
+    #[serde(rename = "arrUserProofs")]
+    arr_user_proofs: Option<Vec<ArrUserProofs>>,
+    #[serde(rename = "urlEndAuth")]
+    url_end_auth: Option<String>,
+    #[serde(rename = "urlBeginAuth")]
+    url_begin_auth: Option<String>,
+    #[serde(rename = "iMaxPollAttempts")]
+    max_poll_attempts: Option<u32>,
+    #[serde(rename = "iPollingInterval")]
+    polling_interval: Option<u32>,
+}
+
+pub struct MFAAuthContinue {
+    pub mfa_method: String,
+    pub msg: String,
+    max_poll_attempts: Option<u32>,
+    polling_interval: Option<u32>,
+    session_id: String,
+    flow_token: String,
+    ctx: String,
+    canary: String,
+    url_end_auth: String,
+    url_begin_auth: String,
+    url_post: String,
+}
+
+#[derive(Deserialize)]
+struct AuthResponse {
+    #[serde(rename = "Success")]
+    success: bool,
+    #[serde(rename = "Retry")]
+    retry: Option<bool>,
+    #[serde(rename = "Message")]
+    message: Option<String>,
+    #[serde(rename = "Ctx")]
+    ctx: String,
+    #[serde(rename = "FlowToken")]
+    flow_token: String,
+}
+
+#[derive(Deserialize)]
+struct Credentials {
+    #[serde(rename = "FederationRedirectUrl")]
+    federation_redirect_url: Option<String>,
+    #[serde(rename = "HasPassword")]
+    has_password: bool,
+}
+
+#[derive(Deserialize)]
+struct CredType {
+    #[serde(rename = "Credentials")]
+    credentials: Credentials,
+    #[serde(rename = "ThrottleStatus")]
+    throttle_status: u8,
+    #[serde(rename = "IfExistsResult")]
+    if_exists_result: u8,
 }
 
 #[derive(Default, Clone, Deserialize, Serialize)]
@@ -551,15 +635,19 @@ struct ClientApplication {
 }
 
 impl ClientApplication {
-    fn new(client_id: &str, authority: Option<&str>) -> Self {
-        ClientApplication {
-            client: reqwest::Client::new(),
+    fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        Ok(ClientApplication {
+            client,
             client_id: client_id.to_string(),
             authority: match authority {
                 Some(authority) => authority.to_string(),
                 None => "https://login.microsoftonline.com/common".to_string(),
             },
-        }
+        })
     }
 
     async fn acquire_token_by_username_password(
@@ -674,10 +762,10 @@ impl PublicClientApplication {
     /// * `authority` - A URL that identifies a token authority. It should
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
-    pub fn new(client_id: &str, authority: Option<&str>) -> Self {
-        PublicClientApplication {
-            app: ClientApplication::new(client_id, authority),
-        }
+    pub fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+        Ok(PublicClientApplication {
+            app: ClientApplication::new(client_id, authority)?,
+        })
     }
 
     fn client(&self) -> &Client {
@@ -839,6 +927,672 @@ impl PublicClientApplication {
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
+
+    fn parse_auth_config(&self, text: &str) -> Result<AuthConfig, MsalError> {
+        let document = Html::parse_document(text);
+        for script in
+            document.select(&Selector::parse("script").map_err(|e| {
+                MsalError::GeneralFailure(format!("Failed parsing auth config: {}", e))
+            })?)
+        {
+            let text = script.inner_html();
+            if let Some(config_index) = text.find(r"$Config=") {
+                let sconfig = &text[config_index + 8..];
+                if let Some(end_index) = sconfig.rfind(r"//]]&gt;") {
+                    let config = &sconfig[..end_index - 2];
+                    let auth_config: AuthConfig = json_from_str(config).map_err(|e| {
+                        MsalError::InvalidJson(format!("Failed parsing auth config: {}", e))
+                    })?;
+                    return Ok(auth_config);
+                }
+            }
+        }
+        Err(MsalError::GeneralFailure(
+            "Auth config was not found".to_string(),
+        ))
+    }
+
+    async fn handle_auth_config_req_internal(
+        &self,
+        req_params: &[(&str, &str)],
+        auth_config: &AuthConfig,
+    ) -> Result<AuthConfig, MsalError> {
+        let payload = req_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let url_post = match &auth_config.url_post {
+            Some(url_post) => url_post.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "urlPost missing from auth config".to_string(),
+                ))
+            }
+        };
+        let url = match url_post.starts_with('/') {
+            true => {
+                let authority = self.authority().to_string();
+                let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
+                    "Failed to splice auth config url".to_string(),
+                ))?;
+                format!("{}/{}", &authority[..index], &url_post)
+            }
+            false => url_post.clone(),
+        };
+
+        let resp = self
+            .client()
+            .post(url)
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+            self.parse_auth_config(&text)
+        } else {
+            Err(MsalError::GeneralFailure(
+                resp.text()
+                    .await
+                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+            ))
+        }
+    }
+
+    /// Initiate an MFA flow via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// * `request_resource` - A resource for obtaining an access token.
+    ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
+    ///
+    /// # Returns
+    /// * Success: A MFAAuthContinue containing the information needed to continue the
+    ///   authentication flow.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn initiate_acquire_token_by_mfa_flow(
+        &self,
+        username: &str,
+        password: &str,
+        scopes: Vec<&str>,
+        resource: Option<&str>,
+    ) -> Result<MFAAuthContinue, MsalError> {
+        let request_id = Uuid::new_v4().to_string();
+        let auth_config = self
+            .request_auth_config_internal(scopes, &request_id, resource)
+            .await?;
+        let cred_type = self
+            .get_cred_type(username, &auth_config, &request_id)
+            .await?;
+        if cred_type.credentials.federation_redirect_url.is_some() {
+            return Err(MsalError::GeneralFailure(
+                "Federated identities are not supported.".to_string(),
+            ));
+        }
+        if cred_type.throttle_status == 1 {
+            return Err(MsalError::GeneralFailure(
+                "Authentication throttled. Wait a minute and try again.".to_string(),
+            ));
+        }
+        if cred_type.if_exists_result != 0 {
+            return Err(MsalError::GeneralFailure(
+                "An account with that name does not exist.".to_string(),
+            ));
+        }
+        if !cred_type.credentials.has_password {
+            return Err(MsalError::GeneralFailure(
+                "Password authentication is not supported.".to_string(),
+            ));
+        }
+
+        let sctx = match &auth_config.sctx {
+            Some(sctx) => sctx.clone(),
+            None => return Err(MsalError::GeneralFailure("sCtx is missing".to_string())),
+        };
+        let sft = match &auth_config.sft {
+            Some(sft) => sft.clone(),
+            None => return Err(MsalError::GeneralFailure("sFt is missing".to_string())),
+        };
+        let params = vec![
+            ("login", username),
+            ("passwd", password),
+            ("ctx", &sctx),
+            ("flowToken", &sft),
+            ("canary", &auth_config.canary),
+            ("client_id", self.client_id()),
+            ("client-request-id", &request_id),
+        ];
+        match self
+            .handle_auth_config_req_internal(&params, &auth_config)
+            .await
+        {
+            Ok(mut auth_config) => {
+                if let Some(msg) = auth_config.service_exception_msg {
+                    return Err(MsalError::GeneralFailure(msg));
+                }
+                if let Some(ref pgid) = auth_config.pgid {
+                    if pgid == "KmsiInterrupt" {
+                        let sctx = match &auth_config.sctx {
+                            Some(sctx) => sctx.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "sCtx is missing".to_string(),
+                                ))
+                            }
+                        };
+                        let sft = match &auth_config.sft {
+                            Some(sft) => sft.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure("sFt is missing".to_string()))
+                            }
+                        };
+                        let params = vec![
+                            ("LoginOptions", "1"),
+                            ("ctx", &sctx),
+                            ("flowToken", &sft),
+                            ("canary", &auth_config.canary),
+                            ("client-request-id", &request_id),
+                        ];
+                        auth_config = self
+                            .handle_auth_config_req_internal(&params, &auth_config)
+                            .await?;
+                    }
+                }
+                if let Some(ref pgid) = auth_config.pgid {
+                    if pgid == "ConvergedProofUpRedirect" {
+                        if let Some(remaining_days) = auth_config.remaining_days_to_skip_mfa_reg {
+                            info!("MFA must be set up in {} days", remaining_days);
+                            let params = vec![
+                                ("LoginOptions", "1"),
+                                ("ctx", &sctx),
+                                ("flowToken", &sft),
+                                ("canary", &auth_config.canary),
+                                ("client-request-id", &request_id),
+                            ];
+                            auth_config = self
+                                .handle_auth_config_req_internal(&params, &auth_config)
+                                .await?;
+                        } else {
+                            return Err(MsalError::GeneralFailure(
+                                "MFA method must be registered.".to_string(),
+                            ));
+                        }
+                    }
+                }
+                if let Some(pgid) = auth_config.pgid {
+                    if pgid == "ConvergedChangePassword" {
+                        return Err(MsalError::GeneralFailure(
+                            "Password is expired!".to_string(),
+                        ));
+                    }
+                }
+                if let Some(arr_user_proofs) = auth_config.arr_user_proofs {
+                    if let Some(default_auth_method) =
+                        arr_user_proofs.iter().find(|proof| proof.is_default)
+                    {
+                        let sctx = match &auth_config.sctx {
+                            Some(sctx) => sctx.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "sCtx is missing".to_string(),
+                                ))
+                            }
+                        };
+                        let sft = match &auth_config.sft {
+                            Some(sft) => sft.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure("sFt is missing".to_string()))
+                            }
+                        };
+                        let url_end_auth = match &auth_config.url_end_auth {
+                            Some(url_end_auth) => url_end_auth.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "urlEndAuth is missing".to_string(),
+                                ))
+                            }
+                        };
+                        let url_begin_auth = match &auth_config.url_begin_auth {
+                            Some(url_begin_auth) => url_begin_auth.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "urlBeginAuth is missing".to_string(),
+                                ))
+                            }
+                        };
+                        let url_post = match &auth_config.url_post {
+                            Some(url_post) => url_post.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "urlBeginAuth is missing".to_string(),
+                                ))
+                            }
+                        };
+                        let msg = match default_auth_method.auth_method_id.as_str() {
+                            "PhoneAppNotification" =>
+                                "Open your Authenticator app, and enter the number shown to sign in:".to_string(),
+                            "PhoneAppOTP" =>
+                                "Please type in the code displayed on your authenticator app from your device:".to_string(),
+                            "OneWaySMS" =>
+                                format!("We texted your phone {}. Please enter the code to sign in:", default_auth_method.display),
+                            "TwoWayVoiceMobile" =>
+                                format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
+                            "TwoWayVoiceAlternateMobile" =>
+                                format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
+                            method => return Err(MsalError::GeneralFailure(format!("Unsupported MFA method {}", method))),
+                        };
+                        Ok(MFAAuthContinue {
+                            mfa_method: default_auth_method.auth_method_id.clone(),
+                            msg,
+                            max_poll_attempts: auth_config.max_poll_attempts,
+                            polling_interval: auth_config.polling_interval,
+                            session_id: auth_config.session_id,
+                            flow_token: sft,
+                            ctx: sctx,
+                            canary: auth_config.canary,
+                            url_end_auth,
+                            url_begin_auth,
+                            url_post,
+                        })
+                    } else {
+                        Err(MsalError::GeneralFailure(
+                            "No MFA methods found".to_string(),
+                        ))
+                    }
+                } else {
+                    Err(MsalError::GeneralFailure(
+                        "No MFA methods found".to_string(),
+                    ))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn get_cred_type(
+        &self,
+        username: &str,
+        auth_config: &AuthConfig,
+        request_id: &str,
+    ) -> Result<CredType, MsalError> {
+        let payload = json!({
+            "username": username,
+            "isOtherIdpSupported": true,
+            "checkPhones": true,
+            "isRemoteNGCSupported": false,
+            "isCookieBannerShown": false,
+            "isFidoSupported": false,
+            "originalRequest": &auth_config.sctx,
+            "flowToken": &auth_config.sft,
+        });
+
+        let resp = self
+            .client()
+            .post(format!("{}/GetCredentialType", self.authority()))
+            .header(header::CONTENT_TYPE, "application/json; charset=UTF-8")
+            .header("client-request-id", request_id)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let json_resp: CredType = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Ok(json_resp)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    async fn request_auth_config_internal(
+        &self,
+        scopes: Vec<&str>,
+        request_id: &str,
+        resource: Option<&str>,
+    ) -> Result<AuthConfig, MsalError> {
+        let scope = format!("openid profile {}", scopes.join(" "));
+        let params = vec![
+            ("client_id", self.client_id()),
+            ("response_type", "code"),
+            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("client-request-id", request_id),
+            ("prompt", "login"),
+            ("scope", &scope),
+            ("response_mode", "query"),
+            ("sso_reload", "True"),
+            ("amr_values", "mfa"),
+            (
+                "resource",
+                &resource.unwrap_or("00000002-0000-0000-c000-000000000000"),
+            ),
+        ];
+        let url = Url::parse_with_params(
+            &format!("{}/oauth2/authorize", self.authority()),
+            &params.to_vec(),
+        )
+        .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+
+        let resp = self
+            .client()
+            .get(url)
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            self.parse_auth_config(&resp.text().await.map_err(|e| {
+                MsalError::GeneralFailure(format!("Failed parsing auth config: {}", e))
+            })?)
+        } else {
+            Err(MsalError::GeneralFailure(
+                "Failed requesting auth config".to_string(),
+            ))
+        }
+    }
+
+    async fn mfa_begin_auth_internal(&self, flow: &mut MFAAuthContinue) -> Result<bool, MsalError> {
+        let payload = json!({
+            "AuthMethodId": &flow.mfa_method,
+            "ctx": &flow.ctx,
+            "flowToken": &flow.flow_token,
+            "Method": "BeginAuth",
+        });
+
+        let resp = self
+            .client()
+            .post(&flow.url_begin_auth)
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header("canary", &flow.canary)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+            let auth_response: AuthResponse =
+                json_from_str(&text).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            if auth_response.success {
+                flow.ctx = auth_response.ctx;
+                flow.flow_token = auth_response.flow_token;
+                Ok(auth_response.success)
+            } else if let Some(msg) = auth_response.message {
+                Err(MsalError::GeneralFailure(msg))
+            } else {
+                Err(MsalError::GeneralFailure("BeginAuth failed".to_string()))
+            }
+        } else {
+            Err(MsalError::GeneralFailure(
+                "BeginAuth Authentication request failed".to_string(),
+            ))
+        }
+    }
+
+    async fn request_authorization_internal(
+        &self,
+        username: &str,
+        flow: &MFAAuthContinue,
+    ) -> Result<String, MsalError> {
+        let params = [
+            ("request", &flow.ctx),
+            ("mfaAuthMethod", &flow.mfa_method),
+            ("login", &username.to_string()),
+            ("flowToken", &flow.flow_token),
+            ("canary", &flow.canary),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post(&flow.url_post)
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_redirection() {
+            let redirect = resp.headers()["location"]
+                .to_str()
+                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let url =
+                Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let (_, code) =
+                url.query_pairs()
+                    .find(|(k, _)| k == "code")
+                    .ok_or(MsalError::InvalidParse(
+                        "Authorization code missing from redirect".to_string(),
+                    ))?;
+            Ok(code.to_string())
+        } else {
+            Err(MsalError::GeneralFailure(
+                "ProcessAuth Authorization request failed".to_string(),
+            ))
+        }
+    }
+
+    async fn exchange_authorization_code_for_access_token_internal(
+        &self,
+        authorization_code: String,
+    ) -> Result<UserToken, MsalError> {
+        let params = [
+            ("client_id", self.client_id()),
+            ("grant_type", "authorization_code"),
+            ("code", &authorization_code),
+            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post(format!("{}/oauth2/token", self.authority()))
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+            Ok(token)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    /// Obtain token by a MFA flow object.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `auth_data` - An optional token received for the MFA flow (some MFA
+    ///   flows do not require input).
+    ///
+    /// * `flow` - A MFAAuthContinue previously generated by
+    /// initiate_acquire_token_by_mfa_flow.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_mfa_flow(
+        &self,
+        username: &str,
+        auth_data: Option<&str>,
+        mut flow: MFAAuthContinue,
+    ) -> Result<UserToken, MsalError> {
+        self.mfa_begin_auth_internal(&mut flow).await?;
+        match auth_data {
+            Some(auth_data) => {
+                let payload = json!({
+                    "AdditionalAuthData": auth_data.trim(),
+                    "AuthMethodId": &flow.mfa_method,
+                    "SessionId": &flow.session_id,
+                    "FlowToken": &flow.flow_token,
+                    "Ctx": &flow.ctx,
+                    "Method": "EndAuth",
+                });
+
+                let resp = self
+                    .client()
+                    .post(&flow.url_end_auth)
+                    .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+                    .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+                    .header("canary", &flow.canary)
+                    .json(&payload)
+                    .send()
+                    .await
+                    .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+                if resp.status().is_success() {
+                    let text = resp
+                        .text()
+                        .await
+                        .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+                    // Check for an error in an auth Config
+                    if let Ok(auth_config) = self.parse_auth_config(&text) {
+                        if let Some(service_exception_msg) = auth_config.service_exception_msg {
+                            return Err(MsalError::GeneralFailure(
+                                service_exception_msg.to_string(),
+                            ));
+                        }
+                    }
+                    // Parse what should be a json response otherwise
+                    let auth_response: AuthResponse = json_from_str(&text)
+                        .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                    if auth_response.success {
+                        flow.ctx = auth_response.ctx;
+                        flow.flow_token = auth_response.flow_token;
+                        let auth_code =
+                            self.request_authorization_internal(username, &flow).await?;
+                        self.exchange_authorization_code_for_access_token_internal(auth_code)
+                            .await
+                    } else if let Some(msg) = auth_response.message {
+                        Err(MsalError::GeneralFailure(msg))
+                    } else {
+                        Err(MsalError::GeneralFailure("EndAuth failed".to_string()))
+                    }
+                } else {
+                    Err(MsalError::GeneralFailure(
+                        "EndAuth Authentication request failed".to_string(),
+                    ))
+                }
+            }
+            None => {
+                let max_poll_attempts = flow.max_poll_attempts.ok_or(MsalError::GeneralFailure(
+                    "iMaxPollAttempts missing from config".to_string(),
+                ))?;
+                for p in 1..max_poll_attempts {
+                    let url = Url::parse_with_params(
+                        &flow.url_end_auth,
+                        [
+                            ("authMethodId", &flow.mfa_method),
+                            ("pollCount", &format!("{}", p)),
+                        ],
+                    )
+                    .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+
+                    let resp = self
+                        .client()
+                        .get(url)
+                        .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+                        .header("x-ms-sessionId", &flow.session_id)
+                        .header("x-ms-flowToken", &flow.flow_token)
+                        .header("x-ms-ctx", &flow.ctx)
+                        .send()
+                        .await
+                        .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+                    if resp.status().is_success() {
+                        let text = resp
+                            .text()
+                            .await
+                            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+                        // Check for an error in an auth Config
+                        if let Ok(auth_config) = self.parse_auth_config(&text) {
+                            if let Some(service_exception_msg) = auth_config.service_exception_msg {
+                                return Err(MsalError::GeneralFailure(
+                                    service_exception_msg.to_string(),
+                                ));
+                            }
+                        }
+                        // Parse what should be a json response otherwise
+                        let auth_response: AuthResponse = json_from_str(&text)
+                            .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                        if auth_response.success {
+                            flow.ctx = auth_response.ctx;
+                            flow.flow_token = auth_response.flow_token;
+                            let auth_code =
+                                self.request_authorization_internal(username, &flow).await?;
+                            return self
+                                .exchange_authorization_code_for_access_token_internal(auth_code)
+                                .await;
+                        } else if !auth_response.retry.ok_or(MsalError::GeneralFailure(
+                            "Auth response Retry missing".to_string(),
+                        ))? {
+                            if let Some(msg) = auth_response.message {
+                                return Err(MsalError::GeneralFailure(msg));
+                            } else {
+                                return Err(MsalError::GeneralFailure(
+                                    "EndAuth failed".to_string(),
+                                ));
+                            }
+                        }
+                        let polling_interval = Duration::from_millis(
+                            flow.polling_interval
+                                .ok_or(MsalError::GeneralFailure(
+                                    "Config polling interval missing".to_string(),
+                                ))?
+                                .into(),
+                        );
+                        sleep(polling_interval);
+                    } else {
+                        return Err(MsalError::GeneralFailure(
+                            "EndAuth Authentication request failed".to_string(),
+                        ));
+                    }
+                }
+                Err(MsalError::GeneralFailure("MFA poll timed out".to_string()))
+            }
+        }
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -997,12 +1751,12 @@ impl BrokerClientApplication {
         authority: Option<&str>,
         transport_key: Option<LoadableMsOapxbcRsaKey>,
         cert_key: Option<LoadableIdentityKey>,
-    ) -> Self {
-        BrokerClientApplication {
-            app: PublicClientApplication::new(BROKER_APP_ID, authority),
+    ) -> Result<Self, MsalError> {
+        Ok(BrokerClientApplication {
+            app: PublicClientApplication::new(BROKER_APP_ID, authority)?,
             transport_key,
             cert_key,
-        }
+        })
     }
 
     fn client(&self) -> &Client {
@@ -1430,6 +2184,56 @@ impl BrokerClientApplication {
         flow: DeviceAuthorizationResponse,
     ) -> Result<UserToken, MsalError> {
         self.app.acquire_token_by_device_flow(flow).await
+    }
+
+    /// Initiate an MFA flow for enrollment via user credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// # Returns
+    /// * Success: A MFAAuthContinue containing the information needed to continue the
+    ///   authentication flow.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn initiate_acquire_token_by_mfa_flow_for_device_enrollment(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<MFAAuthContinue, MsalError> {
+        let drs_resource = "https://enrollment.manage.microsoft.com/";
+        self.app
+            .initiate_acquire_token_by_mfa_flow(username, password, vec![], Some(drs_resource))
+            .await
+    }
+
+    /// Obtain token by a MFA flow object.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `auth_data` - An optional token received for the MFA flow (some MFA
+    ///   flows do not require input).
+    ///
+    /// * `flow` - A MFAAuthContinue previously generated by
+    /// initiate_acquire_token_by_mfa_flow.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_mfa_flow(
+        &self,
+        username: &str,
+        auth_data: Option<&str>,
+        flow: MFAAuthContinue,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_mfa_flow(username, auth_data, flow)
+            .await
     }
 
     async fn request_nonce(&self) -> Result<String, MsalError> {
