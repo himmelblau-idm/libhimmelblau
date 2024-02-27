@@ -99,7 +99,7 @@ pub struct DeviceAuthorizationResponse {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Default, Clone, Deserialize, Serialize)]
 pub struct IdToken {
     pub name: String,
     pub oid: String,
@@ -241,7 +241,7 @@ pub struct UserToken {
     pub ext_expires_in: u32,
     pub access_token: Option<String>,
     pub refresh_token: String,
-    #[serde(deserialize_with = "decode_string_or_struct")]
+    #[serde(deserialize_with = "decode_string_or_struct", default)]
     #[zeroize(skip)]
     pub id_token: IdToken,
     #[serde(deserialize_with = "decode_string_or_struct", default)]
@@ -364,7 +364,7 @@ impl RefreshTokenAuthenticationPayload {
             Err(_) => None,
         };
         RefreshTokenAuthenticationPayload {
-            client_id: BROKER_CLIENT_IDENT.to_string(),
+            client_id: BROKER_APP_ID.to_string(),
             request_nonce: request_nonce.to_string(),
             scope: "openid aza ugs".to_string(),
             win_ver: os_release,
@@ -1093,6 +1093,10 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<(LoadableMsOapxbcRsaKey, LoadableIdentityKey, String), MsalError> {
+        // Acquire an actual enrollment token from the token received.
+        let token = self
+            .acquire_token_by_refresh_token_for_device_enrollment(&token.refresh_token)
+            .await?;
         // Create the transport and cert keys
         let loadable_cert_key = tpm
             .identity_key_create(machine_key, KeyAlgorithm::Rsa2048)
@@ -1378,22 +1382,13 @@ impl BrokerClientApplication {
         username: &str,
         password: &str,
     ) -> Result<UserToken, MsalError> {
-        let drs_scope = format!("{}/.default", DRS_APP_ID);
+        let drs_scope = "https://enrollment.manage.microsoft.com/.default";
         self.app
-            .acquire_token_by_username_password(username, password, vec![&drs_scope])
+            .acquire_token_by_username_password(username, password, vec![drs_scope])
             .await
     }
 
-    /// Gets a token for enrollment via refresh token.
-    ///
-    /// # Arguments
-    ///
-    /// * `refresh_token` - The old refresh token, as a string.
-    ///
-    /// # Returns
-    /// * Success: A UserToken containing an access_token.
-    /// * Failure: An MsalError, indicating the failure.
-    pub async fn acquire_token_by_refresh_token_for_device_enrollment(
+    async fn acquire_token_by_refresh_token_for_device_enrollment(
         &self,
         refresh_token: &str,
     ) -> Result<UserToken, MsalError> {
@@ -1414,8 +1409,8 @@ impl BrokerClientApplication {
     pub async fn initiate_device_flow_for_device_enrollment(
         &self,
     ) -> Result<DeviceAuthorizationResponse, MsalError> {
-        let drs_scope = format!("{}/.default", DRS_APP_ID);
-        self.app.initiate_device_flow(vec![&drs_scope]).await
+        let drs_scope = "https://enrollment.manage.microsoft.com/.default";
+        self.app.initiate_device_flow(vec![drs_scope]).await
     }
 
     /// Obtain token for enrollment by a device flow object, with customizable
