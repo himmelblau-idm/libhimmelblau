@@ -337,6 +337,49 @@ pub struct UserToken {
 }
 
 impl UserToken {
+    /// Fetch the tenant id from the user token
+    ///
+    /// # Returns
+    ///
+    /// * Success: The user's tenant id
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn tenant_id(&self) -> Result<String, MsalError> {
+        if !self.id_token.tid.is_empty() {
+            Ok(self.id_token.tid.clone())
+        } else if let Some(utid) = self.client_info.utid {
+            Ok(utid.to_string())
+        } else if let Some(access_token) = &self.access_token {
+            let mut siter = access_token.splitn(3, '.');
+            siter.next(); // Ignore the header
+            let payload: Value = json_from_str(
+                &String::from_utf8(
+                    URL_SAFE_NO_PAD
+                        .decode(siter.next().ok_or_else(|| {
+                            MsalError::InvalidParse("Payload not present".to_string())
+                        })?)
+                        .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+            )
+            .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            match payload.get("tid") {
+                Some(tid) => match tid.as_str() {
+                    Some(tid) => Ok(tid.to_string()),
+                    None => Err(MsalError::GeneralFailure(
+                        "No tid available for UserToken".to_string(),
+                    )),
+                },
+                None => Err(MsalError::GeneralFailure(
+                    "No tid available for UserToken".to_string(),
+                )),
+            }
+        } else {
+            Err(MsalError::GeneralFailure(
+                "No tid available for UserToken".to_string(),
+            ))
+        }
+    }
+
     /// Fetch the UUID from the user token
     ///
     /// # Returns
@@ -1279,7 +1322,7 @@ impl PublicClientApplication {
             ("scope", &scope),
             ("response_mode", "query"),
             ("sso_reload", "True"),
-            ("amr_values", "mfa"),
+            ("amr_values", "ngcmfa"),
             (
                 "resource",
                 &resource.unwrap_or("00000002-0000-0000-c000-000000000000"),
@@ -2096,6 +2139,7 @@ impl BrokerClientApplication {
         &self,
         refresh_token: &str,
         scopes: Vec<&str>,
+        resource: Option<String>,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
@@ -2112,7 +2156,7 @@ impl BrokerClientApplication {
                 machine_key,
                 &transport_key,
                 &session_key,
-                None,
+                resource,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -2683,6 +2727,144 @@ impl BrokerClientApplication {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    /// Provision a new Hello for Business Key
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - Token obtained via either
+    ///   acquire_token_by_username_password_for_device_enrollment
+    ///   or acquire_token_by_device_flow.
+    ///
+    /// * `key` - An optional existing LoadableIdentityKey, if not provided
+    ///   one will be created.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: Either the existing LoadableIdentityKey, or a new created
+    ///   key if none was provided.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn provision_hello_for_business_key(
+        &self,
+        token: &UserToken,
+        key: Option<LoadableIdentityKey>,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<LoadableIdentityKey, MsalError> {
+        // Discover the KeyProvisioningService
+        let access_token = match &token.access_token {
+            Some(access_token) => access_token.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "Access token missing".to_string(),
+                ))
+            }
+        };
+        let services =
+            discover_enrollment_services(self.client(), &access_token, &token.tenant_id()?).await?;
+        let (endpoint, resource_id, service_version) = match services.key_provisioning_service {
+            Some(key_provisioning_service) => {
+                let endpoint = match key_provisioning_service.endpoint {
+                    Some(endpoint) => endpoint,
+                    None => format!("{}/EnrollmentServer/key/", DISCOVERY_URL).to_string(),
+                };
+                let resource_id = match key_provisioning_service.resource_id {
+                    Some(resource_id) => resource_id,
+                    None => "1.0".to_string(),
+                };
+                let service_version = match key_provisioning_service.service_version {
+                    Some(service_version) => service_version,
+                    None => "1.0".to_string(),
+                };
+                (endpoint, resource_id, service_version)
+            }
+            None => (
+                format!("{}/EnrollmentServer/key/", DISCOVERY_URL),
+                "urn:ms-drs:enterpriseregistration.windows.net".to_string(),
+                "1.0".to_string(),
+            ),
+        };
+
+        // Acquire an access token for the key provisioning service
+        let token = self
+            .acquire_token_by_refresh_token(
+                &token.refresh_token,
+                vec![],
+                Some(resource_id),
+                tpm,
+                machine_key,
+            )
+            .await?;
+
+        // Use an existing key, or create a new hello key (using the TPM)
+        let loadable_win_hello_key = match key {
+            Some(loadable_win_hello_key) => loadable_win_hello_key,
+            None => tpm
+                .identity_key_create(machine_key, KeyAlgorithm::Rsa2048)
+                .map_err(|e| {
+                    MsalError::TPMFail(format!("Failed creating Windows Hello Key: {:?}", e))
+                })?,
+        };
+        let win_hello_key = tpm
+            .identity_key_load(machine_key, &loadable_win_hello_key)
+            .map_err(|e| {
+                MsalError::TPMFail(format!("Failed loading Windows Hello Key: {:?}", e))
+            })?;
+        let win_hello_pub_der = tpm
+            .identity_key_public_as_der(&win_hello_key)
+            .map_err(|e| {
+                MsalError::TPMFail(format!("Failed getting Windows Hello Key as der: {:?}", e))
+            })?;
+        let win_hello_rsa = Rsa::public_key_from_der(&win_hello_pub_der)
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+        let win_hello_blob: Vec<u8> = BcryptRsaKeyBlob::new(
+            2048,
+            &win_hello_rsa.e().to_vec(),
+            &win_hello_rsa.n().to_vec(),
+        )
+        .try_into()?;
+
+        // [MS-KPP] 3.1.5.1.1.1 Request Body
+        // Register the winhello public key
+        let payload = json!({
+            "kngc": STANDARD.encode(win_hello_blob),
+        });
+        let url = Url::parse_with_params(&endpoint, &[("api-version", service_version)])
+            .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+        let access_token = match &token.access_token {
+            Some(access_token) => access_token.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "Access token missing".to_string(),
+                ))
+            }
+        };
+
+        let resp = self
+            .client()
+            .post(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::USER_AGENT,
+                format!("Dsreg/10.0 ({})", env!("CARGO_PKG_NAME")),
+            )
+            .header(header::ACCEPT, "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            Ok(loadable_win_hello_key.clone())
+        } else {
+            Err(MsalError::GeneralFailure(
+                "Failed registering Windows Hello Key".to_string(),
+            ))
         }
     }
 
