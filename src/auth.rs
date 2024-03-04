@@ -39,6 +39,8 @@ use kanidm_hsm_crypto::{
 #[cfg(feature = "broker")]
 use kanidm_hsm_crypto::{LoadableMsOapxbcRsaKey, MsOapxbcRsaKey};
 #[cfg(feature = "broker")]
+use openssl::hash::{hash, MessageDigest};
+#[cfg(feature = "broker")]
 use openssl::pkey::Public;
 #[cfg(feature = "broker")]
 use openssl::rsa::Rsa;
@@ -50,6 +52,8 @@ use os_release::OsRelease;
 use serde_json::{from_slice as json_from_slice, to_vec as json_to_vec};
 #[cfg(feature = "broker")]
 use std::convert::TryInto;
+#[cfg(feature = "broker")]
+use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
 use tracing::debug;
 
@@ -497,6 +501,67 @@ impl RefreshTokenAuthenticationPayload {
             win_ver: os_release,
             grant_type: "refresh_token".to_string(),
             refresh_token: refresh_token.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "broker")]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
+struct HelloForBusinessAssertion {
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+    scope: String,
+}
+
+#[cfg(feature = "broker")]
+impl HelloForBusinessAssertion {
+    fn new(username: &str) -> Result<Self, MsalError> {
+        let iat: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
+            .as_secs();
+        Ok(HelloForBusinessAssertion {
+            iss: username.to_string(),
+            aud: "common".to_string(),
+            iat: iat - 300,
+            exp: iat + 300,
+            scope: "openid aza ugs".to_string(),
+        })
+    }
+}
+
+#[cfg(feature = "broker")]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
+struct HelloForBusinessPayload {
+    client_id: String,
+    request_nonce: String,
+    scope: String,
+    win_ver: Option<String>,
+    grant_type: String,
+    username: String,
+    assertion: String,
+}
+
+#[cfg(feature = "broker")]
+impl HelloForBusinessPayload {
+    fn new(username: &str, assertion: &str, request_nonce: &str) -> Self {
+        let os_release = match OsRelease::new() {
+            Ok(os_release) => Some(format!(
+                "{} {}",
+                os_release.pretty_name, os_release.version_id
+            )),
+            Err(_) => None,
+        };
+        HelloForBusinessPayload {
+            client_id: BROKER_APP_ID.to_string(),
+            request_nonce: request_nonce.to_string(),
+            scope: "openid aza ugs".to_string(),
+            win_ver: os_release,
+            grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
+            username: username.to_string(),
+            assertion: assertion.to_string(),
         }
     }
 }
@@ -2866,6 +2931,170 @@ impl BrokerClientApplication {
                 "Failed registering Windows Hello Key".to_string(),
             ))
         }
+    }
+
+    /// Gets a token for a given resource via a Hello for Business Key
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `key` - A LoadableIdentityKey provisioned using
+    ///   provision_hello_for_business_key.
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_hello_for_business_key(
+        &self,
+        username: &str,
+        key: &LoadableIdentityKey,
+        scopes: Vec<&str>,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<UserToken, MsalError> {
+        let prt = self
+            .acquire_user_prt_by_hello_for_business_key_internal(username, key, tpm, machine_key)
+            .await?;
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let session_key = prt.session_key()?;
+        let mut token = self
+            .exchange_prt_for_access_token_internal(
+                &prt,
+                scopes.clone(),
+                tpm,
+                machine_key,
+                &transport_key,
+                &session_key,
+                None,
+            )
+            .await?;
+        token.client_info = prt.client_info.clone();
+        token.prt = Some(self.seal_user_prt(&prt, tpm, &transport_key)?);
+        Ok(token)
+    }
+
+    async fn build_jwt_by_hello_for_business_key(
+        &self,
+        username: &str,
+        loadable_key: &LoadableIdentityKey,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<Jws, MsalError> {
+        let nonce = self.request_nonce().await?;
+        let key = tpm
+            .identity_key_load(machine_key, loadable_key)
+            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
+        let win_hello_pub_der = tpm.identity_key_public_as_der(&key).map_err(|e| {
+            MsalError::TPMFail(format!("Failed getting Windows Hello Key as der: {:?}", e))
+        })?;
+        let win_hello_rsa = Rsa::public_key_from_der(&win_hello_pub_der)
+            .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
+        let win_hello_blob: Vec<u8> = BcryptRsaKeyBlob::new(
+            2048,
+            &win_hello_rsa.e().to_vec(),
+            &win_hello_rsa.n().to_vec(),
+        )
+        .try_into()?;
+        let kid = STANDARD.encode(
+            hash(MessageDigest::sha256(), &win_hello_blob)
+                .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?,
+        );
+        let assertion_jwt = JwsBuilder::from(
+            serde_json::to_vec(
+                &HelloForBusinessAssertion::new(username)
+                    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?,
+            )
+            .map_err(|e| {
+                MsalError::InvalidJson(format!(
+                    "Failed serializing Hello for Business Assertion JWT: {}",
+                    e
+                ))
+            })?,
+        )
+        .set_typ(Some("JWT"))
+        .set_use(Some("ngc"))
+        .set_kid(Some(&kid))
+        .build();
+        let mut jws_tpm_signer = match JwsTpmSigner::new(tpm, &key) {
+            Ok(jws_tpm_signer) => jws_tpm_signer,
+            Err(e) => {
+                return Err(MsalError::TPMFail(format!(
+                    "Failed loading tpm signer: {}",
+                    e
+                )))
+            }
+        };
+        let signed_assertion = match jws_tpm_signer.sign(&assertion_jwt) {
+            Ok(signed_jwt) => signed_jwt,
+            Err(e) => return Err(MsalError::TPMFail(format!("Failed signing jwk: {}", e))),
+        };
+        let assertion = format!("{}", signed_assertion);
+
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&HelloForBusinessPayload::new(username, &assertion, &nonce))
+                .map_err(|e| {
+                    MsalError::InvalidJson(format!(
+                        "Failed serializing Hello for Business JWT: {}",
+                        e
+                    ))
+                })?,
+        )
+        .set_typ(Some("JWT"))
+        .build();
+
+        Ok(jwt)
+    }
+
+    async fn acquire_user_prt_by_hello_for_business_key_internal(
+        &self,
+        username: &str,
+        key: &LoadableIdentityKey,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<PrimaryRefreshToken, MsalError> {
+        let jwt = self
+            .build_jwt_by_hello_for_business_key(username, key, tpm, machine_key)
+            .await?;
+        let signed_jwt = self.sign_jwt(&jwt, tpm, machine_key).await?;
+
+        self.acquire_user_prt_jwt(&signed_jwt).await
+    }
+
+    /// Gets a Primary Refresh Token (PRT) via a Hello for Business Key
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `key` - A LoadableIdentityKey provisioned using
+    ///   provision_hello_for_business_key.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_user_prt_by_hello_for_business_key(
+        &self,
+        username: &str,
+        key: &LoadableIdentityKey,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<SealedData, MsalError> {
+        let prt = self
+            .acquire_user_prt_by_hello_for_business_key_internal(username, key, tpm, machine_key)
+            .await?;
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        self.seal_user_prt(&prt, tpm, &transport_key)
     }
 
     fn seal_user_prt(
