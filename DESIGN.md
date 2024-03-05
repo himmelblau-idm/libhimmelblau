@@ -539,4 +539,4 @@ Given the primary refresh token, this method requests a new primary refresh toke
 Contributions to this project are welcome. Please refer to the CONTRIBUTING.md file for guidelines on how to contribute.
 
 ## License <a name="license"></a>
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Mozilla Public License Version 2.0](https://github.com/himmelblau-idm/microsoft-authentication-library-for-rust/blob/main/LICENSE).
