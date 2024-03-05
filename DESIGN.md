@@ -82,7 +82,7 @@ while adhering to Microsoft's best practices and standards.
 
 The `BrokerClientApplication` component extends the functionality of the
 `PublicClientApplication` by offering advanced features like device enrollment,
-Primary Refresh Token (PRT) requests, Token Generation Ticket (TGT) requests,
+Primary Refresh Token (PRT) requests, Ticket Granting Ticket (TGT) requests,
 and Windows Hello for Business key provisioning and authentication.
 
 ##### MS-DRS Protocol Implementation
