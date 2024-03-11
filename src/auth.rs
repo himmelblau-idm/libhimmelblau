@@ -141,6 +141,7 @@ struct AuthConfig {
     polling_interval: Option<u32>,
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct MFAAuthContinue {
     pub mfa_method: String,
     pub msg: String,
