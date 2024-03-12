@@ -45,4 +45,6 @@ pub enum MsalError {
     NotImplemented,
     /// A configuration error was detected
     ConfigError(String),
+    /// Continuing polling for an MFA auth
+    MFAPollContinue,
 }
