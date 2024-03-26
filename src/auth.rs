@@ -1689,9 +1689,9 @@ impl PublicClientApplication {
                     }
                     Err(MsalError::MFAPollContinue)
                 } else {
-                    return Err(MsalError::GeneralFailure(
+                    Err(MsalError::GeneralFailure(
                         "EndAuth Authentication request failed".to_string(),
-                    ));
+                    ))
                 }
             }
         }
