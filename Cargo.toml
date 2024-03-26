@@ -20,7 +20,7 @@ broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto"
 tpm = ["broker", "kanidm-hsm-crypto/tpm"]
 
 [dependencies]
-base64 = "^0.21.5"
+base64 = "^0.22.0"
 reqwest = { version = "^0.12.2", features = ["json", "cookies"] }
 serde = { version = "^1.0.180", features = ["derive"] }
 serde_json = "^1.0.96"
