@@ -319,6 +319,13 @@ where
     }
 }
 
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct AccessTokenPayload {
+    amr: Vec<String>,
+    tid: String,
+    upn: String,
+}
+
 #[derive(Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct UserToken {
     pub token_type: String,
@@ -355,7 +362,7 @@ impl UserToken {
         } else if let Some(access_token) = &self.access_token {
             let mut siter = access_token.splitn(3, '.');
             siter.next(); // Ignore the header
-            let payload: Value = json_from_str(
+            let payload: AccessTokenPayload = json_from_str(
                 &String::from_utf8(
                     URL_SAFE_NO_PAD
                         .decode(siter.next().ok_or_else(|| {
@@ -366,17 +373,7 @@ impl UserToken {
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
             )
             .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            match payload.get("tid") {
-                Some(tid) => match tid.as_str() {
-                    Some(tid) => Ok(tid.to_string()),
-                    None => Err(MsalError::GeneralFailure(
-                        "No tid available for UserToken".to_string(),
-                    )),
-                },
-                None => Err(MsalError::GeneralFailure(
-                    "No tid available for UserToken".to_string(),
-                )),
-            }
+            Ok(payload.tid.clone())
         } else {
             Err(MsalError::GeneralFailure(
                 "No tid available for UserToken".to_string(),
@@ -408,7 +405,7 @@ impl UserToken {
                 Some(access_token) => {
                     let mut siter = access_token.splitn(3, '.');
                     siter.next(); // Ignore the header
-                    let payload: Value = json_from_str(
+                    let payload: AccessTokenPayload = json_from_str(
                         &String::from_utf8(
                             URL_SAFE_NO_PAD
                                 .decode(siter.next().ok_or_else(|| {
@@ -419,22 +416,42 @@ impl UserToken {
                         .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
                     )
                     .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-                    match payload.get("upn") {
-                        Some(upn) => match upn.as_str() {
-                            Some(upn) => Ok(upn.to_string()),
-                            None => Err(MsalError::GeneralFailure(
-                                "No spn available for UserToken".to_string(),
-                            )),
-                        },
-                        None => Err(MsalError::GeneralFailure(
-                            "No spn available for UserToken".to_string(),
-                        )),
-                    }
+                    Ok(payload.upn.clone())
                 }
                 None => Err(MsalError::GeneralFailure(
                     "No spn available for UserToken".to_string(),
                 )),
             },
+        }
+    }
+
+    /// Check if the access token amr contains an MFA authorization
+    ///
+    /// # Returns
+    ///
+    /// * Success: Whether or not the token has MFA authorization.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn amr_mfa(&self) -> Result<bool, MsalError> {
+        match &self.access_token {
+            Some(access_token) => {
+                let mut siter = access_token.splitn(3, '.');
+                siter.next(); // Ignore the header
+                let payload: AccessTokenPayload = json_from_str(
+                    &String::from_utf8(
+                        URL_SAFE_NO_PAD
+                            .decode(siter.next().ok_or_else(|| {
+                                MsalError::InvalidParse("Payload not present".to_string())
+                            })?)
+                            .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?,
+                    )
+                    .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                Ok(payload.amr.iter().any(|s| s == "ngcmfa" || s == "mfa"))
+            }
+            None => Err(MsalError::GeneralFailure(
+                "No access token available for UserToken".to_string(),
+            )),
         }
     }
 }
