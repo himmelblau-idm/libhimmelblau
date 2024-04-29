@@ -2,7 +2,6 @@ use crate::error::{ErrorResponse, MsalError};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::{header, Client, Url};
-use reqwest_cookie_store::{CookieStore, CookieStoreMutex};
 use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -10,7 +9,6 @@ use serde_json::{from_str as json_from_str, json, Value};
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
-use std::sync::Arc;
 use tracing::info;
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
@@ -740,21 +738,18 @@ impl SessionKey {
 
 struct ClientApplication {
     client: Client,
-    cookie_store: Arc<CookieStoreMutex>,
     client_id: String,
     authority: String,
 }
 
 impl ClientApplication {
     fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
-        let cookie_store = Arc::new(CookieStoreMutex::new(CookieStore::new(None)));
         let client = reqwest::Client::builder()
-            .cookie_provider(std::sync::Arc::clone(&cookie_store))
+            .cookie_store(true)
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         Ok(ClientApplication {
             client,
-            cookie_store,
             client_id: client_id.to_string(),
             authority: match authority {
                 Some(authority) => authority.to_string(),
@@ -1137,30 +1132,6 @@ impl PublicClientApplication {
     ///   authentication flow.
     /// * Failure: An MsalError, indicating the failure.
     pub async fn initiate_acquire_token_by_mfa_flow(
-        &self,
-        username: &str,
-        password: &str,
-        scopes: Vec<&str>,
-        resource: Option<&str>,
-    ) -> Result<MFAAuthContinue, MsalError> {
-        match self
-            .initiate_acquire_token_by_mfa_flow_internal(username, password, scopes, resource)
-            .await
-        {
-            Ok(res) => Ok(res),
-            Err(e) => {
-                /* If we fail to reset the Cookie store here, subsequent
-                 * auth requests will fail */
-                let mut cookie_store = self.app.cookie_store.lock().map_err(|e| {
-                    MsalError::GeneralFailure(format!("Failed to lock and clear the cookie store. Subsequent authentications will fail: {:?}", e))
-                })?;
-                cookie_store.clear();
-                Err(e)
-            }
-        }
-    }
-
-    async fn initiate_acquire_token_by_mfa_flow_internal(
         &self,
         username: &str,
         password: &str,
