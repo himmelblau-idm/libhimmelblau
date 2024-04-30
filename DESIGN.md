@@ -279,10 +279,6 @@ protocols:
 - [MS-DVRD]: Device Registration Discovery Protocol
   - Description: Accurate, but missing many services. See [[MS-DRS] Section 3.1](https://github.com/himmelblau-idm/aad-join-spec/blob/main/aad-join-spec.md#31-device-registration-discovery-service).
 
-- [MS-KKDCP]: Kerberos Key Distribution Center (KDC) Proxy Protocol
-  - Description: Used by MSAL to retrieve cloud and on-prem Kerberos TGTs
-    (currently work in progress).
-
 - [MS-KPP]: Key Provisioning Protocol
   - Description: Utilized by MSAL to provision a Windows Hello for Business key.
     The process for requesting a PRT using that key does not appear to be
