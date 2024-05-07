@@ -2410,7 +2410,16 @@ impl BrokerClientApplication {
                 .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?]));
         }
 
-        Ok(builder.build())
+        let jwt = builder.build();
+
+        if let Ok(mut debug_jwt) = jwt.from_json::<Value>() {
+            debug_jwt["password"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&debug_jwt) {
+                debug!("Username/Password JWT: {}", pretty);
+            }
+        }
+
+        Ok(jwt)
     }
 
     /// Gets a Primary Refresh Token (PRT) via user credentials.
@@ -2449,6 +2458,8 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
+        debug!("Acquiring User PRT via Username/Password");
+
         let jwt = self
             .build_jwt_by_username_password(username, password, None)
             .await?;
@@ -2481,7 +2492,16 @@ impl BrokerClientApplication {
                 .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?]));
         }
 
-        Ok(builder.build())
+        let jwt = builder.build();
+
+        if let Ok(mut debug_jwt) = jwt.from_json::<Value>() {
+            debug_jwt["refresh_token"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&debug_jwt) {
+                debug!("Refresh Token JWT: {}", pretty);
+            }
+        }
+
+        Ok(jwt)
     }
 
     /// Gets a Primary Refresh Token (PRT) via a refresh token (RT) obtained
@@ -2517,6 +2537,8 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
+        debug!("Acquiring User PRT via Refresh Token");
+
         let jwt = self.build_jwt_by_refresh_token(refresh_token, None).await?;
         let signed_jwt = self.sign_jwt(&jwt, tpm, machine_key).await?;
 
@@ -2552,6 +2574,8 @@ impl BrokerClientApplication {
         &self,
         signed_jwt: &str,
     ) -> Result<PrimaryRefreshToken, MsalError> {
+        debug!("Acquiring User PRT via JWT");
+
         // [MS-OAPXBC] 3.2.5.1.2 POST (Request for Primary Refresh Token)
         let params = [
             ("windows_api_version", "2.0"),
@@ -2566,9 +2590,17 @@ impl BrokerClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
+        let url = format!("{}/oauth2/token", self.authority());
+
+        let mut debug_payload = params;
+        debug_payload[2] = ("request", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_payload) {
+            debug!("POST {}: {}", url, pretty);
+        }
+
         let resp = self
             .client()
-            .post(format!("{}/oauth2/token", self.authority()))
+            .post(url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
@@ -2654,6 +2686,8 @@ impl BrokerClientApplication {
         session_key: &SessionKey,
         request_resource: Option<String>,
     ) -> Result<UserToken, MsalError> {
+        debug!("Exchanging a PRT for an Access Token");
+
         let resource = match request_resource {
             Some(resource) => resource,
             None => "00000002-0000-0000-c000-000000000000".to_string(),
@@ -2673,6 +2707,14 @@ impl BrokerClientApplication {
         )
         .set_typ(Some("JWT"))
         .build();
+
+        if let Ok(mut payload) = jwt.from_json::<Value>() {
+            payload["refresh_token"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&payload) {
+                debug!("Exchange PRT Payload JWT: {}", pretty);
+            }
+        }
+
         let signed_jwt = self
             .sign_session_key_jwt(&jwt, tpm, machine_key, session_key)
             .await?;
@@ -2689,9 +2731,17 @@ impl BrokerClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
+        let url = format!("{}/oauth2/token", self.authority());
+
+        let mut debug_payload = params;
+        debug_payload[2] = ("request", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_payload) {
+            debug!("POST {}: {}", url, pretty);
+        }
+
         let resp = self
             .client()
-            .post(format!("{}/oauth2/token", self.authority()))
+            .post(url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
@@ -2748,6 +2798,8 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
         request_tgt: bool,
     ) -> Result<SealedData, MsalError> {
+        debug!("Exchanging a PRT for a new PRT");
+
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
         let session_key = prt.session_key()?;
@@ -2759,6 +2811,14 @@ impl BrokerClientApplication {
         )
         .set_typ(Some("JWT"))
         .build();
+
+        if let Ok(mut payload) = jwt.from_json::<Value>() {
+            payload["refresh_token"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&payload) {
+                debug!("Exchange PRT Payload JWT: {}", pretty);
+            }
+        }
+
         let signed_jwt = self
             .sign_session_key_jwt(&jwt, tpm, machine_key, &session_key)
             .await?;
@@ -2778,9 +2838,17 @@ impl BrokerClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
+        let url = format!("{}/oauth2/token", self.authority());
+
+        let mut debug_payload = params.clone();
+        debug_payload[2] = ("request", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_payload) {
+            debug!("POST {}: {}", url, pretty);
+        }
+
         let resp = self
             .client()
-            .post(format!("{}/oauth2/token", self.authority()))
+            .post(url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
@@ -2838,6 +2906,8 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
         pin: &str,
     ) -> Result<LoadableIdentityKey, MsalError> {
+        debug!("Provisioning a Hello for Business Key");
+
         let pin = PinValue::new(pin)
             .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
 
@@ -2926,6 +2996,8 @@ impl BrokerClientApplication {
                 ))
             }
         };
+
+        debug!("POST {}: {{ \"kngc\": <PUBLIC KEY> }}", url);
 
         let resp = self
             .client()
@@ -3017,6 +3089,8 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
         pin: &PinValue,
     ) -> Result<Jws, MsalError> {
+        debug!("Building a Hello for Business JWT");
+
         let nonce = self.request_nonce().await?;
         let key = tpm
             .identity_key_load(machine_key, Some(pin), loadable_key)
@@ -3052,6 +3126,13 @@ impl BrokerClientApplication {
         .set_use(Some("ngc"))
         .set_kid(Some(&kid))
         .build();
+
+        if let Ok(payload) = assertion_jwt.from_json::<Value>() {
+            if let Ok(pretty) = to_string_pretty(&payload) {
+                debug!("Hello for Business Assertion: {}", pretty);
+            }
+        }
+
         let mut jws_tpm_signer = match JwsTpmSigner::new(tpm, &key) {
             Ok(jws_tpm_signer) => jws_tpm_signer,
             Err(e) => {
@@ -3079,6 +3160,13 @@ impl BrokerClientApplication {
         .set_typ(Some("JWT"))
         .build();
 
+        if let Ok(mut jwt_debug) = jwt.from_json::<Value>() {
+            jwt_debug["assertion"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&jwt_debug) {
+                debug!("Hello for Business Payload: {}", pretty);
+            }
+        }
+
         Ok(jwt)
     }
 
@@ -3090,6 +3178,8 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
         pin: &PinValue,
     ) -> Result<PrimaryRefreshToken, MsalError> {
+        debug!("Acquiring a User PRT via a Hello for Business Key");
+
         let jwt = self
             .build_jwt_by_hello_for_business_key(username, key, tpm, machine_key, pin)
             .await?;
