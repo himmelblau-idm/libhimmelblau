@@ -530,11 +530,12 @@ struct HelloForBusinessAssertion {
     iat: u64,
     exp: u64,
     scope: String,
+    request_nonce: String,
 }
 
 #[cfg(feature = "broker")]
 impl HelloForBusinessAssertion {
-    fn new(username: &str) -> Result<Self, MsalError> {
+    fn new(username: &str, request_nonce: &str) -> Result<Self, MsalError> {
         let iat: u64 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
@@ -545,6 +546,7 @@ impl HelloForBusinessAssertion {
             iat: iat - 300,
             exp: iat + 300,
             scope: "openid aza ugs".to_string(),
+            request_nonce: request_nonce.to_string(),
         })
     }
 }
@@ -3091,7 +3093,7 @@ impl BrokerClientApplication {
     ) -> Result<Jws, MsalError> {
         debug!("Building a Hello for Business JWT");
 
-        let nonce = self.request_nonce().await?;
+        let mut nonce = self.request_nonce().await?;
         let key = tpm
             .identity_key_load(machine_key, Some(pin), loadable_key)
             .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
@@ -3112,7 +3114,7 @@ impl BrokerClientApplication {
         );
         let assertion_jwt = JwsBuilder::from(
             serde_json::to_vec(
-                &HelloForBusinessAssertion::new(username)
+                &HelloForBusinessAssertion::new(username, &nonce)
                     .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?,
             )
             .map_err(|e| {
@@ -3147,6 +3149,8 @@ impl BrokerClientApplication {
             Err(e) => return Err(MsalError::TPMFail(format!("Failed signing jwk: {}", e))),
         };
         let assertion = format!("{}", signed_assertion);
+
+        nonce = self.request_nonce().await?;
 
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&HelloForBusinessPayload::new(username, &assertion, &nonce))
