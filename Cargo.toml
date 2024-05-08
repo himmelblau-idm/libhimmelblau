@@ -1,7 +1,7 @@
 [package]
 name = "msal"
 description = "Microsoft Authentication Library for Rust"
-version = "0.1.20"
+version = "0.1.21"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"

@@ -7,6 +7,7 @@ pub const NO_CONSENT: u32 = 0xFDE9;
 pub const NO_GROUP_CONSENT: u32 = 0xFDEA;
 pub const NO_SECRET: u32 = 0x6AD09A;
 pub const AUTH_PENDING: u32 = 0x11180;
+pub const DEVICE_AUTH_FAIL: u32 = 0xC3EB;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
