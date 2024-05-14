@@ -1133,6 +1133,26 @@ impl PublicClientApplication {
         }
     }
 
+    /// Check if a user exists in Azure Entra ID
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// # Returns
+    /// * Success: true|false
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn check_user_exists(&self, username: &str) -> Result<bool, MsalError> {
+        let request_id = Uuid::new_v4().to_string();
+        let auth_config = self
+            .request_auth_config_internal(vec![], &request_id, None)
+            .await?;
+        let cred_type = self
+            .get_cred_type(username, &auth_config, &request_id)
+            .await?;
+        Ok(cred_type.if_exists_result == 0)
+    }
+
     /// Initiate an MFA flow via user credentials.
     ///
     /// # Arguments
@@ -2316,6 +2336,19 @@ impl BrokerClientApplication {
         flow: DeviceAuthorizationResponse,
     ) -> Result<UserToken, MsalError> {
         self.app.acquire_token_by_device_flow(flow).await
+    }
+
+    /// Check if a user exists in Azure Entra ID
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// # Returns
+    /// * Success: true|false
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn check_user_exists(&self, username: &str) -> Result<bool, MsalError> {
+        self.app.check_user_exists(username).await
     }
 
     /// Initiate an MFA flow for enrollment via user credentials.
