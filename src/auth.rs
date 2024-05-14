@@ -1513,8 +1513,14 @@ impl PublicClientApplication {
             let (_, code) =
                 url.query_pairs()
                     .find(|(k, _)| k == "code")
-                    .ok_or(MsalError::InvalidParse(
-                        "Authorization code missing from redirect".to_string(),
+                    .ok_or(MsalError::RequestFailed(
+                        url.query_pairs()
+                            .find(|(k, _)| k == "error_description")
+                            .ok_or(MsalError::InvalidParse(
+                                "Authorization code missing from redirect".to_string(),
+                            ))?
+                            .1
+                            .to_string(),
                     ))?;
             Ok(code.to_string())
         } else {
