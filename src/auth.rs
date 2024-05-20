@@ -781,7 +781,7 @@ impl PrimaryRefreshToken {
     }
 
     fn clone_session_key(&self, new_prt: &mut PrimaryRefreshToken) {
-        new_prt.session_key_jwe = self.session_key_jwe.clone();
+        new_prt.session_key_jwe.clone_from(&self.session_key_jwe);
     }
 }
 
@@ -1508,7 +1508,7 @@ impl PublicClientApplication {
             ("amr_values", "ngcmfa"),
             (
                 "resource",
-                &resource.unwrap_or("00000002-0000-0000-c000-000000000000"),
+                (resource.unwrap_or("00000002-0000-0000-c000-000000000000")),
             ),
         ];
         let url = Url::parse_with_params(
@@ -2699,7 +2699,7 @@ impl BrokerClientApplication {
         let params = [
             ("windows_api_version", "2.0"),
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("request", &signed_jwt),
+            ("request", signed_jwt),
             ("client_info", "1"),
             ("tgt", "true"),
         ];
@@ -3302,7 +3302,7 @@ impl BrokerClientApplication {
             ("scope", &scope),
             (
                 "resource",
-                &resource.unwrap_or("00000002-0000-0000-c000-000000000000"),
+                (resource.unwrap_or("00000002-0000-0000-c000-000000000000")),
             ),
         ];
         let payload = params
