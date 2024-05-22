@@ -3098,7 +3098,8 @@ impl BrokerClientApplication {
         let signed_prt_payload = self
             .sign_session_key_jwt(&jwt, tpm, machine_key, session_key)
             .await?;
-        if let Ok(payload) = jwt.from_json::<Value>() {
+        if let Ok(mut payload) = jwt.from_json::<Value>() {
+            payload["refresh_token"] = "**********".into();
             if let Ok(pretty) = to_string_pretty(&payload) {
                 debug!("Refresh Token Credential Payload: {}", pretty);
             }
