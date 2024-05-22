@@ -59,28 +59,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 #[cfg(feature = "broker")]
-use crate::discovery::{
-    discover_enrollment_services, DISCOVERY_URL, DRS_CLIENT_NAME_HEADER_FIELD,
-    DRS_CLIENT_VERSION_HEADER_FIELD,
-};
+use crate::discovery::Services;
+#[cfg(feature = "broker")]
+use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 #[cfg(feature = "broker")]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
 use serde_json::to_string_pretty;
-
-#[cfg(feature = "broker")]
-#[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
-struct Certificate {
-    #[serde(rename = "RawBody")]
-    raw_body: String,
-}
-
-#[cfg(feature = "broker")]
-#[derive(Debug, Deserialize, Zeroize, ZeroizeOnDrop)]
-struct DRSResponse {
-    #[serde(rename = "Certificate")]
-    certificate: Certificate,
-}
 
 #[derive(Serialize, Clone, Default)]
 struct JoinPayload {}
@@ -1818,133 +1803,6 @@ impl PublicClientApplication {
 }
 
 #[cfg(feature = "broker")]
-pub struct EnrollAttrs {
-    device_display_name: String,
-    device_type: String,
-    join_type: u32,
-    os_version: String,
-    target_domain: String,
-}
-
-#[cfg(feature = "broker")]
-impl EnrollAttrs {
-    /// Initialize attributes for device enrollment
-    ///
-    /// # Arguments
-    ///
-    /// * `target_domain` - The domain to be enrolled in.
-    ///
-    /// * `device_display_name` - An optional chosen display name for the
-    ///   enrolled device. Defaults to the system hostname.
-    ///
-    /// * `device_type` - An optional device type. Defaults to 'Linux'. This
-    ///   effects which Intune policies are distributed to the client.
-    ///
-    /// * `join_type` - An optional join type. Defaults to 0. Possible values
-    ///   are:
-    ///     - 0: Azure AD join.
-    ///     - 4: Azure AD register only.
-    ///     - 6: Azure AD hybrid join.
-    ///     - 8: Azure AD join.
-    ///
-    /// * `os_version` - An optional OS version. Defaults to the contents of
-    ///   /etc/os-release.
-    ///
-    /// * Success: A new EnrollAttrs for device enrollment.
-    /// * Failure: An MsalError, indicating the failure.
-    pub fn new(
-        target_domain: String,
-        device_display_name: Option<String>,
-        device_type: Option<String>,
-        join_type: Option<u32>,
-        os_version: Option<String>,
-    ) -> Result<Self, MsalError> {
-        let device_display_name_int = match device_display_name {
-            Some(device_display_name) => device_display_name,
-            None => match hostname::get()
-                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
-                .to_str()
-            {
-                Some(host) => String::from(host),
-                None => {
-                    return Err(MsalError::GeneralFailure(
-                        "Failed to get machine hostname for enrollment".to_string(),
-                    ))
-                }
-            },
-        };
-        let device_type_int = match device_type {
-            Some(device_type) => device_type,
-            None => "Linux".to_string(),
-        };
-        let join_type_int = join_type.unwrap_or(0);
-        let os_version_int = match os_version {
-            Some(os_version) => os_version,
-            None => {
-                let os_release =
-                    OsRelease::new().map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
-                format!("{} {}", os_release.pretty_name, os_release.version_id)
-            }
-        };
-        Ok(EnrollAttrs {
-            device_display_name: device_display_name_int,
-            device_type: device_type_int,
-            join_type: join_type_int,
-            os_version: os_version_int,
-            target_domain,
-        })
-    }
-}
-
-#[cfg(feature = "broker")]
-#[derive(Zeroize, ZeroizeOnDrop)]
-struct BcryptRsaKeyBlob {
-    bit_length: u32,
-    exponent: Vec<u8>,
-    modulus: Vec<u8>,
-}
-
-#[cfg(feature = "broker")]
-impl BcryptRsaKeyBlob {
-    fn new(bit_length: u32, exponent: &[u8], modulus: &[u8]) -> Self {
-        BcryptRsaKeyBlob {
-            bit_length,
-            exponent: exponent.to_vec(),
-            modulus: modulus.to_vec(),
-        }
-    }
-}
-
-#[cfg(feature = "broker")]
-impl TryInto<Vec<u8>> for BcryptRsaKeyBlob {
-    type Error = MsalError;
-
-    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
-        let mut cng_blob = b"RSA1".to_vec(); // Magic
-        cng_blob.extend_from_slice(&self.bit_length.to_le_bytes()); // BitLength
-        let exponent_len: u32 = self.exponent.len().try_into().map_err(|e| {
-            MsalError::GeneralFailure(format!("Exponent len into u32 failed: {:?}", e))
-        })?;
-        cng_blob.extend_from_slice(&exponent_len.to_le_bytes()); // cbPublicExpLength
-        let modulus_len: u32 = self.modulus.len().try_into().map_err(|e| {
-            MsalError::GeneralFailure(format!("Modulus len into u32 failed: {:?}", e))
-        })?;
-        cng_blob.extend_from_slice(&modulus_len.to_le_bytes()); // cbModulusLength
-
-        // MS reserves spots for P and Q lengths, but doesn't permit P and Q in
-        // the blob itself. Requests will be rejected if P and Q are specified.
-        let prime1_len: u32 = 0;
-        cng_blob.extend_from_slice(&prime1_len.to_le_bytes()); // cbPrime1Length
-        let prime2_len: u32 = 0;
-        cng_blob.extend_from_slice(&prime2_len.to_le_bytes()); // cbPrime2Length
-
-        cng_blob.extend_from_slice(self.exponent.as_slice()); // cbPublicExp
-        cng_blob.extend_from_slice(self.modulus.as_slice()); // cbModulus
-        Ok(cng_blob)
-    }
-}
-
-#[cfg(feature = "broker")]
 pub struct BrokerClientApplication {
     app: PublicClientApplication,
     transport_key: Option<LoadableMsOapxbcRsaKey>,
@@ -2159,100 +2017,10 @@ impl BrokerClientApplication {
         transport_key: &Rsa<Public>,
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
-        let enrollment_services =
-            discover_enrollment_services(self.client(), access_token, &attrs.target_domain).await?;
-        let (join_endpoint, service_version) = match enrollment_services.device_join_service {
-            Some(device_join_service) => {
-                let join_endpoint = match device_join_service.endpoint {
-                    Some(join_endpoint) => join_endpoint,
-                    None => format!("{}/EnrollmentServer/device/", DISCOVERY_URL).to_string(),
-                };
-                let service_version = match device_join_service.service_version {
-                    Some(service_version) => service_version,
-                    None => "2.0".to_string(),
-                };
-                (join_endpoint, service_version)
-            }
-            None => (
-                format!("{}/EnrollmentServer/device/", DISCOVERY_URL).to_string(),
-                "2.0".to_string(),
-            ),
-        };
-
-        let url = Url::parse_with_params(&join_endpoint, &[("api-version", service_version)])
-            .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
-
-        let transport_key_blob: Vec<u8> = BcryptRsaKeyBlob::new(
-            2048,
-            &transport_key.e().to_vec(),
-            &transport_key.n().to_vec(),
-        )
-        .try_into()?;
-
-        let payload = json!({
-            "CertificateRequest": {
-                "Type": "pkcs10",
-                "Data": STANDARD.encode(csr_der)
-            },
-            "DeviceDisplayName": attrs.device_display_name,
-            "DeviceType": attrs.device_type,
-            "JoinType": attrs.join_type,
-            "OSVersion": attrs.os_version,
-            "TargetDomain": attrs.target_domain,
-            "TransportKey": STANDARD.encode(transport_key_blob),
-            "Attributes": {
-                "ReuseDevice": "true",
-                "ReturnClientSid": "true"
-            }
-        });
-        if let Ok(pretty) = to_string_pretty(&payload) {
-            debug!("POST {}: {}", url, pretty);
-        }
-        let resp = self
-            .client()
-            .post(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(DRS_CLIENT_NAME_HEADER_FIELD, env!("CARGO_PKG_NAME"))
-            .header(DRS_CLIENT_VERSION_HEADER_FIELD, env!("CARGO_PKG_VERSION"))
-            .header(header::ACCEPT, "application/json, text/plain, */*")
-            .json(&payload)
-            .send()
+        let services = Services::new(access_token, &attrs.target_domain).await?;
+        services
+            .enroll_device(access_token, attrs, transport_key, csr_der)
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_success() {
-            let res: DRSResponse = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            let cert = X509::from_pem(
-                format!(
-                    "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
-                    res.certificate.raw_body
-                )
-                .as_bytes(),
-            )
-            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
-            let subject_name = cert.subject_name();
-            let device_id = match subject_name.entries().next() {
-                Some(entry) => entry
-                    .data()
-                    .as_utf8()
-                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
-                None => {
-                    return Err(MsalError::GeneralFailure(
-                        "The device id was missing from the certificate response".to_string(),
-                    ))
-                }
-            };
-            Ok((cert, device_id.to_string()))
-        } else {
-            Err(MsalError::GeneralFailure(
-                resp.text()
-                    .await
-                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
-            ))
-        }
     }
 
     /// Gets a token for a given resource via user credentials.
@@ -2969,30 +2737,8 @@ impl BrokerClientApplication {
                 ))
             }
         };
-        let services =
-            discover_enrollment_services(self.client(), &access_token, &token.tenant_id()?).await?;
-        let (endpoint, resource_id, service_version) = match services.key_provisioning_service {
-            Some(key_provisioning_service) => {
-                let endpoint = match key_provisioning_service.endpoint {
-                    Some(endpoint) => endpoint,
-                    None => format!("{}/EnrollmentServer/key/", DISCOVERY_URL).to_string(),
-                };
-                let resource_id = match key_provisioning_service.resource_id {
-                    Some(resource_id) => resource_id,
-                    None => "1.0".to_string(),
-                };
-                let service_version = match key_provisioning_service.service_version {
-                    Some(service_version) => service_version,
-                    None => "1.0".to_string(),
-                };
-                (endpoint, resource_id, service_version)
-            }
-            None => (
-                format!("{}/EnrollmentServer/key/", DISCOVERY_URL),
-                "urn:ms-drs:enterpriseregistration.windows.net".to_string(),
-                "1.0".to_string(),
-            ),
-        };
+        let services = Services::new(&access_token, &token.tenant_id()?).await?;
+        let resource_id = services.key_provisioning_resource_id();
 
         // Acquire an access token for the key provisioning service
         let token = self
@@ -3023,20 +2769,7 @@ impl BrokerClientApplication {
             })?;
         let win_hello_rsa = Rsa::public_key_from_der(&win_hello_pub_der)
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
-        let win_hello_blob: Vec<u8> = BcryptRsaKeyBlob::new(
-            2048,
-            &win_hello_rsa.e().to_vec(),
-            &win_hello_rsa.n().to_vec(),
-        )
-        .try_into()?;
 
-        // [MS-KPP] 3.1.5.1.1.1 Request Body
-        // Register the winhello public key
-        let payload = json!({
-            "kngc": STANDARD.encode(win_hello_blob),
-        });
-        let url = Url::parse_with_params(&endpoint, &[("api-version", service_version)])
-            .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
         let access_token = match &token.access_token {
             Some(access_token) => access_token.clone(),
             None => {
@@ -3046,28 +2779,11 @@ impl BrokerClientApplication {
             }
         };
 
-        debug!("POST {}: {{ \"kngc\": <PUBLIC KEY> }}", url);
-
-        let resp = self
-            .client()
-            .post(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(
-                header::USER_AGENT,
-                format!("Dsreg/10.0 ({})", env!("CARGO_PKG_NAME")),
-            )
-            .header(header::ACCEPT, "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_success() {
-            Ok(loadable_win_hello_key.clone())
-        } else {
-            Err(MsalError::GeneralFailure(
+        match services.provision_key(&access_token, &win_hello_rsa).await {
+            Ok(()) => Ok(loadable_win_hello_key.clone()),
+            Err(_) => Err(MsalError::GeneralFailure(
                 "Failed registering Windows Hello Key".to_string(),
-            ))
+            )),
         }
     }
 
