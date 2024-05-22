@@ -20,3 +20,4 @@ pub use auth::*;
 pub mod discovery;
 
 pub mod graph;
+pub use discovery::EnrollAttrs;
