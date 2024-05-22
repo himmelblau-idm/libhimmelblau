@@ -1,12 +1,12 @@
 [package]
 name = "msal"
 description = "Microsoft Authentication Library for Rust"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
 ]
-license = "MPL-2.0"
+license = "LGPL-3"
 homepage = "https://github.com/himmelblau-idm/msal"
 repository = "https://github.com/himmelblau-idm/msal"
 
