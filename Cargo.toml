@@ -6,7 +6,7 @@ edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
 ]
-license = "LGPL-3"
+license = "LGPL-3.0-or-later"
 homepage = "https://github.com/himmelblau-idm/msal"
 repository = "https://github.com/himmelblau-idm/msal"
 
