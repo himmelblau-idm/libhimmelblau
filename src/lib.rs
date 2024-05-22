@@ -18,3 +18,5 @@ pub use auth::*;
 
 #[cfg(feature = "broker")]
 pub mod discovery;
+
+pub mod graph;
