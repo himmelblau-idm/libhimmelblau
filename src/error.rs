@@ -17,6 +17,7 @@
 */
 
 use serde::{Deserialize, Serialize};
+use std::convert::From;
 
 pub const INVALID_CRED: u32 = 0xC3CE;
 pub const REQUIRES_MFA: u32 = 0xC39C;
@@ -66,4 +67,49 @@ pub enum MsalError {
     ConfigError(String),
     /// Continuing polling for an MFA auth
     MFAPollContinue,
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub enum MSAL_ERROR {
+    INVALID_JSON,
+    INVALID_BASE64,
+    INVALID_REGEX,
+    INVALID_PARSE,
+    ACQUIRE_TOKEN_FAILED,
+    GENERAL_FAILURE,
+    REQUEST_FAILED,
+    AUTH_TYPE_UNSUPPORTED,
+    TPM_FAIL,
+    URL_FORMAT_FAILED,
+    DEVICE_ENROLLMENT_FAIL,
+    CRYPTO_FAIL,
+    NOT_IMPLEMENTED,
+    CONFIG_ERROR,
+    MFA_POLL_CONTINUE,
+    SUCCESS,
+    INVALID_POINTER,
+    NO_MEMORY,
+}
+
+impl From<MsalError> for MSAL_ERROR {
+    fn from(error: MsalError) -> Self {
+        match error {
+            MsalError::InvalidJson(_) => MSAL_ERROR::INVALID_JSON,
+            MsalError::InvalidBase64(_) => MSAL_ERROR::INVALID_BASE64,
+            MsalError::InvalidRegex(_) => MSAL_ERROR::INVALID_REGEX,
+            MsalError::InvalidParse(_) => MSAL_ERROR::INVALID_PARSE,
+            MsalError::AcquireTokenFailed(_) => MSAL_ERROR::ACQUIRE_TOKEN_FAILED,
+            MsalError::GeneralFailure(_) => MSAL_ERROR::GENERAL_FAILURE,
+            MsalError::RequestFailed(_) => MSAL_ERROR::REQUEST_FAILED,
+            MsalError::AuthTypeUnsupported => MSAL_ERROR::AUTH_TYPE_UNSUPPORTED,
+            MsalError::TPMFail(_) => MSAL_ERROR::TPM_FAIL,
+            MsalError::URLFormatFailed(_) => MSAL_ERROR::URL_FORMAT_FAILED,
+            MsalError::DeviceEnrollmentFail(_) => MSAL_ERROR::DEVICE_ENROLLMENT_FAIL,
+            MsalError::CryptoFail(_) => MSAL_ERROR::CRYPTO_FAIL,
+            MsalError::NotImplemented => MSAL_ERROR::NOT_IMPLEMENTED,
+            MsalError::ConfigError(_) => MSAL_ERROR::CONFIG_ERROR,
+            MsalError::MFAPollContinue => MSAL_ERROR::MFA_POLL_CONTINUE,
+        }
+    }
 }
