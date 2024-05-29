@@ -1447,7 +1447,7 @@ impl PublicClientApplication {
                             "PhoneAppNotification" => format!("Open your Authenticator app, and enter the number '{}' to sign in.", auth_response.entropy),
                             "PhoneAppOTP" =>
                                 "Please type in the code displayed on your authenticator app from your device:".to_string(),
-                            "OneWaySMS" =>
+                            "ConsolidatedTelephony" | "OneWaySMS" =>
                                 format!("We texted your phone {}. Please enter the code to sign in:", default_auth_method.display),
                             "TwoWayVoiceMobile" =>
                                 format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
@@ -1615,9 +1615,17 @@ impl PublicClientApplication {
         username: &str,
         flow: &MFAAuthContinue,
     ) -> Result<String, MsalError> {
+        let mfa_method = match flow.mfa_method.as_str() {
+            // ConsolidatedTelephony simply means OneWaySMS internally to Azure,
+            // it seems. If we don't swap them during the ProcessAuth though,
+            // this request is rejected. I observed this odd behavior in a
+            // browser auth to Azure also.
+            "ConsolidatedTelephony" => "OneWaySMS".to_string(),
+            other => other.to_string(),
+        };
         let params = [
             ("request", &flow.ctx),
-            ("mfaAuthMethod", &flow.mfa_method),
+            ("mfaAuthMethod", &mfa_method),
             ("login", &username.to_string()),
             ("flowToken", &flow.flow_token),
             ("canary", &flow.canary),
