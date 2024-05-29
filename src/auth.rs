@@ -156,7 +156,6 @@ pub struct MFAAuthContinue {
     pub ctx: String,
     pub canary: String,
     pub url_end_auth: String,
-    pub url_begin_auth: String,
     pub url_post: String,
 }
 
@@ -172,6 +171,8 @@ struct AuthResponse {
     ctx: String,
     #[serde(rename = "FlowToken")]
     flow_token: String,
+    #[serde(rename = "Entropy")]
+    entropy: u8,
 }
 
 #[derive(Deserialize)]
@@ -1369,50 +1370,81 @@ impl PublicClientApplication {
                     }
                 }
                 if let Some(arr_user_proofs) = auth_config.arr_user_proofs {
-                    if let Some(default_auth_method) =
-                        arr_user_proofs.iter().find(|proof| proof.is_default)
+                    let default_auth_method =
+                        match arr_user_proofs.iter().find(|proof| proof.is_default) {
+                            Some(default_auth_method) => default_auth_method,
+                            None => {
+                                if arr_user_proofs.is_empty() {
+                                    return Err(MsalError::GeneralFailure(
+                                        "No MFA methods found".to_string(),
+                                    ));
+                                } else {
+                                    // Sometimes MS fails to set is_default on
+                                    // any method. In this case, just choose
+                                    // the first one (which may be the only
+                                    // one).
+                                    &arr_user_proofs[0]
+                                }
+                            }
+                        };
+                    let sctx = match &auth_config.sctx {
+                        Some(sctx) => sctx.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure("sCtx is missing".to_string()))
+                        }
+                    };
+                    let sft = match &auth_config.sft {
+                        Some(sft) => sft.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure("sFt is missing".to_string()))
+                        }
+                    };
+                    let url_end_auth = match &auth_config.url_end_auth {
+                        Some(url_end_auth) => url_end_auth.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure(
+                                "urlEndAuth is missing".to_string(),
+                            ))
+                        }
+                    };
+                    let url_begin_auth = match &auth_config.url_begin_auth {
+                        Some(url_begin_auth) => url_begin_auth.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure(
+                                "urlBeginAuth is missing".to_string(),
+                            ))
+                        }
+                    };
+                    let url_post = match &auth_config.url_post {
+                        Some(url_post) => url_post.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure(
+                                "urlBeginAuth is missing".to_string(),
+                            ))
+                        }
+                    };
+                    let auth_response = match self
+                        .mfa_begin_auth_internal(
+                            &default_auth_method.auth_method_id,
+                            &url_begin_auth,
+                            &sctx,
+                            &sft,
+                            &auth_config.canary,
+                        )
+                        .await
                     {
-                        let sctx = match &auth_config.sctx {
-                            Some(sctx) => sctx.clone(),
-                            None => {
+                        Ok(auth_response) => match auth_response.success {
+                            true => auth_response,
+                            false => {
                                 return Err(MsalError::GeneralFailure(
-                                    "sCtx is missing".to_string(),
+                                    "Begin Auth failed".to_string(),
                                 ))
                             }
-                        };
-                        let sft = match &auth_config.sft {
-                            Some(sft) => sft.clone(),
-                            None => {
-                                return Err(MsalError::GeneralFailure("sFt is missing".to_string()))
-                            }
-                        };
-                        let url_end_auth = match &auth_config.url_end_auth {
-                            Some(url_end_auth) => url_end_auth.clone(),
-                            None => {
-                                return Err(MsalError::GeneralFailure(
-                                    "urlEndAuth is missing".to_string(),
-                                ))
-                            }
-                        };
-                        let url_begin_auth = match &auth_config.url_begin_auth {
-                            Some(url_begin_auth) => url_begin_auth.clone(),
-                            None => {
-                                return Err(MsalError::GeneralFailure(
-                                    "urlBeginAuth is missing".to_string(),
-                                ))
-                            }
-                        };
-                        let url_post = match &auth_config.url_post {
-                            Some(url_post) => url_post.clone(),
-                            None => {
-                                return Err(MsalError::GeneralFailure(
-                                    "urlBeginAuth is missing".to_string(),
-                                ))
-                            }
-                        };
-                        let msg = match default_auth_method.auth_method_id.as_str() {
-                            "PhoneAppNotification" =>
-                                "Open your Authenticator app, and enter the number shown to sign in:".to_string(),
+                        },
+                        Err(e) => return Err(e),
+                    };
+                    let msg = match default_auth_method.auth_method_id.as_str() {
+                            "PhoneAppNotification" => format!("Open your Authenticator app, and enter the number '{}' when prompted, then type in the code displayed on your authenticator app from your device:", auth_response.entropy),
                             "PhoneAppOTP" =>
                                 "Please type in the code displayed on your authenticator app from your device:".to_string(),
                             "OneWaySMS" =>
@@ -1423,24 +1455,18 @@ impl PublicClientApplication {
                                 format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
                             method => return Err(MsalError::GeneralFailure(format!("Unsupported MFA method {}", method))),
                         };
-                        Ok(MFAAuthContinue {
-                            mfa_method: default_auth_method.auth_method_id.clone(),
-                            msg,
-                            max_poll_attempts: auth_config.max_poll_attempts,
-                            polling_interval: auth_config.polling_interval,
-                            session_id: auth_config.session_id,
-                            flow_token: sft,
-                            ctx: sctx,
-                            canary: auth_config.canary,
-                            url_end_auth,
-                            url_begin_auth,
-                            url_post,
-                        })
-                    } else {
-                        Err(MsalError::GeneralFailure(
-                            "No MFA methods found".to_string(),
-                        ))
-                    }
+                    Ok(MFAAuthContinue {
+                        mfa_method: default_auth_method.auth_method_id.clone(),
+                        msg,
+                        max_poll_attempts: auth_config.max_poll_attempts,
+                        polling_interval: auth_config.polling_interval,
+                        session_id: auth_config.session_id,
+                        flow_token: auth_response.flow_token,
+                        ctx: auth_response.ctx,
+                        canary: auth_config.canary,
+                        url_end_auth,
+                        url_post,
+                    })
                 } else {
                     Err(MsalError::GeneralFailure(
                         "No MFA methods found".to_string(),
@@ -1538,20 +1564,27 @@ impl PublicClientApplication {
         }
     }
 
-    async fn mfa_begin_auth_internal(&self, flow: &mut MFAAuthContinue) -> Result<bool, MsalError> {
+    async fn mfa_begin_auth_internal(
+        &self,
+        mfa_method: &str,
+        url_begin_auth: &str,
+        ctx: &str,
+        flow_token: &str,
+        canary: &str,
+    ) -> Result<AuthResponse, MsalError> {
         let payload = json!({
-            "AuthMethodId": &flow.mfa_method,
-            "ctx": &flow.ctx,
-            "flowToken": &flow.flow_token,
+            "AuthMethodId": mfa_method,
+            "ctx": ctx,
+            "flowToken": flow_token,
             "Method": "BeginAuth",
         });
 
         let resp = self
             .client()
-            .post(&flow.url_begin_auth)
+            .post(url_begin_auth)
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
             .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-            .header("canary", &flow.canary)
+            .header("canary", canary)
             .json(&payload)
             .send()
             .await
@@ -1564,9 +1597,7 @@ impl PublicClientApplication {
             let auth_response: AuthResponse =
                 json_from_str(&text).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             if auth_response.success {
-                flow.ctx = auth_response.ctx;
-                flow.flow_token = auth_response.flow_token;
-                Ok(auth_response.success)
+                Ok(auth_response)
             } else if let Some(msg) = auth_response.message {
                 Err(MsalError::GeneralFailure(msg))
             } else {
@@ -1690,9 +1721,8 @@ impl PublicClientApplication {
         username: &str,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        mut flow: MFAAuthContinue,
+        flow: &mut MFAAuthContinue,
     ) -> Result<UserToken, MsalError> {
-        self.mfa_begin_auth_internal(&mut flow).await?;
         match auth_data {
             Some(auth_data) => {
                 let payload = json!({
@@ -1733,8 +1763,7 @@ impl PublicClientApplication {
                     if auth_response.success {
                         flow.ctx = auth_response.ctx;
                         flow.flow_token = auth_response.flow_token;
-                        let auth_code =
-                            self.request_authorization_internal(username, &flow).await?;
+                        let auth_code = self.request_authorization_internal(username, flow).await?;
                         self.exchange_authorization_code_for_access_token_internal(auth_code)
                             .await
                     } else if let Some(msg) = auth_response.message {
@@ -1795,8 +1824,7 @@ impl PublicClientApplication {
                     if auth_response.success {
                         flow.ctx = auth_response.ctx;
                         flow.flow_token = auth_response.flow_token;
-                        let auth_code =
-                            self.request_authorization_internal(username, &flow).await?;
+                        let auth_code = self.request_authorization_internal(username, flow).await?;
                         return self
                             .exchange_authorization_code_for_access_token_internal(auth_code)
                             .await;
@@ -2261,7 +2289,7 @@ impl BrokerClientApplication {
         username: &str,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        flow: MFAAuthContinue,
+        flow: &mut MFAAuthContinue,
     ) -> Result<UserToken, MsalError> {
         self.app
             .acquire_token_by_mfa_flow(username, auth_data, poll_attempt, flow)
