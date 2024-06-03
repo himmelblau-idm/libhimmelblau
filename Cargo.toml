@@ -1,6 +1,6 @@
 [package]
-name = "msal"
-description = "Microsoft Compatible Authentication Library for Rust"
+name = "libhimmelblau"
+description = "Samba Library for Azure Entra ID Authentication"
 version = "0.2.6"
 edition = "2021"
 authors = [
