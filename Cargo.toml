@@ -13,6 +13,7 @@ repository = "https://github.com/himmelblau-idm/msal"
 [lib]
 name = "msal"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["broker"]
@@ -35,3 +36,8 @@ kanidm-hsm-crypto = { version = "^0.2.0", optional = true }
 regex = "^1.10.3"
 zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
 scraper = "0.19.0"
+tokio = { version = "1.37.0", features = ["full"] }
+tracing-subscriber = "0.3.18"
+
+[build-dependencies]
+cbindgen = "0.26.0"

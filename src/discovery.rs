@@ -250,6 +250,7 @@ struct NonceResp {
 }
 
 #[cfg(feature = "broker")]
+#[derive(Clone)]
 pub struct EnrollAttrs {
     device_display_name: String,
     device_type: String,
