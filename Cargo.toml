@@ -7,8 +7,8 @@ authors = [
     "David Mulder <dmulder@suse.com>"
 ]
 license = "LGPL-3.0-or-later"
-homepage = "https://github.com/himmelblau-idm/msal"
-repository = "https://github.com/himmelblau-idm/msal"
+homepage = "https://www.samba.org/"
+repository = "https://gitlab.com/samba-team/libhimmelblau"
 
 [lib]
 name = "msal"
