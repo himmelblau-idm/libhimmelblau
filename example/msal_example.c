@@ -17,7 +17,7 @@
 */
 
 #include <stdio.h>
-#include <msal.h>
+#include <msal/msal.h>
 #include <string.h>
 #include <unistd.h>
 

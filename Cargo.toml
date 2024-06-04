@@ -13,12 +13,13 @@ repository = "https://gitlab.com/samba-team/libhimmelblau"
 [lib]
 name = "msal"
 path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [features]
 default = ["broker"]
 broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto", "compact_jwt/hsm-crypto", "kanidm-hsm-crypto/msextensions"]
 tpm = ["broker", "kanidm-hsm-crypto/tpm"]
+capi = ["broker"]
 
 [dependencies]
 base64 = "^0.22.0"
@@ -41,3 +42,6 @@ tracing-subscriber = "0.3.18"
 
 [build-dependencies]
 cbindgen = "0.26.0"
+
+[package.metadata.capi.library]
+version_suffix_components = 1

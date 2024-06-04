@@ -16,7 +16,7 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::MSAL_ERROR;
+use crate::error::MSAL_ERROR;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
