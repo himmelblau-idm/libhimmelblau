@@ -17,7 +17,7 @@
 */
 
 #include <stdio.h>
-#include <msal/msal.h>
+#include <himmelblau/himmelblau.h>
 #include <string.h>
 #include <unistd.h>
 

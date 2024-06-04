@@ -11,7 +11,7 @@ homepage = "https://www.samba.org/"
 repository = "https://gitlab.com/samba-team/libhimmelblau"
 
 [lib]
-name = "msal"
+name = "himmelblau"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 

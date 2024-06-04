@@ -1,2 +1,2 @@
 all:
-	gcc -g msal_example.c -lmsal
+	gcc -g msal_example.c -lhimmelblau
