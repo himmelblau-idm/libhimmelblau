@@ -87,9 +87,8 @@ impl From<TracingLevel> for Level {
     }
 }
 
-/// # Safety
 #[no_mangle]
-pub unsafe extern "C" fn set_global_tracing_level(level: TracingLevel) -> MSAL_ERROR {
+pub extern "C" fn set_global_tracing_level(level: TracingLevel) -> MSAL_ERROR {
     let level: Level = level.into();
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
 
