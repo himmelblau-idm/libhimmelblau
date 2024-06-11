@@ -38,8 +38,10 @@ use kanidm_hsm_crypto::{
     LoadableMachineKey as LoadableMachineKeyIn, LoadableMsOapxbcRsaKey as LoadableMsOapxbcRsaKeyIn,
     MachineKey as MachineKeyIn, SealedData as SealedDataIn, Tpm,
 };
+use paste::paste;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
+use std::slice;
 #[cfg(feature = "broker")]
 use std::str::FromStr;
 #[cfg(feature = "broker")]
@@ -50,6 +52,7 @@ use tracing_subscriber::FmtSubscriber;
 use crate::auth::*;
 use crate::c_helper::*;
 use crate::error::MSAL_ERROR;
+use crate::serializer::{deserialize_obj, serialize_obj};
 #[cfg(feature = "broker")]
 use crate::EnrollAttrs;
 
@@ -65,6 +68,73 @@ pub struct MachineKey(MachineKeyIn);
 pub struct LoadableMachineKey(LoadableMachineKeyIn);
 #[cfg(feature = "broker")]
 pub struct SealedData(SealedDataIn);
+
+macro_rules! serialize_and_deserialize_funcs {
+    ($type:ty) => {
+        paste! {
+            #[no_mangle]
+            #[doc = "Serialize a `" $type "` object to bytes."]
+            pub unsafe extern "C" fn [<serialize _ $type:snake:lower>] (value: &$type,
+                                                                        out_buf: *mut *mut u8,
+                                                                        out_len: *mut usize,
+            ) -> MSAL_ERROR {
+                let bytes = match serialize_obj(&value.0) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        error!("{:?}", e);
+                        return MSAL_ERROR::INVALID_JSON;
+                    },
+                };
+
+                let mut bytes = std::mem::ManuallyDrop::new(bytes);
+                unsafe {
+                    *out_buf = bytes.as_mut_ptr();
+                    *out_len = bytes.len();
+                }
+
+                MSAL_ERROR::SUCCESS
+            }
+
+            #[no_mangle]
+            #[doc = "Deserialize a `" $type "` object from bytes."]
+            pub unsafe extern "C" fn [<deserialize _ $type:snake:lower>] (in_buf: *mut u8,
+                                                                          in_len: usize,
+                                                                          out: *mut *mut $type,
+            ) -> MSAL_ERROR {
+                let bytes = slice::from_raw_parts(in_buf, in_len);
+                let res = match deserialize_obj(bytes) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        error!("{:?}", e);
+                        return MSAL_ERROR::INVALID_JSON;
+                    },
+                };
+                unsafe {
+                    *out = Box::into_raw(Box::new($type(res)));
+                }
+
+                MSAL_ERROR::SUCCESS
+            }
+        }
+    };
+}
+serialize_and_deserialize_funcs!(LoadableMachineKey);
+serialize_and_deserialize_funcs!(LoadableMsOapxbcRsaKey);
+serialize_and_deserialize_funcs!(LoadableIdentityKey);
+serialize_and_deserialize_funcs!(SealedData);
+
+/// # Safety
+///
+/// The calling function must ensure that the `input` raw pointer is valid and
+/// can be dereferenced.
+#[no_mangle]
+pub unsafe extern "C" fn raw_serialized_free(input: *mut u8, len: usize) {
+    if !input.is_null() {
+        unsafe {
+            let _ = Vec::from_raw_parts(input, len, len);
+        }
+    }
+}
 
 #[repr(C)]
 pub enum TracingLevel {

@@ -48,3 +48,5 @@ pub mod capi;
 
 #[cfg(all(feature = "broker", not(feature = "capi")))]
 pub mod pyapi;
+
+pub mod serializer;
