@@ -2,10 +2,15 @@ all:
 	cargo cbuild
 	maturin build
 
-install:
-	>&2 echo "This is a development install. Do not use this command for packaging."
-	sudo cargo cinstall --prefix=/usr/local
-	maturin develop
+HOST=`rustc -vV | grep "host" | cut -d ' ' -f2`
+DIR=`pwd`
+LIB_DIR=${DIR}/target/${HOST}/debug
+INCLUDE_DIR=${LIB_DIR}/include
+
+testenv: all
+	ln -s ${LIB_DIR}/libhimmelblau.so ${LIB_DIR}/libhimmelblau.so.0 2>/dev/null || echo
+	python3 -m venv ./target/.env
+	xterm -e "source ./target/.env/bin/activate && maturin develop && LD_LIBRARY_PATH=${LIB_DIR} LDFLAGS="-L${LIB_DIR}" CFLAGS="-I${INCLUDE_DIR}" sh"
 
 clean:
 	cargo clean

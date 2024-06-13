@@ -1,3 +1,4 @@
+use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
     BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue, UserToken,
 };
@@ -8,8 +9,10 @@ use kanidm_hsm_crypto::{
     AuthValue, BoxedDynTpm, LoadableIdentityKey, LoadableMachineKey, LoadableMsOapxbcRsaKey,
     MachineKey, SealedData, Tpm,
 };
+use paste::paste;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyType};
 use std::future::Future;
 use std::str::FromStr;
 use tokio::runtime::Runtime;
@@ -52,10 +55,35 @@ macro_rules! run_async {
     }}
 }
 
+macro_rules! serialize_impl {
+    ($type:ident, $inner:ident) => {
+        paste! {
+            #[pymethods]
+            impl [<Py $type>] {
+                fn to_bytes(&self, py: Python) -> PyResult<PyObject> {
+                    let bytes = serialize_obj(&self.$inner)
+                        .map_err(|e| to_pyerr!(e))?;
+                    Ok(PyBytes::new_bound(py, &bytes).into())
+                }
+
+                #[classmethod]
+                fn from_bytes(_cls: &Bound<'_, PyType>, bytes: &Bound<'_, PyBytes>) -> PyResult<Self> {
+                    let obj: $type = deserialize_obj(bytes.as_bytes())
+                        .map_err(|e| to_pyerr!(e))?;
+                    Ok([<Py $type>] {
+                        $inner: obj
+                    })
+                }
+            }
+        }
+    };
+}
+
 #[pyclass(name = "LoadableMachineKey", module = "himmelblau", subclass)]
 pub struct PyLoadableMachineKey {
     key: LoadableMachineKey,
 }
+serialize_impl!(LoadableMachineKey, key);
 
 #[pyclass(name = "MachineKey", module = "himmelblau", subclass)]
 pub struct PyMachineKey {
@@ -66,11 +94,13 @@ pub struct PyMachineKey {
 pub struct PyLoadableMsOapxbcRsaKey {
     key: LoadableMsOapxbcRsaKey,
 }
+serialize_impl!(LoadableMsOapxbcRsaKey, key);
 
 #[pyclass(name = "LoadableIdentityKey", module = "himmelblau", subclass)]
 pub struct PyLoadableIdentityKey {
     key: LoadableIdentityKey,
 }
+serialize_impl!(LoadableIdentityKey, key);
 
 #[pyclass(name = "DeviceAuthorizationResponse", module = "himmelblau", subclass)]
 pub struct PyDeviceAuthorizationResponse {
@@ -157,6 +187,7 @@ impl PyUserToken {
 pub struct PySealedData {
     data: SealedData,
 }
+serialize_impl!(SealedData, data);
 
 #[pyclass(name = "Tpm", module = "himmelblau", subclass)]
 pub struct PyBoxedDynTpm {
