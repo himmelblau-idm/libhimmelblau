@@ -45,3 +45,6 @@ pub use discovery::EnrollAttrs;
 mod c_helper;
 #[cfg(feature = "capi")]
 pub mod capi;
+
+#[cfg(all(feature = "broker", not(feature = "capi")))]
+pub mod pyapi;

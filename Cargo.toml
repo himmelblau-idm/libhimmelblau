@@ -13,7 +13,7 @@ repository = "https://gitlab.com/samba-team/libhimmelblau"
 [lib]
 name = "himmelblau"
 path = "src/lib.rs"
-crate-type = ["rlib"]
+crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["broker"]
@@ -39,6 +39,7 @@ zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
 scraper = "0.19.0"
 tokio = { version = "1.37.0", features = ["full"] }
 tracing-subscriber = "0.3.18"
+pyo3 = { version = "0.21.2", features = ["extension-module"] }
 
 [build-dependencies]
 cbindgen = "0.26.0"

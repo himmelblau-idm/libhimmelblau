@@ -1,8 +1,11 @@
 all:
 	cargo cbuild
+	maturin build
 
 install:
-	cargo cinstall
+	>&2 echo "This is a development install. Do not use this command for packaging."
+	sudo cargo cinstall --prefix=/usr/local
+	maturin develop
 
 clean:
 	cargo clean
