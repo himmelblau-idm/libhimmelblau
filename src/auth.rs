@@ -90,7 +90,11 @@ use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 #[cfg(feature = "broker")]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
+use compact_jwt::JwtError;
+#[cfg(feature = "broker")]
 use serde_json::to_string_pretty;
+#[cfg(feature = "broker")]
+use zeroize::Zeroizing;
 
 #[cfg(feature = "broker")]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
@@ -771,10 +775,10 @@ impl FromStr for TGT {
 #[derive(Default, Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct TGT {
     #[serde(rename = "clientKey")]
-    pub client_key: Option<String>,
+    client_key: Option<String>,
     #[serde(rename = "keyType")]
-    pub key_type: u32,
-    pub error: Option<String>,
+    key_type: u32,
+    error: Option<String>,
     #[serde(rename = "messageBuffer")]
     pub message_buffer: Option<String>,
     pub realm: Option<String>,
@@ -784,6 +788,37 @@ pub struct TGT {
     pub session_key_type: u32,
     #[serde(rename = "accountType")]
     pub account_type: u32,
+}
+
+#[cfg(feature = "broker")]
+impl TGT {
+    fn client_key(
+        &self,
+        tpm: &mut BoxedDynTpm,
+        transport_key: &MsOapxbcRsaKey,
+        session_key: &SessionKey,
+    ) -> Result<Zeroizing<Vec<u8>>, MsalError> {
+        if self.key_type == 0 {
+            return Err(MsalError::CryptoFail("TGT key type is invalid".to_string()));
+        }
+        match &self.client_key {
+            Some(client_key) => {
+                let jwe = JweCompact::from_str(client_key)
+                    .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+                Ok(session_key
+                    .decipher_tgt_client_key(tpm, transport_key, &jwe)
+                    .map_err(|e| {
+                        MsalError::CryptoFail(format!(
+                            "Failed to unwrap the tgt session key: {:?}",
+                            e
+                        ))
+                    })?)
+            }
+            None => Err(MsalError::CryptoFail(
+                "TGT client key is missing".to_string(),
+            )),
+        }
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -871,6 +906,34 @@ impl SessionKey {
         session_key
             .decipher_prt_v2(tpm, transport_key, jwe)
             .map_err(|e| MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e)))
+    }
+
+    fn decipher_tgt_client_key(
+        &self,
+        tpm: &mut BoxedDynTpm,
+        transport_key: &MsOapxbcRsaKey,
+        jwe: &JweCompact,
+    ) -> Result<Zeroizing<Vec<u8>>, MsalError> {
+        let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
+            tpm,
+            transport_key,
+            &self.session_key_jwe,
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
+        match session_key.decipher_prt_v2(tpm, transport_key, jwe) {
+            Ok(decrypted) => Ok(Zeroizing::new(decrypted.payload().to_vec())),
+            Err(JwtError::OpenSSLError) => match session_key.decipher(tpm, transport_key, jwe) {
+                Ok(decrypted) => Ok(Zeroizing::new(decrypted.payload().to_vec())),
+                Err(e) => Err(MsalError::CryptoFail(format!(
+                    "Failed to decipher Jwe: {}",
+                    e
+                ))),
+            },
+            Err(e) => Err(MsalError::CryptoFail(format!(
+                "Failed to decipher Jwe: {}",
+                e
+            ))),
+        }
     }
 
     fn sign<V: JwsSignable>(
@@ -3795,6 +3858,99 @@ impl BrokerClientApplication {
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
         prt.uuid()
+    }
+
+    /// Gets the Cloud TGT and it's client key from a sealed PRT
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: A decrypted TGT tuple.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn unseal_cloud_tgt(
+        &self,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<(TGT, Zeroizing<Vec<u8>>), MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        if let Some(error) = &prt.tgt_cloud.error {
+            return Err(MsalError::Missing(error.to_string()));
+        }
+        let session_key = prt.session_key()?;
+        let client_key = prt
+            .tgt_cloud
+            .client_key(tpm, &transport_key, &session_key)?;
+        Ok((prt.tgt_cloud.clone(), client_key))
+    }
+
+    /// Gets the on-prem AD TGT and it's client key from a sealed PRT
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: A decrypted TGT tuple.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn unseal_ad_tgt(
+        &self,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<(TGT, Zeroizing<Vec<u8>>), MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        if let Some(error) = &prt.tgt_ad.error {
+            return Err(MsalError::Missing(error.to_string()));
+        }
+        let session_key = prt.session_key()?;
+        let client_key = prt.tgt_ad.client_key(tpm, &transport_key, &session_key)?;
+        Ok((prt.tgt_ad.clone(), client_key))
+    }
+
+    /// Get the Kerberos top level names from a sealed PRT
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: The Kerberos top level names
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn unseal_prt_kerberos_top_level_names(
+        &self,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<String, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let kerberos_top_level_names =
+            prt.kerberos_top_level_names
+                .clone()
+                .ok_or(MsalError::Missing(
+                    "kerberos_top_level_names missing from PRT".to_string(),
+                ))?;
+        Ok(kerberos_top_level_names.clone())
     }
 
     fn seal_user_prt(
