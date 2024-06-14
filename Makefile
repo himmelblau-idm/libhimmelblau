@@ -1,5 +1,7 @@
 all:
+	command -v cargo-cbuild || (echo "cargo-c required" && exit 1)
 	cargo cbuild
+	command -v maturin || (echo "python3-maturin required" && exit 1)
 	maturin build
 
 HOST=`rustc -vV | grep "host" | cut -d ' ' -f2`
