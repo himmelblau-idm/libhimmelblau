@@ -153,9 +153,9 @@ macro_rules! c_str_from_object_option_string {
 }
 
 macro_rules! c_str_from_object_func {
-    ($obj:ident, $func:ident, $out:ident) => {{
+    ($obj:ident, $func:ident, $out:ident $(, $arg:expr)* $(,)?) => {{
         let obj = unsafe { &mut *$obj };
-        match obj.$func() {
+        match obj.$func($($arg),*) {
             Ok(item) => {
                 let c_str = wrap_string(&item);
                 if !c_str.is_null() {

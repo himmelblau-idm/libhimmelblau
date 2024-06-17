@@ -40,6 +40,8 @@ int main() {
 	LoadableMsOapxbcRsaKey *transport_key = NULL;
 	LoadableIdentityKey *cert_key = NULL;
 	LoadableIdentityKey *hello_key = NULL;
+	SealedData *prt = NULL;
+	TGT *tgt = NULL;
 	MSAL_ERROR err;
 	char* auth_value = NULL;
 	char *domain = NULL;
@@ -53,6 +55,7 @@ int main() {
 	char *access_token = NULL;
 	char *spn = NULL;
 	char *uuid = NULL;
+	char *client_key = NULL;
 	bool mfa = false;
 	bool user_exists;
 
@@ -306,6 +309,23 @@ int main() {
 	       uuid,
 	       mfa);
 
+	printf("Unseal the TGT from the PRT\n");
+	err = user_token_prt(token0, &prt);
+	if (err != SUCCESS) {
+		printf("Failed fetching token prt\n");
+		goto OUT;
+	}
+	err = broker_unseal_cloud_tgt(client,
+				      prt,
+				      tpm,
+				      machine_key,
+				      &tgt,
+				      &client_key);
+	if (err != SUCCESS) {
+		printf("Failed fetching TGT and client key from PRT\n");
+		goto OUT;
+	}
+
 OUT:
 	user_token_free(token);
 	user_token_free(token0);
@@ -322,8 +342,11 @@ OUT:
 	loadable_ms_oapxbc_rsa_key_free(transport_key);
 	loadable_identity_key_free(cert_key);
 	loadable_identity_key_free(hello_key);
+	sealed_data_free(prt);
+	tgt_free(tgt);
 	string_free(refresh_token);
 	string_free(access_token);
 	string_free(spn);
 	string_free(uuid);
+	string_free(client_key);
 }

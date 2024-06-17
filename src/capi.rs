@@ -1813,6 +1813,213 @@ pub unsafe extern "C" fn user_token_amr_mfa(token: *mut UserToken, out: *mut boo
 
 /// # Safety
 ///
+/// The calling function must ensure that the `token` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn user_token_prt(
+    token: *mut UserToken,
+    out: *mut *mut SealedData,
+) -> MSAL_ERROR {
+    let token = unsafe { &mut *token };
+    match &token.prt {
+        Some(prt) => {
+            unsafe {
+                *out = Box::into_raw(Box::new(SealedData(prt.clone())));
+            }
+            MSAL_ERROR::SUCCESS
+        }
+        None => {
+            error!("PRT not found!");
+            MSAL_ERROR::INVALID_POINTER
+        }
+    }
+}
+
+macro_rules! broker_unseal_tgt {
+    ($func:ident, $client:ident, $sealed_prt:ident, $tpm:ident, $machine_key:ident, $out_tgt:ident, $out_client_key:ident) => {{
+        if $client.is_null() || $sealed_prt.is_null() || $tpm.is_null() || $machine_key.is_null() {
+            error!("Invalid input parameters!");
+            return MSAL_ERROR::INVALID_POINTER;
+        }
+        // Ensure our out parameter is not NULL
+        if $out_tgt.is_null() || $out_client_key.is_null() {
+            error!("Invalid output parameters!");
+            return MSAL_ERROR::INVALID_POINTER;
+        }
+
+        let client = unsafe { &mut *$client };
+        let sealed_prt = unsafe { &mut *$sealed_prt };
+        let tpm = unsafe { &mut *$tpm };
+        let machine_key = unsafe { &mut *$machine_key };
+
+        let (tgt, client_key) = match client.$func(&sealed_prt.0, &mut tpm.0, &machine_key.0) {
+            Ok(res) => res,
+            Err(e) => {
+                error!("{:?}", e);
+                return MSAL_ERROR::from(e);
+            }
+        };
+
+        let c_client_key = match CString::new(client_key.as_slice()) {
+            Ok(msg) => msg.into_raw(),
+            Err(e) => {
+                error!("{:?}", e);
+                return MSAL_ERROR::INVALID_POINTER;
+            }
+        };
+        unsafe {
+            *$out_tgt = Box::into_raw(Box::new(tgt));
+            *$out_client_key = c_client_key;
+        }
+
+        MSAL_ERROR::SUCCESS
+    }};
+}
+
+/// Gets the Cloud TGT and it's client key from a sealed PRT
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` -  An encrypted primary refresh token that was
+///   previously received from the server.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// * `out_tgt` - A decrypted cloud TGT, retrieved from the
+///   PrimaryRefreshToken.
+///
+/// * `out_client_key` - The decrypted client key associated with the cloud
+///   TGT.
+///
+/// # Safety
+///
+/// The calling function must ensure that `sealed_prt`, `tpm`, and
+/// `machine_key` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_unseal_cloud_tgt(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out_tgt: *mut *mut TGT,
+    out_client_key: *mut *mut c_char,
+) -> MSAL_ERROR {
+    broker_unseal_tgt!(
+        unseal_cloud_tgt,
+        client,
+        sealed_prt,
+        tpm,
+        machine_key,
+        out_tgt,
+        out_client_key
+    )
+}
+
+/// Gets the on-prem AD TGT and it's client key from a sealed PRT
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` -  An encrypted primary refresh token that was
+///   previously received from the server.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// * `out_tgt` - A decrypted on-prem AD TGT, retrieved from the
+///   PrimaryRefreshToken.
+///
+/// * `out_client_key` - The decrypted client key associated with the on-prem
+///   AD TGT.
+///
+/// # Safety
+///
+/// The calling function must ensure that `sealed_prt`, `tpm`, and
+/// `machine_key` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_unseal_ad_tgt(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out_tgt: *mut *mut TGT,
+    out_client_key: *mut *mut c_char,
+) -> MSAL_ERROR {
+    broker_unseal_tgt!(
+        unseal_ad_tgt,
+        client,
+        sealed_prt,
+        tpm,
+        machine_key,
+        out_tgt,
+        out_client_key
+    )
+}
+
+/// Get the Kerberos top level names from a sealed PRT
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` -  An encrypted primary refresh token that was
+///   previously received from the server.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// * `out` - The Kerberos top level names
+///
+/// # Safety
+///
+/// The calling function must ensure that `sealed_prt`, `tpm`, and
+/// `machine_key` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_unseal_prt_kerberos_top_level_names(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out: *mut *mut c_char,
+) -> MSAL_ERROR {
+    let sealed_prt = unsafe { &mut *sealed_prt };
+    let tpm = unsafe { &mut *tpm };
+    let machine_key = unsafe { &mut *machine_key };
+    c_str_from_object_func!(
+        client,
+        unseal_prt_kerberos_top_level_names,
+        out,
+        &sealed_prt.0,
+        &mut tpm.0,
+        &machine_key.0
+    )
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `input` raw pointer is valid and
+/// can be dereferenced.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn tgt_free(input: *mut TGT) {
+    free_object!(input);
+}
+
+/// # Safety
+///
 /// The calling function must ensure that the `client` raw pointer is valid and
 /// can be dereferenced.
 #[cfg(feature = "broker")]
