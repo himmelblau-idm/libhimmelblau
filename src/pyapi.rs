@@ -1,6 +1,7 @@
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
     BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue, UserToken,
+    TGT,
 };
 use kanidm_hsm_crypto::soft::SoftTpm;
 #[cfg(feature = "tpm")]
@@ -181,6 +182,14 @@ impl PyUserToken {
     fn get_amr_mfa(&self) -> PyResult<bool> {
         self.token.amr_mfa().map_err(|e| to_pyerr!(e))
     }
+
+    #[getter]
+    fn get_prt(&self) -> PyResult<PySealedData> {
+        match &self.token.prt {
+            Some(prt) => Ok(PySealedData { data: prt.clone() }),
+            None => Err(general_py_err!("PRT not found!")),
+        }
+    }
 }
 
 #[pyclass(name = "SealedData", module = "himmelblau", subclass)]
@@ -188,6 +197,56 @@ pub struct PySealedData {
     data: SealedData,
 }
 serialize_impl!(SealedData, data);
+
+#[pyclass(name = "TGT", module = "himmelblau", subclass)]
+pub struct PyTGT {
+    tgt: TGT,
+}
+
+#[pymethods]
+impl PyTGT {
+    #[getter]
+    fn get_message_buffer(&self) -> PyResult<String> {
+        match &self.tgt.message_buffer {
+            Some(message_buffer) => Ok(message_buffer.clone()),
+            None => Err(general_py_err!("Message buffer not found!")),
+        }
+    }
+
+    #[getter]
+    fn get_realm(&self) -> PyResult<String> {
+        match &self.tgt.realm {
+            Some(realm) => Ok(realm.clone()),
+            None => Err(general_py_err!("Realm not found!")),
+        }
+    }
+
+    #[getter]
+    fn get_sn(&self) -> PyResult<String> {
+        match &self.tgt.sn {
+            Some(sn) => Ok(sn.clone()),
+            None => Err(general_py_err!("sn not found!")),
+        }
+    }
+
+    #[getter]
+    fn get_cn(&self) -> PyResult<String> {
+        match &self.tgt.cn {
+            Some(cn) => Ok(cn.clone()),
+            None => Err(general_py_err!("cn not found!")),
+        }
+    }
+
+    #[getter]
+    fn get_session_key_type(&self) -> PyResult<u32> {
+        Ok(self.tgt.session_key_type)
+    }
+
+    #[getter]
+    fn get_account_type(&self) -> PyResult<u32> {
+        Ok(self.tgt.account_type)
+    }
+}
 
 #[pyclass(name = "Tpm", module = "himmelblau", subclass)]
 pub struct PyBoxedDynTpm {
@@ -665,6 +724,43 @@ impl PyBrokerClientApplication {
             &machine_key.key,
         )?;
         Ok(jwt)
+    }
+
+    pub fn unseal_cloud_tgt<'py>(
+        &self,
+        sealed_prt: &PySealedData,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyMachineKey,
+        py: Python<'py>,
+    ) -> PyResult<(PyTGT, pyo3::Bound<'py, PyBytes>)> {
+        self.client
+            .unseal_cloud_tgt(&sealed_prt.data, &mut tpm.tpm, &machine_key.key)
+            .map(|(tgt, client_key)| (PyTGT { tgt }, PyBytes::new_bound(py, client_key.as_ref())))
+            .map_err(|e| to_pyerr!(e))
+    }
+
+    pub fn unseal_ad_tgt<'py>(
+        &self,
+        sealed_prt: &PySealedData,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyMachineKey,
+        py: Python<'py>,
+    ) -> PyResult<(PyTGT, pyo3::Bound<'py, PyBytes>)> {
+        self.client
+            .unseal_ad_tgt(&sealed_prt.data, &mut tpm.tpm, &machine_key.key)
+            .map(|(tgt, client_key)| (PyTGT { tgt }, PyBytes::new_bound(py, client_key.as_ref())))
+            .map_err(|e| to_pyerr!(e))
+    }
+
+    pub fn unseal_prt_kerberos_top_level_names(
+        &self,
+        sealed_prt: &PySealedData,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyMachineKey,
+    ) -> PyResult<String> {
+        self.client
+            .unseal_prt_kerberos_top_level_names(&sealed_prt.data, &mut tpm.tpm, &machine_key.key)
+            .map_err(|e| to_pyerr!(e))
     }
 }
 

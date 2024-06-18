@@ -64,3 +64,7 @@ print("access_token: %s, spn: %s, uuid: %s, mfa?: %d" % (token0.access_token, to
 print("Acquiring a PRT SSO Cookie")
 cookie = client.acquire_prt_sso_cookie(token0.prt, tpm, machine_key)
 print("cookie:", cookie)
+
+print("Unseal the TGT from the PRT")
+(cloud_tgt, client_key) = client.unseal_cloud_tgt(token0.prt, tpm, machine_key)
+print(cloud_tgt, client_key)
