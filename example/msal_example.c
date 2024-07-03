@@ -20,12 +20,30 @@
 #include <himmelblau/himmelblau.h>
 #include <string.h>
 #include <unistd.h>
+#include <ctype.h>
 
 void strip_newline(char *str) {
 	int len = strlen(str);
 	if (str[len-1] == '\n') {
 		str[len-1] = '\0';
 	}
+}
+
+void cat_file(const char *filename) {
+	FILE *f = fopen(filename, "rb");
+	if (f == NULL) {
+		printf("Failed opening the ccache for reading\n");
+		return;
+	}
+	int b = 0;
+	while ((b = fgetc(f)) != EOF) {
+		if (isprint(b)) {
+			printf("%c", b);
+		} else {
+			printf(".");
+		}
+	}
+	fclose(f);
 }
 
 int main() {
@@ -42,6 +60,9 @@ int main() {
 	LoadableIdentityKey *hello_key = NULL;
 	SealedData *prt = NULL;
 	TGT *tgt = NULL;
+	AsRep *as_rep = NULL;
+	CCache *ccache = NULL;
+	AesKey *client_key = NULL;
 	MSAL_ERROR err;
 	char* auth_value = NULL;
 	char *domain = NULL;
@@ -55,7 +76,7 @@ int main() {
 	char *access_token = NULL;
 	char *spn = NULL;
 	char *uuid = NULL;
-	char *client_key = NULL;
+	char *kerberos_top_level_names = NULL;
 	bool mfa = false;
 	bool user_exists;
 
@@ -326,6 +347,36 @@ int main() {
 		goto OUT;
 	}
 
+	printf("Parse the TGT into a Kerberos ccache\n");
+	err = tgt_message(tgt, &as_rep);
+	if (err != SUCCESS) {
+		printf("Failed fetching the as_rep\n");
+		goto OUT;
+	}
+	err = ccache_init(as_rep, client_key, &ccache);
+	if (err != SUCCESS) {
+		printf("Failed initializing ccache\n");
+		goto OUT;
+	}
+	err = ccache_save_keytab_file(ccache, "./c_test_ccache");
+	if (err != SUCCESS) {
+		printf("Failed storing the ccache to a file\n");
+		goto OUT;
+	}
+	cat_file("./c_test_ccache");
+
+	printf("\nUnseal the Kerberos top level names\n");
+	err = broker_unseal_prt_kerberos_top_level_names(client,
+							 prt,
+							 tpm,
+							 machine_key,
+							 &kerberos_top_level_names);
+	if (err != SUCCESS) {
+		printf("Failed to unseal the kerberos top level names\n");
+		goto OUT;
+	}
+	printf("%s\n", kerberos_top_level_names);
+
 OUT:
 	user_token_free(token);
 	user_token_free(token0);
@@ -343,10 +394,13 @@ OUT:
 	loadable_identity_key_free(cert_key);
 	loadable_identity_key_free(hello_key);
 	sealed_data_free(prt);
+	as_rep_free(as_rep);
 	tgt_free(tgt);
+	aes_key_free(client_key);
+	ccache_free(ccache);
 	string_free(refresh_token);
 	string_free(access_token);
 	string_free(spn);
 	string_free(uuid);
-	string_free(client_key);
+	string_free(kerberos_top_level_names);
 }

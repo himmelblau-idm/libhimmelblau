@@ -88,9 +88,17 @@ use crate::discovery::Services;
 #[cfg(feature = "broker")]
 use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 #[cfg(feature = "broker")]
+use crate::krb5::FileCredentialCache;
+#[cfg(feature = "broker")]
+use crate::krb5::IntegerAsn1;
+#[cfg(feature = "broker")]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
 use compact_jwt::JwtError;
+#[cfg(feature = "broker")]
+use himmelblau_kerberos_crypto::{AesCipher, AesSizes, KerberosCipher};
+#[cfg(feature = "broker")]
+use picky_krb::messages::AsRep;
 #[cfg(feature = "broker")]
 use serde_json::to_string_pretty;
 #[cfg(feature = "broker")]
@@ -780,7 +788,7 @@ pub struct TGT {
     key_type: u32,
     error: Option<String>,
     #[serde(rename = "messageBuffer")]
-    pub message_buffer: Option<String>,
+    message_buffer: Option<String>,
     pub realm: Option<String>,
     pub sn: Option<String>,
     pub cn: Option<String>,
@@ -791,33 +799,95 @@ pub struct TGT {
 }
 
 #[cfg(feature = "broker")]
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct AesKey {
+    key: Vec<u8>,
+    etype: u16,
+}
+
+impl AesKey {
+    fn new(key: &[u8], etype: u16) -> Result<Self, MsalError> {
+        Ok(AesKey {
+            key: key.to_vec(),
+            etype,
+        })
+    }
+
+    pub(crate) fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, MsalError> {
+        let aes_sizes = match self.etype {
+            17 => AesSizes::Aes128,
+            18 => AesSizes::Aes256,
+            _ => {
+                return Err(MsalError::CryptoFail(format!(
+                    "Encryption type {} not supported",
+                    self.etype
+                )))
+            }
+        };
+        let cipher = AesCipher::new(aes_sizes);
+        cipher
+            .decrypt(&self.key, 3, ciphertext)
+            .map_err(|e| MsalError::CryptoFail(format!("{:?}", e)))
+            .map(Zeroizing::new)
+    }
+}
+
+#[cfg(feature = "broker")]
 impl TGT {
     fn client_key(
         &self,
         tpm: &mut BoxedDynTpm,
         transport_key: &MsOapxbcRsaKey,
         session_key: &SessionKey,
-    ) -> Result<Zeroizing<Vec<u8>>, MsalError> {
+    ) -> Result<AesKey, MsalError> {
         if self.key_type == 0 {
             return Err(MsalError::CryptoFail("TGT key type is invalid".to_string()));
+        }
+        let tgt = self.message()?;
+        let etype: u16 = IntegerAsn1(&tgt.0.enc_part.0.etype.0).try_into()?;
+        if etype != 18 && etype != 17 {
+            return Err(MsalError::CryptoFail(format!(
+                "Encryption type {} not supported",
+                etype
+            )));
         }
         match &self.client_key {
             Some(client_key) => {
                 let jwe = JweCompact::from_str(client_key)
                     .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
-                Ok(session_key
+                let client_key = session_key
                     .decipher_tgt_client_key(tpm, transport_key, &jwe)
                     .map_err(|e| {
                         MsalError::CryptoFail(format!(
                             "Failed to unwrap the tgt session key: {:?}",
                             e
                         ))
-                    })?)
+                    })?;
+                Ok(AesKey::new(&client_key, etype).map_err(|e| {
+                    MsalError::CryptoFail(format!("Failed to load the Aes256 key: {:?}", e))
+                })?)
             }
             None => Err(MsalError::CryptoFail(
                 "TGT client key is missing".to_string(),
             )),
         }
+    }
+
+    pub fn message(&self) -> Result<AsRep, MsalError> {
+        let tgt: AsRep = match &self.message_buffer {
+            Some(message_buffer) => picky_asn1_der::from_bytes(
+                &STANDARD
+                    .decode(message_buffer.as_str())
+                    .map_err(|e| MsalError::CryptoFail(format!("{:?}", e)))?,
+            )
+            .map_err(|e| MsalError::CryptoFail(format!("{:?}", e)))?,
+            None => {
+                return Err(MsalError::CryptoFail(
+                    "TGT message buffer is missing".to_string(),
+                ))
+            }
+        };
+        Ok(tgt)
     }
 }
 
@@ -3860,26 +3930,28 @@ impl BrokerClientApplication {
         prt.uuid()
     }
 
-    /// Gets the Cloud TGT and it's client key from a sealed PRT
+    /// Gets the Cloud TGT from a sealed PRT and stores it in the Kerberos CCache
     ///
     /// # Arguments
     ///
     /// * `sealed_prt` -  An encrypted primary refresh token that was
     ///   previously received from the server.
     ///
+    /// * `filename` - The filename for the Kerberos Credential Cache.
+    ///
     /// * `tpm` - The tpm object.
     ///
     /// * `machine_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
-    /// * Success: A decrypted TGT tuple.
     /// * Failure: An MsalError, indicating the failure.
-    pub fn unseal_cloud_tgt(
+    pub fn store_cloud_tgt(
         &self,
         sealed_prt: &SealedData,
+        filename: &str,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
-    ) -> Result<(TGT, Zeroizing<Vec<u8>>), MsalError> {
+    ) -> Result<(), MsalError> {
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
         if let Some(error) = &prt.tgt_cloud.error {
@@ -3889,29 +3961,33 @@ impl BrokerClientApplication {
         let client_key = prt
             .tgt_cloud
             .client_key(tpm, &transport_key, &session_key)?;
-        Ok((prt.tgt_cloud.clone(), client_key))
+        let message = prt.tgt_cloud.message()?;
+        let ccache = FileCredentialCache::new(&message, &client_key)?;
+        ccache.save_keytab_file(filename)
     }
 
-    /// Gets the on-prem AD TGT and it's client key from a sealed PRT
+    /// Gets the AD TGT from a sealed PRT and stores it in the Kerberos CCache
     ///
     /// # Arguments
     ///
     /// * `sealed_prt` -  An encrypted primary refresh token that was
     ///   previously received from the server.
     ///
+    /// * `filename` - The filename for the Kerberos Credential Cache.
+    ///
     /// * `tpm` - The tpm object.
     ///
     /// * `machine_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
-    /// * Success: A decrypted TGT tuple.
     /// * Failure: An MsalError, indicating the failure.
-    pub fn unseal_ad_tgt(
+    pub fn store_ad_tgt(
         &self,
         sealed_prt: &SealedData,
+        filename: &str,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
-    ) -> Result<(TGT, Zeroizing<Vec<u8>>), MsalError> {
+    ) -> Result<(), MsalError> {
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
         if let Some(error) = &prt.tgt_ad.error {
@@ -3919,7 +3995,9 @@ impl BrokerClientApplication {
         }
         let session_key = prt.session_key()?;
         let client_key = prt.tgt_ad.client_key(tpm, &transport_key, &session_key)?;
-        Ok((prt.tgt_ad.clone(), client_key))
+        let message = prt.tgt_ad.message()?;
+        let ccache = FileCredentialCache::new(&message, &client_key)?;
+        ccache.save_keytab_file(filename)
     }
 
     /// Get the Kerberos top level names from a sealed PRT

@@ -54,3 +54,6 @@ pub mod pyapi;
 pub mod serializer;
 
 pub mod aadsts_err_gen;
+
+#[cfg(feature = "broker")]
+mod krb5;

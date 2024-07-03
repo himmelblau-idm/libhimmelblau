@@ -1835,48 +1835,38 @@ pub unsafe extern "C" fn user_token_prt(
     }
 }
 
-macro_rules! broker_unseal_tgt {
-    ($func:ident, $client:ident, $sealed_prt:ident, $tpm:ident, $machine_key:ident, $out_tgt:ident, $out_client_key:ident) => {{
+macro_rules! broker_store_tgt {
+    ($func:ident, $client:ident, $sealed_prt:ident, $filename:ident, $tpm:ident, $machine_key:ident) => {{
         if $client.is_null() || $sealed_prt.is_null() || $tpm.is_null() || $machine_key.is_null() {
             error!("Invalid input parameters!");
-            return MSAL_ERROR::INVALID_POINTER;
-        }
-        // Ensure our out parameter is not NULL
-        if $out_tgt.is_null() || $out_client_key.is_null() {
-            error!("Invalid output parameters!");
             return MSAL_ERROR::INVALID_POINTER;
         }
 
         let client = unsafe { &mut *$client };
         let sealed_prt = unsafe { &mut *$sealed_prt };
+        let filename = match wrap_c_char($filename) {
+            Some(filename) => filename,
+            None => {
+                error!("Invalid input username!");
+                return MSAL_ERROR::INVALID_POINTER;
+            }
+        };
         let tpm = unsafe { &mut *$tpm };
         let machine_key = unsafe { &mut *$machine_key };
 
-        let (tgt, client_key) = match client.$func(&sealed_prt.0, &mut tpm.0, &machine_key.0) {
+        match client.$func(&sealed_prt.0, &filename, &mut tpm.0, &machine_key.0) {
             Ok(res) => res,
             Err(e) => {
                 error!("{:?}", e);
                 return MSAL_ERROR::from(e);
             }
-        };
-
-        let c_client_key = match CString::new(client_key.as_slice()) {
-            Ok(msg) => msg.into_raw(),
-            Err(e) => {
-                error!("{:?}", e);
-                return MSAL_ERROR::INVALID_POINTER;
-            }
-        };
-        unsafe {
-            *$out_tgt = Box::into_raw(Box::new(tgt));
-            *$out_client_key = c_client_key;
         }
 
         MSAL_ERROR::SUCCESS
     }};
 }
 
-/// Gets the Cloud TGT and it's client key from a sealed PRT
+/// Gets the Cloud TGT from a sealed PRT and stores it in the Kerberos CCache
 ///
 /// # Arguments
 ///
@@ -1886,15 +1876,11 @@ macro_rules! broker_unseal_tgt {
 /// * `sealed_prt` -  An encrypted primary refresh token that was
 ///   previously received from the server.
 ///
+/// * `filename` - The filename for the Kerberos Credential Cache.
+///
 /// * `tpm` - The tpm object.
 ///
 /// * `machine_key` - The TPM MachineKey associated with this application.
-///
-/// * `out_tgt` - A decrypted cloud TGT, retrieved from the
-///   PrimaryRefreshToken.
-///
-/// * `out_client_key` - The decrypted client key associated with the cloud
-///   TGT.
 ///
 /// # Safety
 ///
@@ -1902,26 +1888,24 @@ macro_rules! broker_unseal_tgt {
 /// `machine_key` are valid pointers to their respective types.
 #[cfg(feature = "broker")]
 #[no_mangle]
-pub unsafe extern "C" fn broker_unseal_cloud_tgt(
+pub unsafe extern "C" fn broker_store_cloud_tgt(
     client: *mut BrokerClientApplication,
     sealed_prt: *mut SealedData,
+    filename: *const c_char,
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
-    out_tgt: *mut *mut TGT,
-    out_client_key: *mut *mut c_char,
 ) -> MSAL_ERROR {
-    broker_unseal_tgt!(
-        unseal_cloud_tgt,
+    broker_store_tgt!(
+        store_cloud_tgt,
         client,
         sealed_prt,
+        filename,
         tpm,
-        machine_key,
-        out_tgt,
-        out_client_key
+        machine_key
     )
 }
 
-/// Gets the on-prem AD TGT and it's client key from a sealed PRT
+/// Gets the AD TGT from a sealed PRT and stores it in the Kerberos CCache
 ///
 /// # Arguments
 ///
@@ -1931,15 +1915,11 @@ pub unsafe extern "C" fn broker_unseal_cloud_tgt(
 /// * `sealed_prt` -  An encrypted primary refresh token that was
 ///   previously received from the server.
 ///
+/// * `filename` - The filename for the Kerberos Credential Cache.
+///
 /// * `tpm` - The tpm object.
 ///
 /// * `machine_key` - The TPM MachineKey associated with this application.
-///
-/// * `out_tgt` - A decrypted on-prem AD TGT, retrieved from the
-///   PrimaryRefreshToken.
-///
-/// * `out_client_key` - The decrypted client key associated with the on-prem
-///   AD TGT.
 ///
 /// # Safety
 ///
@@ -1947,23 +1927,14 @@ pub unsafe extern "C" fn broker_unseal_cloud_tgt(
 /// `machine_key` are valid pointers to their respective types.
 #[cfg(feature = "broker")]
 #[no_mangle]
-pub unsafe extern "C" fn broker_unseal_ad_tgt(
+pub unsafe extern "C" fn broker_store_ad_tgt(
     client: *mut BrokerClientApplication,
     sealed_prt: *mut SealedData,
+    filename: *const c_char,
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
-    out_tgt: *mut *mut TGT,
-    out_client_key: *mut *mut c_char,
 ) -> MSAL_ERROR {
-    broker_unseal_tgt!(
-        unseal_ad_tgt,
-        client,
-        sealed_prt,
-        tpm,
-        machine_key,
-        out_tgt,
-        out_client_key
-    )
+    broker_store_tgt!(store_ad_tgt, client, sealed_prt, filename, tpm, machine_key)
 }
 
 /// Get the Kerberos top level names from a sealed PRT
@@ -2006,16 +1977,6 @@ pub unsafe extern "C" fn broker_unseal_prt_kerberos_top_level_names(
         &mut tpm.0,
         &machine_key.0
     )
-}
-
-/// # Safety
-///
-/// The calling function must ensure that the `input` raw pointer is valid and
-/// can be dereferenced.
-#[cfg(feature = "broker")]
-#[no_mangle]
-pub unsafe extern "C" fn tgt_free(input: *mut TGT) {
-    free_object!(input);
 }
 
 /// # Safety

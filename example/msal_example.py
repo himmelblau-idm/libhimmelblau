@@ -67,4 +67,13 @@ print("cookie:", cookie)
 
 print("Unseal the TGT from the PRT")
 (cloud_tgt, client_key) = client.unseal_cloud_tgt(token0.prt, tpm, machine_key)
-print(cloud_tgt, client_key)
+
+print("Parse the TGT into a Kerberos ccache")
+ccache = CCache(cloud_tgt.message, client_key)
+ccache.save_keytab_file('./test_ccache')
+with open('./test_ccache', 'rb') as c:
+    print(c.read())
+
+print("Unseal the Kerberos top level names")
+kerberos_top_level_names = client.unseal_prt_kerberos_top_level_names(token0.prt, tpm, machine_key)
+print(kerberos_top_level_names)
