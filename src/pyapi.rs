@@ -336,7 +336,7 @@ impl PyBrokerClientApplication {
 
     pub fn enroll_device(
         &mut self,
-        token: &PyUserToken,
+        refresh_token: &str,
         attrs: &PyEnrollAttrs,
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyMachineKey,
@@ -346,7 +346,7 @@ impl PyBrokerClientApplication {
             py,
             self.client,
             enroll_device,
-            &token.token,
+            refresh_token,
             attrs.attrs.clone(),
             &mut tpm.tpm,
             &machine_key.key,

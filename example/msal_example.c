@@ -187,8 +187,14 @@ int main() {
 		goto OUT;
 	}
 
+	err = user_token_refresh_token(token, &refresh_token);
+	if (err != SUCCESS) {
+		printf("Failed fetching refresh token\n");
+		goto OUT;
+	}
+
 	err = broker_enroll_device(client,
-				   token,
+				   refresh_token,
 				   attrs,
 				   tpm,
 				   machine_key,
@@ -202,11 +208,6 @@ int main() {
 	printf("Enrolled with device id: %s\n", device_id);
 
 	printf("Obtain PRT from enrollment refresh token\n");
-	err = user_token_refresh_token(token, &refresh_token);
-	if (err != SUCCESS) {
-		printf("Failed fetching refresh token\n");
-		goto OUT;
-	}
 	err = broker_acquire_token_by_refresh_token(client,
 						    refresh_token,
 						    NULL,

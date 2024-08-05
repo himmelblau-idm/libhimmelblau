@@ -86,7 +86,7 @@ let attrs = match EnrollAttrs::new(
     }
 };
 // Use the tpm for enrollment.
-let (transport_key, cert_key, device_id) = app.enroll_device(&token, attrs, &mut tpm, &machine_key).await?;
+let (transport_key, cert_key, device_id) = app.enroll_device(&token.refresh_token, attrs, &mut tpm, &machine_key).await?;
 
 // Request an authentication token
 let token = app.acquire_token_by_username_password(username, password, scope, &mut tpm, &machine_key).await?;
