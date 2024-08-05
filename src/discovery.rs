@@ -24,7 +24,7 @@ use openssl::rsa::Rsa;
 use openssl::x509::X509;
 use os_release::OsRelease;
 use reqwest::{header, Client, Url};
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use serde_json::json;
 use serde_json::to_string_pretty;
 use tracing::debug;
@@ -250,7 +250,7 @@ struct NonceResp {
 }
 
 #[cfg(feature = "broker")]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EnrollAttrs {
     device_display_name: String,
     device_type: String,
