@@ -496,7 +496,7 @@ pub unsafe extern "C" fn enroll_attrs_init(
 #[no_mangle]
 pub unsafe extern "C" fn broker_enroll_device(
     client: *mut BrokerClientApplication,
-    token: *mut UserToken,
+    refresh_token: *mut c_char,
     attrs: *mut EnrollAttrs,
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
@@ -506,7 +506,6 @@ pub unsafe extern "C" fn broker_enroll_device(
 ) -> MSAL_ERROR {
     // Ensure our input parameters are not NULL
     if client.is_null()
-        || token.is_null()
         || attrs.is_null()
         || tpm.is_null()
         || machine_key.is_null()
@@ -521,14 +520,20 @@ pub unsafe extern "C" fn broker_enroll_device(
     }
 
     let client = unsafe { &mut *client };
-    let token = unsafe { &mut *token };
+    let refresh_token = match wrap_c_char(refresh_token) {
+        Some(refresh_token) => refresh_token,
+        None => {
+            error!("Invalid refresh_token input!");
+            return MSAL_ERROR::INVALID_POINTER;
+        }
+    };
     let attrs = unsafe { Box::from_raw(attrs) };
     let tpm = unsafe { &mut *tpm };
     let machine_key = unsafe { &mut *machine_key };
     let (transport_key, cert_key, device_id) = match run_async!(
         client,
         enroll_device,
-        token,
+        &refresh_token,
         *attrs,
         &mut tpm.0,
         &machine_key.0,

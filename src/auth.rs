@@ -1976,14 +1976,14 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub async fn enroll_device(
         &mut self,
-        token: &UserToken,
+        refresh_token: &str,
         attrs: EnrollAttrs,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<(LoadableMsOapxbcRsaKey, LoadableIdentityKey, String), MsalError> {
         // Acquire an actual enrollment token from the token received.
         let token = self
-            .acquire_token_by_refresh_token_for_device_enrollment(&token.refresh_token)
+            .acquire_token_by_refresh_token_for_device_enrollment(refresh_token)
             .await?;
         // Create the transport and cert keys
         let loadable_cert_key = tpm

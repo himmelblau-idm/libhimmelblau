@@ -46,7 +46,7 @@ else:
     exit(1)
 
 attrs = EnrollAttrs(domain, "msal_example_py")
-(transport_key, cert_key, device_id) = client.enroll_device(token, attrs, tpm, machine_key)
+(transport_key, cert_key, device_id) = client.enroll_device(token.refresh_token, attrs, tpm, machine_key)
 
 print("Enrolled with device id: %s" % device_id)
 
