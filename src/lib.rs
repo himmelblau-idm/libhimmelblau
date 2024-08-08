@@ -46,7 +46,8 @@ mod c_helper;
 #[cfg(feature = "capi")]
 pub mod capi;
 
-#[cfg(all(feature = "broker", not(feature = "capi")))]
+#[cfg(all(feature = "broker", not(feature = "capi"), feature = "pyapi"))]
 pub mod pyapi;
 
+#[cfg(any(feature = "pyapi", feature = "capi"))]
 pub mod serializer;
