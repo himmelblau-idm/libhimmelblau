@@ -1,10 +1,5 @@
 language = "C"
 
-header = """
-#ifndef MSAL_H
-#define MSAL_H
-"""
-
 # These prototypes are added manually because cbindgen fails to parse macro
 # generated functions.
 trailer = """
@@ -24,6 +19,4 @@ enum MSAL_ERROR serialize_sealed_data(struct SealedData *value,
                                       char **out_buf, uintptr_t *out_len);
 enum MSAL_ERROR deserialize_sealed_data(uint8_t *in_buf, uintptr_t in_len,
                                         struct SealedData **out);
-
-#endif /* MSAL_H */
 """
