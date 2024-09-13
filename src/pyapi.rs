@@ -648,6 +648,24 @@ impl PyBrokerClientApplication {
             ),
         })
     }
+
+    pub fn acquire_prt_sso_cookie(
+        &self,
+        prt: &PySealedData,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyMachineKey,
+        py: Python,
+    ) -> PyResult<String> {
+        let jwt = run_async!(
+            py,
+            self.client,
+            acquire_prt_sso_cookie,
+            &prt.data,
+            &mut tpm.tpm,
+            &machine_key.key,
+        )?;
+        Ok(jwt)
+    }
 }
 
 #[pymodule]

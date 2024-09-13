@@ -3128,6 +3128,50 @@ impl BrokerClientApplication {
         }
     }
 
+    /// Creates a single sign-on (SSO) JWT Cookie from an encrypted Primary
+    /// Refresh Token (PRT).
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The encrypted Primary Refresh Token (PRT) that will be used
+    ///   to generate the SSO cookie.
+    ///
+    /// * `tpm` - The TPM object used to interface with the hardware for
+    ///   cryptographic operations.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with the current
+    ///   device/application.
+    ///
+    /// # Returns
+    /// * Success: A JWT (as a String) that can be used for single sign-on
+    ///   (SSO) authentication.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_prt_sso_cookie(
+        &self,
+        prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<String, MsalError> {
+        debug!("Creating a prt sso cookie");
+
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(prt, tpm, &transport_key)?;
+        let session_key = prt.session_key()?;
+
+        let nonce = self.request_nonce().await?;
+
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&RefreshTokenCredentialPayload::new(&prt, &nonce)?).map_err(
+                |e| MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e)),
+            )?,
+        )
+        .set_typ(Some("JWT"))
+        .build();
+
+        self.sign_session_key_jwt(&jwt, tpm, machine_key, &session_key)
+            .await
+    }
+
     async fn exchange_prt_for_auth_code(
         &self,
         prt: &PrimaryRefreshToken,

@@ -505,11 +505,7 @@ pub unsafe extern "C" fn broker_enroll_device(
     out_device_id: *mut *mut c_char,
 ) -> MSAL_ERROR {
     // Ensure our input parameters are not NULL
-    if client.is_null()
-        || attrs.is_null()
-        || tpm.is_null()
-        || machine_key.is_null()
-    {
+    if client.is_null() || attrs.is_null() || tpm.is_null() || machine_key.is_null() {
         error!("Invalid input parameters!");
         return MSAL_ERROR::INVALID_POINTER;
     }
@@ -1645,6 +1641,75 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_hello_for_business_key(
         *out = Box::into_raw(Box::new(SealedData(resp)));
     }
     MSAL_ERROR::SUCCESS
+}
+
+/// Creates a single sign-on (SSO) JWT Cookie from an encrypted Primary
+/// Refresh Token (PRT).
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to `broker_init`.
+///
+/// * `prt` - The encrypted Primary Refresh Token (PRT) that will be used
+///   to generate the SSO cookie.
+///
+/// * `tpm` - The TPM object used to interface with the hardware for
+///   cryptographic operations.
+///
+/// * `machine_key` - The TPM MachineKey associated with the current
+///   device/application.
+///
+/// * `out` - A JWT (as a C string) that can be used for single sign-on (SSO)
+///   authentication.
+///
+/// # Safety
+///
+/// The calling function should ensure that `client`, `prt`, `tpm`, `machine_key`, and `out` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_acquire_prt_sso_cookie(
+    client: *mut BrokerClientApplication,
+    prt: *mut SealedData,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out: *mut *mut c_char,
+) -> MSAL_ERROR {
+    if client.is_null() || prt.is_null() || tpm.is_null() || machine_key.is_null() {
+        error!("Invalid input parameters!");
+        return MSAL_ERROR::INVALID_POINTER;
+    }
+
+    // Ensure our out parameter is not NULL
+    if out.is_null() {
+        error!("Invalid output parameter!");
+        return MSAL_ERROR::INVALID_POINTER;
+    }
+
+    let client = unsafe { &mut *client };
+    let prt = unsafe { &mut *prt };
+    let tpm = unsafe { &mut *tpm };
+    let machine_key = unsafe { &mut *machine_key };
+
+    let resp = match run_async!(
+        client,
+        acquire_prt_sso_cookie,
+        &prt.0,
+        &mut tpm.0,
+        &machine_key.0,
+    ) {
+        Ok(jwt) => jwt,
+        Err(e) => return e,
+    };
+
+    let c_str = wrap_string(&resp);
+    if !c_str.is_null() {
+        unsafe {
+            *out = c_str;
+        }
+        MSAL_ERROR::SUCCESS
+    } else {
+        MSAL_ERROR::INVALID_POINTER
+    }
 }
 
 /// # Safety

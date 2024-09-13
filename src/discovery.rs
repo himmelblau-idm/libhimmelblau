@@ -24,7 +24,7 @@ use openssl::rsa::Rsa;
 use openssl::x509::X509;
 use os_release::OsRelease;
 use reqwest::{header, Client, Url};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::to_string_pretty;
 use tracing::debug;
