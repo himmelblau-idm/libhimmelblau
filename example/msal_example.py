@@ -60,3 +60,7 @@ hello_key = client.provision_hello_for_business_key(token, tpm, machine_key, "12
 print("Acquire token via hello key")
 token0 = client.acquire_token_by_hello_for_business_key(username, hello_key, [], tpm, machine_key, "123456")
 print("access_token: %s, spn: %s, uuid: %s, mfa?: %d" % (token0.access_token, token0.spn, token0.uuid, token0.amr_mfa))
+
+print("Acquiring a PRT SSO Cookie")
+cookie = client.acquire_prt_sso_cookie(token0.prt, tpm, machine_key)
+print("cookie:", cookie)
