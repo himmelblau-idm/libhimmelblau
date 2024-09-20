@@ -19,14 +19,18 @@
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use reqwest::{header, Client, Url};
+use reqwest::redirect::Policy;
+use reqwest::{header, Client, Response, Url};
 use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, json, Value};
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::thread::sleep;
+use std::time::Duration;
 use tracing::info;
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
@@ -869,6 +873,7 @@ struct ClientApplication {
 impl ClientApplication {
     fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
         let client = reqwest::Client::builder()
+            .redirect(Policy::none())
             .cookie_store(true)
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
@@ -1214,7 +1219,7 @@ impl PublicClientApplication {
             false => url_post.clone(),
         };
 
-        let resp = self
+        let mut resp = self
             .client()
             .post(url)
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
@@ -1223,11 +1228,9 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        let text;
+        (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
             self.parse_auth_config(&text)
         } else {
             Err(MsalError::GeneralFailure(
@@ -1684,6 +1687,108 @@ impl PublicClientApplication {
         }
     }
 
+    async fn await_working(&self, mut resp: Response) -> Result<(String, Response), MsalError> {
+        // We have to read the response in chunks, because Response.text()
+        // consumes the Response object.
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+        {
+            body.extend(&chunk);
+        }
+        let mut text = String::from_utf8(body)
+            .map_err(|e| MsalError::GeneralFailure(format!("UTF-8 error: {}", e)))?;
+        for _ in 0..10 {
+            if !text.contains("Click Submit to continue") && !text.contains("Working...") {
+                return Ok((text, resp));
+            }
+            sleep(Duration::from_secs(1));
+            let document = Html::parse_document(&text);
+            let form_selector =
+                Selector::parse("form").map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
+            let input_selector = Selector::parse("input")
+                .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
+
+            let form = document
+                .select(&form_selector)
+                .next()
+                .ok_or(MsalError::InvalidParse("Document parse failed".to_string()))?;
+            let post_url = form
+                .value()
+                .attr("action")
+                .ok_or(MsalError::InvalidParse("Form action not found".to_string()))?;
+
+            let mut form_data = HashMap::new();
+
+            for input in form.select(&input_selector) {
+                if let Some(name) = input.value().attr("name") {
+                    if let Some(value) = input.value().attr("value") {
+                        form_data.insert(name.to_string(), value.to_string());
+                    }
+                }
+            }
+
+            resp = self
+                .client()
+                .post(post_url)
+                .form(&form_data)
+                .send()
+                .await
+                .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            let mut body = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+            {
+                body.extend(&chunk);
+            }
+            text = String::from_utf8(body)
+                .map_err(|e| MsalError::GeneralFailure(format!("UTF-8 error: {}", e)))?;
+        }
+        Err(MsalError::GeneralFailure(
+            "Pending request timed out after 10 seconds".to_string(),
+        ))
+    }
+
+    async fn auth_code_intercept_internal(
+        &self,
+        url: &str,
+        payload: String,
+    ) -> Result<String, MsalError> {
+        let mut resp = self
+            .client()
+            .post(url)
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        let _text;
+        (_text, resp) = self.await_working(resp).await?;
+        if resp.status().is_redirection() {
+            let redirect = resp.headers()["location"]
+                .to_str()
+                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let url =
+                Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let (_, code) =
+                url.query_pairs()
+                    .find(|(k, _)| k == "code")
+                    .ok_or(MsalError::InvalidParse(
+                        "Authorization code missing from redirect".to_string(),
+                    ))?;
+            Ok(code.to_string())
+        } else {
+            Err(MsalError::GeneralFailure(
+                "ProcessAuth Authorization request failed".to_string(),
+            ))
+        }
+    }
+
     async fn request_authorization_internal(
         &self,
         username: &str,
@@ -1710,33 +1815,8 @@ impl PublicClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
-        let resp = self
-            .client()
-            .post(&flow.url_post)
-            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
-            .send()
+        self.auth_code_intercept_internal(&flow.url_post, payload)
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_redirection() {
-            let redirect = resp.headers()["location"]
-                .to_str()
-                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
-            let url =
-                Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
-            let (_, code) =
-                url.query_pairs()
-                    .find(|(k, _)| k == "code")
-                    .ok_or(MsalError::InvalidParse(
-                        "Authorization code missing from redirect".to_string(),
-                    ))?;
-            Ok(code.to_string())
-        } else {
-            Err(MsalError::GeneralFailure(
-                "ProcessAuth Authorization request failed".to_string(),
-            ))
-        }
     }
 
     async fn exchange_authorization_code_for_access_token_internal(
