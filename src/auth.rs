@@ -1602,7 +1602,7 @@ impl PublicClientApplication {
         let params = vec![
             ("client_id", self.client_id()),
             ("response_type", "code"),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
             ("client-request-id", request_id),
             ("prompt", "login"),
             ("scope", &scope),
@@ -1747,7 +1747,7 @@ impl PublicClientApplication {
             ("client_id", self.client_id()),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
         ];
         let payload = params
             .iter()
@@ -3163,7 +3163,7 @@ impl BrokerClientApplication {
         let params = [
             ("client_id", self.app.client_id()),
             ("response_type", "code"),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
             ("client-request-id", request_id),
             ("scope", &scope),
             (
@@ -3338,7 +3338,7 @@ impl BrokerClientApplication {
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
             ("scope", &scopes_str),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
             ("client-request-id", request_id),
         ];
         let payload = params
