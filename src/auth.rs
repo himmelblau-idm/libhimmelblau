@@ -85,9 +85,6 @@ use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
 use serde_json::to_string_pretty;
 
-#[derive(Serialize, Clone, Default)]
-struct JoinPayload {}
-
 #[cfg(feature = "broker")]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
 #[cfg(feature = "broker")]
