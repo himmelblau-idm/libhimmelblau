@@ -20,6 +20,8 @@ use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::redirect::Policy;
+#[cfg(feature = "proxyable")]
+use reqwest::Proxy;
 use reqwest::{header, Client, Response, Url};
 use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
@@ -872,11 +874,27 @@ struct ClientApplication {
 
 impl ClientApplication {
     fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
-        let client = reqwest::Client::builder()
+        #[allow(unused_mut)]
+        let mut builder = reqwest::Client::builder()
             .redirect(Policy::none())
-            .cookie_store(true)
+            .cookie_store(true);
+
+        #[cfg(feature = "proxyable")]
+        {
+            if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
+                .ok()
+                .or_else(|| std::env::var("ALL_PROXY").ok())
+            {
+                let proxy = Proxy::https(proxy_var)
+                    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
+                builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+            }
+        }
+
+        let client = builder
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
         Ok(ClientApplication {
             client,
             client_id: client_id.to_string(),

@@ -21,6 +21,8 @@ broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto"
 tpm = ["broker", "kanidm-hsm-crypto/tpm"]
 capi = ["broker"]
 pyapi = ["broker", "dep:pyo3"]
+developer = ["broker", "proxyable"]
+proxyable = []
 
 [dependencies]
 base64 = "^0.22.0"
