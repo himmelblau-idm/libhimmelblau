@@ -19,15 +19,21 @@
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use reqwest::{header, Client, Url};
+use reqwest::redirect::Policy;
+#[cfg(feature = "proxyable")]
+use reqwest::Proxy;
+use reqwest::{header, Client, Response, Url};
 use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, json, Value};
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
-use tracing::info;
+use std::thread::sleep;
+use std::time::Duration;
+use tracing::{error, info};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -74,7 +80,7 @@ use std::convert::TryInto;
 #[cfg(feature = "broker")]
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
-use tracing::{debug, error};
+use tracing::debug;
 
 #[cfg(feature = "broker")]
 use crate::discovery::Services;
@@ -84,9 +90,6 @@ use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
 use serde_json::to_string_pretty;
-
-#[derive(Serialize, Clone, Default)]
-struct JoinPayload {}
 
 #[cfg(feature = "broker")]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
@@ -871,10 +874,27 @@ struct ClientApplication {
 
 impl ClientApplication {
     fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
-        let client = reqwest::Client::builder()
-            .cookie_store(true)
+        #[allow(unused_mut)]
+        let mut builder = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .cookie_store(true);
+
+        #[cfg(feature = "proxyable")]
+        {
+            if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
+                .ok()
+                .or_else(|| std::env::var("ALL_PROXY").ok())
+            {
+                let proxy = Proxy::https(proxy_var)
+                    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
+                builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+            }
+        }
+
+        let client = builder
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
         Ok(ClientApplication {
             client,
             client_id: client_id.to_string(),
@@ -1217,7 +1237,7 @@ impl PublicClientApplication {
             false => url_post.clone(),
         };
 
-        let resp = self
+        let mut resp = self
             .client()
             .post(url)
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
@@ -1226,11 +1246,9 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        let text;
+        (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
             self.parse_auth_config(&text)
         } else {
             Err(MsalError::GeneralFailure(
@@ -1605,7 +1623,7 @@ impl PublicClientApplication {
         let params = vec![
             ("client_id", self.client_id()),
             ("response_type", "code"),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
             ("client-request-id", request_id),
             ("prompt", "login"),
             ("scope", &scope),
@@ -1614,7 +1632,7 @@ impl PublicClientApplication {
             ("amr_values", "ngcmfa"),
             (
                 "resource",
-                (resource.unwrap_or("00000002-0000-0000-c000-000000000000")),
+                (resource.unwrap_or("https://graph.microsoft.com")),
             ),
         ];
         let url = Url::parse_with_params(
@@ -1687,6 +1705,108 @@ impl PublicClientApplication {
         }
     }
 
+    async fn await_working(&self, mut resp: Response) -> Result<(String, Response), MsalError> {
+        // We have to read the response in chunks, because Response.text()
+        // consumes the Response object.
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+        {
+            body.extend(&chunk);
+        }
+        let mut text = String::from_utf8(body)
+            .map_err(|e| MsalError::GeneralFailure(format!("UTF-8 error: {}", e)))?;
+        for _ in 0..10 {
+            if !text.contains("Click Submit to continue") && !text.contains("Working...") {
+                return Ok((text, resp));
+            }
+            sleep(Duration::from_secs(1));
+            let document = Html::parse_document(&text);
+            let form_selector =
+                Selector::parse("form").map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
+            let input_selector = Selector::parse("input")
+                .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
+
+            let form = document
+                .select(&form_selector)
+                .next()
+                .ok_or(MsalError::InvalidParse("Document parse failed".to_string()))?;
+            let post_url = form
+                .value()
+                .attr("action")
+                .ok_or(MsalError::InvalidParse("Form action not found".to_string()))?;
+
+            let mut form_data = HashMap::new();
+
+            for input in form.select(&input_selector) {
+                if let Some(name) = input.value().attr("name") {
+                    if let Some(value) = input.value().attr("value") {
+                        form_data.insert(name.to_string(), value.to_string());
+                    }
+                }
+            }
+
+            resp = self
+                .client()
+                .post(post_url)
+                .form(&form_data)
+                .send()
+                .await
+                .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            let mut body = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+            {
+                body.extend(&chunk);
+            }
+            text = String::from_utf8(body)
+                .map_err(|e| MsalError::GeneralFailure(format!("UTF-8 error: {}", e)))?;
+        }
+        Err(MsalError::GeneralFailure(
+            "Pending request timed out after 10 seconds".to_string(),
+        ))
+    }
+
+    async fn auth_code_intercept_internal(
+        &self,
+        url: &str,
+        payload: String,
+    ) -> Result<String, MsalError> {
+        let mut resp = self
+            .client()
+            .post(url)
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        let _text;
+        (_text, resp) = self.await_working(resp).await?;
+        if resp.status().is_redirection() {
+            let redirect = resp.headers()["location"]
+                .to_str()
+                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let url =
+                Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let (_, code) =
+                url.query_pairs()
+                    .find(|(k, _)| k == "code")
+                    .ok_or(MsalError::InvalidParse(
+                        "Authorization code missing from redirect".to_string(),
+                    ))?;
+            Ok(code.to_string())
+        } else {
+            Err(MsalError::GeneralFailure(
+                "ProcessAuth Authorization request failed".to_string(),
+            ))
+        }
+    }
+
     async fn request_authorization_internal(
         &self,
         username: &str,
@@ -1713,33 +1833,8 @@ impl PublicClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
-        let resp = self
-            .client()
-            .post(&flow.url_post)
-            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
-            .send()
+        self.auth_code_intercept_internal(&flow.url_post, payload)
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_redirection() {
-            let redirect = resp.headers()["location"]
-                .to_str()
-                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
-            let url =
-                Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
-            let (_, code) =
-                url.query_pairs()
-                    .find(|(k, _)| k == "code")
-                    .ok_or(MsalError::InvalidParse(
-                        "Authorization code missing from redirect".to_string(),
-                    ))?;
-            Ok(code.to_string())
-        } else {
-            Err(MsalError::GeneralFailure(
-                "ProcessAuth Authorization request failed".to_string(),
-            ))
-        }
     }
 
     async fn exchange_authorization_code_for_access_token_internal(
@@ -1750,7 +1845,7 @@ impl PublicClientApplication {
             ("client_id", self.client_id()),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
         ];
         let payload = params
             .iter()
@@ -3166,12 +3261,12 @@ impl BrokerClientApplication {
         let params = [
             ("client_id", self.app.client_id()),
             ("response_type", "code"),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
             ("client-request-id", request_id),
             ("scope", &scope),
             (
                 "resource",
-                (resource.unwrap_or("00000002-0000-0000-c000-000000000000")),
+                (resource.unwrap_or("https://graph.microsoft.com")),
             ),
         ];
         let payload = params
@@ -3341,7 +3436,7 @@ impl BrokerClientApplication {
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
             ("scope", &scopes_str),
-            ("redirect_uri", "urn:ietf:wg:oauth:2.0:oob"),
+            ("redirect_uri", "ms-aadj-redir://auth/drs"),
             ("client-request-id", request_id),
         ];
         let payload = params
