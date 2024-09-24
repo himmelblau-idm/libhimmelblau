@@ -16,7 +16,7 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::error::{ErrorResponse, MsalError};
+use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::{header, Client, Url};
@@ -74,7 +74,7 @@ use std::convert::TryInto;
 #[cfg(feature = "broker")]
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
-use tracing::debug;
+use tracing::{debug, error};
 
 #[cfg(feature = "broker")]
 use crate::discovery::Services;
@@ -96,7 +96,7 @@ pub const BROKER_APP_ID: &str = "29d9ed98-a469-4536-ade2-f981bc1d605e";
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
-#[derive(Default, Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Default, Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct DeviceAuthorizationResponse {
     pub device_code: String,
     pub user_code: String,
@@ -145,7 +145,7 @@ struct AuthConfig {
     polling_interval: Option<u32>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Default)]
 pub struct MFAAuthContinue {
     pub mfa_method: String,
     pub msg: String,
@@ -157,6 +157,31 @@ pub struct MFAAuthContinue {
     pub canary: String,
     pub url_end_auth: String,
     pub url_post: String,
+    pub dag: Option<DeviceAuthorizationResponse>,
+}
+
+impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
+    fn from(item: DeviceAuthorizationResponse) -> Self {
+        let msg = match &item.message {
+            Some(msg) => msg.to_string(),
+            None => format!(
+                "Using a browser on another device, visit:\n{}\n \
+                    And enter the code:\n{}",
+                item.verification_uri, item.user_code
+            ),
+        };
+        // Interval is in seconds, but polling_interval expects milliseconds
+        let polling_interval = item.interval.unwrap_or(5);
+        // Convert `expires_in` (a lifetime in seconds) to max_poll_attempts
+        let max_poll_attempts = item.expires_in / polling_interval;
+        MFAAuthContinue {
+            msg,
+            max_poll_attempts: Some(max_poll_attempts),
+            polling_interval: Some(polling_interval * 1000),
+            dag: Some(item),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1260,17 +1285,44 @@ impl PublicClientApplication {
         scopes: Vec<&str>,
         resource: Option<&str>,
     ) -> Result<MFAAuthContinue, MsalError> {
+        macro_rules! dag_fallback {
+            () => {
+                let mut dag_scopes: Vec<String> =
+                    scopes.into_iter().map(|s| s.to_string()).collect();
+                if let Some(resource) = resource {
+                    dag_scopes.push(format!("{}/.default", resource));
+                }
+                info!("MFA auth failed, falling back to Device Authorization Grant.");
+                let flow = self
+                    .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
+                    .await?;
+                return Ok(flow.into());
+            };
+        }
         let request_id = Uuid::new_v4().to_string();
-        let auth_config = self
-            .request_auth_config_internal(scopes, &request_id, resource)
-            .await?;
-        let cred_type = self
+        let auth_config = match self
+            .request_auth_config_internal(scopes.clone(), &request_id, resource)
+            .await
+        {
+            Ok(auth_config) => auth_config,
+            Err(e) => {
+                error!("{:?}", e);
+                dag_fallback!();
+            }
+        };
+        let cred_type = match self
             .get_cred_type(username, &auth_config, &request_id)
-            .await?;
+            .await
+        {
+            Ok(cred_type) => cred_type,
+            Err(e) => {
+                error!("{:?}", e);
+                dag_fallback!();
+            }
+        };
         if cred_type.credentials.federation_redirect_url.is_some() {
-            return Err(MsalError::GeneralFailure(
-                "Federated identities are not supported.".to_string(),
-            ));
+            info!("Federated identities are not supported.");
+            dag_fallback!();
         }
         if cred_type.throttle_status == 1 {
             return Err(MsalError::GeneralFailure(
@@ -1283,18 +1335,23 @@ impl PublicClientApplication {
             ));
         }
         if !cred_type.credentials.has_password {
-            return Err(MsalError::GeneralFailure(
-                "Password authentication is not supported.".to_string(),
-            ));
+            info!("Password authentication is not supported.");
+            dag_fallback!();
         }
 
         let sctx = match &auth_config.sctx {
             Some(sctx) => sctx.clone(),
-            None => return Err(MsalError::GeneralFailure("sCtx is missing".to_string())),
+            None => {
+                info!("sCtx is missing");
+                dag_fallback!();
+            }
         };
         let sft = match &auth_config.sft {
             Some(sft) => sft.clone(),
-            None => return Err(MsalError::GeneralFailure("sFt is missing".to_string())),
+            None => {
+                info!("sFt is missing");
+                dag_fallback!();
+            }
         };
         let params = vec![
             ("login", username),
@@ -1311,22 +1368,23 @@ impl PublicClientApplication {
         {
             Ok(mut auth_config) => {
                 if let Some(msg) = auth_config.service_exception_msg {
-                    return Err(MsalError::GeneralFailure(msg));
+                    error!("{}", msg);
+                    dag_fallback!();
                 }
                 if let Some(ref pgid) = auth_config.pgid {
                     if pgid == "KmsiInterrupt" {
                         let sctx = match &auth_config.sctx {
                             Some(sctx) => sctx.clone(),
                             None => {
-                                return Err(MsalError::GeneralFailure(
-                                    "sCtx is missing".to_string(),
-                                ))
+                                info!("sCtx is missing");
+                                dag_fallback!();
                             }
                         };
                         let sft = match &auth_config.sft {
                             Some(sft) => sft.clone(),
                             None => {
-                                return Err(MsalError::GeneralFailure("sFt is missing".to_string()))
+                                info!("sFt is missing");
+                                dag_fallback!();
                             }
                         };
                         let params = vec![
@@ -1336,9 +1394,16 @@ impl PublicClientApplication {
                             ("canary", &auth_config.canary),
                             ("client-request-id", &request_id),
                         ];
-                        auth_config = self
+                        auth_config = match self
                             .handle_auth_config_req_internal(&params, &auth_config)
-                            .await?;
+                            .await
+                        {
+                            Ok(auth_config) => auth_config,
+                            Err(e) => {
+                                error!("{:?}", e);
+                                dag_fallback!();
+                            }
+                        };
                     }
                 }
                 if let Some(ref pgid) = auth_config.pgid {
@@ -1352,21 +1417,26 @@ impl PublicClientApplication {
                                 ("canary", &auth_config.canary),
                                 ("client-request-id", &request_id),
                             ];
-                            auth_config = self
+                            auth_config = match self
                                 .handle_auth_config_req_internal(&params, &auth_config)
-                                .await?;
+                                .await
+                            {
+                                Ok(auth_config) => auth_config,
+                                Err(e) => {
+                                    error!("{:?}", e);
+                                    dag_fallback!();
+                                }
+                            };
                         } else {
-                            return Err(MsalError::GeneralFailure(
-                                "MFA method must be registered.".to_string(),
-                            ));
+                            info!("MFA method must be registered.");
+                            dag_fallback!();
                         }
                     }
                 }
                 if let Some(pgid) = auth_config.pgid {
                     if pgid == "ConvergedChangePassword" {
-                        return Err(MsalError::GeneralFailure(
-                            "Password is expired!".to_string(),
-                        ));
+                        info!("Password is expired!");
+                        dag_fallback!();
                     }
                 }
                 if let Some(arr_user_proofs) = auth_config.arr_user_proofs {
@@ -1375,9 +1445,8 @@ impl PublicClientApplication {
                             Some(default_auth_method) => default_auth_method,
                             None => {
                                 if arr_user_proofs.is_empty() {
-                                    return Err(MsalError::GeneralFailure(
-                                        "No MFA methods found".to_string(),
-                                    ));
+                                    info!("No MFA methods found");
+                                    dag_fallback!();
                                 } else {
                                     // Sometimes MS fails to set is_default on
                                     // any method. In this case, just choose
@@ -1390,37 +1459,36 @@ impl PublicClientApplication {
                     let sctx = match &auth_config.sctx {
                         Some(sctx) => sctx.clone(),
                         None => {
-                            return Err(MsalError::GeneralFailure("sCtx is missing".to_string()))
+                            info!("sCtx is missing");
+                            dag_fallback!();
                         }
                     };
                     let sft = match &auth_config.sft {
                         Some(sft) => sft.clone(),
                         None => {
-                            return Err(MsalError::GeneralFailure("sFt is missing".to_string()))
+                            info!("sFt is missing");
+                            dag_fallback!();
                         }
                     };
                     let url_end_auth = match &auth_config.url_end_auth {
                         Some(url_end_auth) => url_end_auth.clone(),
                         None => {
-                            return Err(MsalError::GeneralFailure(
-                                "urlEndAuth is missing".to_string(),
-                            ))
+                            info!("urlEndAuth is missing");
+                            dag_fallback!();
                         }
                     };
                     let url_begin_auth = match &auth_config.url_begin_auth {
                         Some(url_begin_auth) => url_begin_auth.clone(),
                         None => {
-                            return Err(MsalError::GeneralFailure(
-                                "urlBeginAuth is missing".to_string(),
-                            ))
+                            info!("urlBeginAuth is missing");
+                            dag_fallback!();
                         }
                     };
                     let url_post = match &auth_config.url_post {
                         Some(url_post) => url_post.clone(),
                         None => {
-                            return Err(MsalError::GeneralFailure(
-                                "urlBeginAuth is missing".to_string(),
-                            ))
+                            info!("urlPost is missing");
+                            dag_fallback!();
                         }
                     };
                     let auth_response = match self
@@ -1441,7 +1509,10 @@ impl PublicClientApplication {
                                 ))
                             }
                         },
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            error!("{:?}", e);
+                            dag_fallback!();
+                        }
                     };
                     let msg = match default_auth_method.auth_method_id.as_str() {
                             "PhoneAppNotification" => format!("Open your Authenticator app, and enter the number '{}' to sign in.", auth_response.entropy),
@@ -1453,7 +1524,10 @@ impl PublicClientApplication {
                                 format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
                             "TwoWayVoiceAlternateMobile" =>
                                 format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
-                            method => return Err(MsalError::GeneralFailure(format!("Unsupported MFA method {}", method))),
+                            method => {
+                                info!("Unsupported MFA method {}", method);
+                                dag_fallback!();
+                            }
                         };
                     Ok(MFAAuthContinue {
                         mfa_method: default_auth_method.auth_method_id.clone(),
@@ -1466,14 +1540,17 @@ impl PublicClientApplication {
                         canary: auth_config.canary,
                         url_end_auth,
                         url_post,
+                        dag: None,
                     })
                 } else {
-                    Err(MsalError::GeneralFailure(
-                        "No MFA methods found".to_string(),
-                    ))
+                    info!("No MFA methods found");
+                    dag_fallback!();
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                error!("{:?}", e);
+                dag_fallback!();
+            }
         }
     }
 
@@ -1731,6 +1808,28 @@ impl PublicClientApplication {
         poll_attempt: Option<u32>,
         flow: &mut MFAAuthContinue,
     ) -> Result<UserToken, MsalError> {
+        if let Some(dag_flow) = &flow.dag {
+            // The initiate phase already fell back to a DAG
+            return match self.acquire_token_by_device_flow(dag_flow.clone()).await {
+                Ok(token) => {
+                    if token.spn()?.to_lowercase() != username.to_lowercase() {
+                        return Err(MsalError::GeneralFailure(
+                            "The authenticating user did not match".to_string(),
+                        ));
+                    }
+                    Ok(token)
+                }
+                Err(MsalError::AcquireTokenFailed(ref resp)) => {
+                    if resp.error_codes.contains(&AUTH_PENDING) {
+                        info!("Polling for acquire_token_by_device_flow");
+                        return Err(MsalError::MFAPollContinue);
+                    }
+                    error!("{}", resp.error_description);
+                    Err(MsalError::AcquireTokenFailed(resp.clone()))
+                }
+                Err(e) => Err(e),
+            };
+        }
         match auth_data {
             Some(auth_data) => {
                 let payload = json!({
