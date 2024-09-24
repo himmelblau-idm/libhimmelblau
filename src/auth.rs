@@ -33,7 +33,7 @@ use std::marker::PhantomData;
 use std::str::FromStr;
 use std::thread::sleep;
 use std::time::Duration;
-use tracing::info;
+use tracing::{error, info};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -80,7 +80,7 @@ use std::convert::TryInto;
 #[cfg(feature = "broker")]
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "broker")]
-use tracing::{debug, error};
+use tracing::debug;
 
 #[cfg(feature = "broker")]
 use crate::discovery::Services;

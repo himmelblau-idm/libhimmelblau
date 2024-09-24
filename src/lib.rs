@@ -38,6 +38,7 @@ pub use auth::*;
 pub mod discovery;
 
 pub mod graph;
+#[cfg(feature = "broker")]
 pub use discovery::EnrollAttrs;
 
 #[cfg(feature = "capi")]
