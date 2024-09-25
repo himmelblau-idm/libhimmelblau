@@ -160,6 +160,7 @@ pub struct MFAAuthContinue {
     pub canary: String,
     pub url_end_auth: String,
     pub url_post: String,
+    pub resource: Option<String>,
     pub dag: Option<DeviceAuthorizationResponse>,
 }
 
@@ -1000,6 +1001,75 @@ impl ClientApplication {
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
+
+    fn get_auth_redirect_uri(&self, resource: Option<&str>) -> String {
+        let resource = resource.unwrap_or("");
+
+        let redirect_uri = match self.client_id.as_str() {
+            "1fec8e78-bce4-4aaf-ab1b-5451cc387264" => {
+                "https://login.microsoftonline.com/common/oauth2/nativeclient".to_string()
+            },
+            "9bc3ab49-b65d-410a-85ad-de819febfddc" => {
+                "https://oauth.spops.microsoft.com/".to_string()
+            },
+            "c44b4083-3bb0-49c1-b47d-974e53cbdf3c" => {
+                "https://portal.azure.com/signin/index/?feature.prefetchtokens=true&feature.showservicehealthalerts=true&feature.usemsallogin=true".to_string()
+            },
+            "0000000c-0000-0000-c000-000000000000" => {
+                "https://account.activedirectory.windowsazure.com/".to_string()
+            },
+            "19db86c3-b2b9-44cc-b339-36da233a3be2" => {
+                "https://mysignins.microsoft.com".to_string()
+            },
+            "29d9ed98-a469-4536-ade2-f981bc1d605e" => {
+                if resource.contains("enrollment.manage.microsoft.com") {
+                    "ms-aadj-redir://auth/drs".to_string()
+                } else {
+                    "msauth://Microsoft.AAD.BrokerPlugin".to_string()
+                }
+            },
+            "d3590ed6-52b3-4102-aeff-aad2292ab01c" => {
+                "ms-appx-web://Microsoft.AAD.BrokerPlugin/d3590ed6-52b3-4102-aeff-aad2292ab01c".to_string()
+            },
+            "0c1307d4-29d6-4389-a11c-5cbe7f65d7fa" => {
+                "https://azureapp".to_string()
+            },
+            "33be1cef-03fb-444b-8fd3-08ca1b4d803f" => {
+                "https://admin.onedrive.com/".to_string()
+            },
+            "ab9b8c07-8f02-4f72-87fa-80105867a763" => {
+                "https://login.windows.net/common/oauth2/nativeclient".to_string()
+            },
+            "3d5cffa9-04da-4657-8cab-c7f074657cad" => {
+                "http://localhost/m365/commerce".to_string()
+            },
+            "4990cffe-04e8-4e8b-808a-1175604b879f" => {
+                "https://partner.microsoft.com/aad/authPostGateway".to_string()
+            },
+            "fb78d390-0c51-40cd-8e17-fdbfab77341b" |
+            "fdd7719f-d61e-4592-b501-793734eb8a0e" |
+            "a0c73c16-a7e3-4564-9a95-2bdf47383716" => {
+                "https://login.microsoftonline.com/common/oauth2/nativeclient".to_string()
+            },
+            "3b511579-5e00-46e1-a89e-a6f0870e2f5a" => {
+                "https://windows365.microsoft.com/signin-oidc".to_string()
+            },
+            "08e18876-6177-487e-b8b5-cf950c1e598c" => {
+                "https://*-admin.sharepoint.com/_forms/spfxsinglesignon.aspx".to_string()
+            },
+            "dd762716-544d-4aeb-a526-687b73838a22" => {
+                "ms-appx-web://microsoft.aad.brokerplugin/dd762716-544d-4aeb-a526-687b73838a22".to_string()
+            },
+            "4765445b-32c6-49b0-83e6-1d93765276ca" => {
+                "https://www.office.com/landingv2".to_string()
+            },
+            _ => {
+                "https://login.microsoftonline.com/common/oauth2/nativeclient".to_string()
+            },
+        };
+
+        redirect_uri
+    }
 }
 
 pub struct PublicClientApplication {
@@ -1558,6 +1628,7 @@ impl PublicClientApplication {
                         canary: auth_config.canary,
                         url_end_auth,
                         url_post,
+                        resource: resource.map(|s| s.to_string()),
                         dag: None,
                     })
                 } else {
@@ -1620,10 +1691,11 @@ impl PublicClientApplication {
         resource: Option<&str>,
     ) -> Result<AuthConfig, MsalError> {
         let scope = format!("openid profile {}", scopes.join(" "));
+        let redirect_uri = self.app.get_auth_redirect_uri(resource);
         let params = vec![
             ("client_id", self.client_id()),
             ("response_type", "code"),
-            ("redirect_uri", "ms-aadj-redir://auth/drs"),
+            ("redirect_uri", redirect_uri.as_str()),
             ("client-request-id", request_id),
             ("prompt", "login"),
             ("scope", &scope),
@@ -1840,12 +1912,14 @@ impl PublicClientApplication {
     async fn exchange_authorization_code_for_access_token_internal(
         &self,
         authorization_code: String,
+        resource: Option<&str>,
     ) -> Result<UserToken, MsalError> {
+        let redirect_uri = self.app.get_auth_redirect_uri(resource);
         let params = [
             ("client_id", self.client_id()),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
-            ("redirect_uri", "ms-aadj-redir://auth/drs"),
+            ("redirect_uri", &redirect_uri),
         ];
         let payload = params
             .iter()
@@ -1966,8 +2040,11 @@ impl PublicClientApplication {
                         flow.ctx = auth_response.ctx;
                         flow.flow_token = auth_response.flow_token;
                         let auth_code = self.request_authorization_internal(username, flow).await?;
-                        self.exchange_authorization_code_for_access_token_internal(auth_code)
-                            .await
+                        self.exchange_authorization_code_for_access_token_internal(
+                            auth_code,
+                            flow.resource.as_deref(),
+                        )
+                        .await
                     } else if let Some(msg) = auth_response.message {
                         Err(MsalError::GeneralFailure(msg))
                     } else {
@@ -2028,7 +2105,10 @@ impl PublicClientApplication {
                         flow.flow_token = auth_response.flow_token;
                         let auth_code = self.request_authorization_internal(username, flow).await?;
                         return self
-                            .exchange_authorization_code_for_access_token_internal(auth_code)
+                            .exchange_authorization_code_for_access_token_internal(
+                                auth_code,
+                                flow.resource.as_deref(),
+                            )
                             .await;
                     } else if !auth_response.retry.ok_or(MsalError::GeneralFailure(
                         "Auth response Retry missing".to_string(),
@@ -2047,6 +2127,10 @@ impl PublicClientApplication {
                 }
             }
         }
+    }
+
+    fn get_auth_redirect_uri(&self, resource: Option<&str>) -> String {
+        self.app.get_auth_redirect_uri(resource)
     }
 }
 
@@ -3257,11 +3341,12 @@ impl BrokerClientApplication {
         signed_device_payload: Option<String>,
     ) -> Result<String, MsalError> {
         let scope = format!("openid profile {}", scope.join(" "));
+        let redirect_uri = self.app.get_auth_redirect_uri(resource);
 
         let params = [
             ("client_id", self.app.client_id()),
             ("response_type", "code"),
-            ("redirect_uri", "ms-aadj-redir://auth/drs"),
+            ("redirect_uri", redirect_uri.as_str()),
             ("client-request-id", request_id),
             ("scope", &scope),
             (
