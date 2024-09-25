@@ -96,6 +96,8 @@ const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
 #[cfg(feature = "broker")]
 pub const BROKER_APP_ID: &str = "29d9ed98-a469-4536-ade2-f981bc1d605e";
 #[cfg(feature = "broker")]
+pub const LINUX_BROKER_APP_ID: &str = "b743a22d-6705-4147-8670-d92fa515ee2b";
+#[cfg(feature = "broker")]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
 /* RFC8628: 3.2. Device Authorization Response */
@@ -1028,6 +1030,9 @@ impl ClientApplication {
                     "msauth://Microsoft.AAD.BrokerPlugin".to_string()
                 }
             },
+            "b743a22d-6705-4147-8670-d92fa515ee2b" => {
+                "companyportal://com.microsoft.CompanyPortal".to_string()
+            }
             "d3590ed6-52b3-4102-aeff-aad2292ab01c" => {
                 "ms-appx-web://Microsoft.AAD.BrokerPlugin/d3590ed6-52b3-4102-aeff-aad2292ab01c".to_string()
             },
@@ -2918,8 +2923,13 @@ impl BrokerClientApplication {
             )
             .await?;
 
-        self.exchange_auth_code_for_access_token_internal(scope, &request_id, auth_code)
-            .await
+        self.exchange_auth_code_for_access_token_internal(
+            scope,
+            &request_id,
+            auth_code,
+            request_resource,
+        )
+        .await
     }
 
     /// Given the primary refresh token, this method requests a new primary
@@ -3511,17 +3521,19 @@ impl BrokerClientApplication {
         scope: Vec<&str>,
         request_id: &str,
         authorization_code: String,
+        request_resource: Option<String>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging an Authorization Code for an Access Token");
 
         let scopes_str = scope.join(" ");
 
+        let redirect_uri = self.app.get_auth_redirect_uri(request_resource.as_deref());
         let params = [
             ("client_id", self.app.client_id()),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
             ("scope", &scopes_str),
-            ("redirect_uri", "ms-aadj-redir://auth/drs"),
+            ("redirect_uri", &redirect_uri),
             ("client-request-id", request_id),
         ];
         let payload = params
