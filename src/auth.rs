@@ -1800,30 +1800,38 @@ impl PublicClientApplication {
                 return Ok((text, resp));
             }
             sleep(Duration::from_secs(1));
-            let document = Html::parse_document(&text);
-            let form_selector =
-                Selector::parse("form").map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
-            let input_selector = Selector::parse("input")
-                .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
+            let (post_url, form_data) = tokio::task::spawn_blocking(
+                move || -> Result<(String, HashMap<String, String>), MsalError> {
+                    let document = Html::parse_document(&text);
+                    let form_selector = Selector::parse("form")
+                        .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
+                    let input_selector = Selector::parse("input")
+                        .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
 
-            let form = document
-                .select(&form_selector)
-                .next()
-                .ok_or(MsalError::InvalidParse("Document parse failed".to_string()))?;
-            let post_url = form
-                .value()
-                .attr("action")
-                .ok_or(MsalError::InvalidParse("Form action not found".to_string()))?;
+                    let form = document
+                        .select(&form_selector)
+                        .next()
+                        .ok_or(MsalError::InvalidParse("Document parse failed".to_string()))?;
+                    let post_url = form
+                        .value()
+                        .attr("action")
+                        .ok_or(MsalError::InvalidParse("Form action not found".to_string()))?;
 
-            let mut form_data = HashMap::new();
+                    let mut form_data = HashMap::new();
 
-            for input in form.select(&input_selector) {
-                if let Some(name) = input.value().attr("name") {
-                    if let Some(value) = input.value().attr("value") {
-                        form_data.insert(name.to_string(), value.to_string());
+                    for input in form.select(&input_selector) {
+                        if let Some(name) = input.value().attr("name") {
+                            if let Some(value) = input.value().attr("value") {
+                                form_data.insert(name.to_string(), value.to_string());
+                            }
+                        }
                     }
-                }
-            }
+
+                    Ok((post_url.to_string(), form_data))
+                },
+            )
+            .await
+            .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))??;
 
             resp = self
                 .client()
