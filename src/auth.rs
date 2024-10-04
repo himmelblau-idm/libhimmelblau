@@ -808,6 +808,23 @@ struct PrimaryRefreshToken {
 
 #[cfg(feature = "broker")]
 impl PrimaryRefreshToken {
+    fn name(&self) -> String {
+        self.id_token.name.clone()
+    }
+
+    fn spn(&self) -> Result<String, MsalError> {
+        match &self.id_token.preferred_username {
+            Some(spn) => Ok(spn.to_string()),
+            None => Err(MsalError::GeneralFailure(
+                "No spn available for PRT".to_string(),
+            )),
+        }
+    }
+
+    fn uuid(&self) -> Result<Uuid, MsalError> {
+        Uuid::parse_str(&self.id_token.oid).map_err(|e| MsalError::InvalidParse(format!("{}", e)))
+    }
+
     fn session_key(&self) -> Result<SessionKey, MsalError> {
         match &self.session_key_jwe {
             Some(session_key_jwe) => SessionKey::new(session_key_jwe),
@@ -3579,6 +3596,90 @@ impl BrokerClientApplication {
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
+    }
+
+    /// Fetch the name (GECOS) from the PRT
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The encrypted Primary Refresh Token (PRT) that will be used
+    ///   to generate the SSO cookie.
+    ///
+    /// * `tpm` - The TPM object used to interface with the hardware for
+    ///   cryptographic operations.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with the current
+    ///   device/application.
+    ///
+    /// # Returns
+    ///
+    /// * Success: The user Azure spn
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn name_from_prt(
+        &self,
+        sealed_data: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<String, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
+        Ok(prt.name())
+    }
+
+    /// Fetch the spn from the PRT
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The encrypted Primary Refresh Token (PRT) that will be used
+    ///   to generate the SSO cookie.
+    ///
+    /// * `tpm` - The TPM object used to interface with the hardware for
+    ///   cryptographic operations.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with the current
+    ///   device/application.
+    ///
+    /// # Returns
+    ///
+    /// * Success: The user Azure spn
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn spn_from_prt(
+        &self,
+        sealed_data: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<String, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
+        prt.spn()
+    }
+
+    /// Fetch the UUID from the PRT
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The encrypted Primary Refresh Token (PRT) that will be used
+    ///   to generate the SSO cookie.
+    ///
+    /// * `tpm` - The TPM object used to interface with the hardware for
+    ///   cryptographic operations.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with the current
+    ///   device/application.
+    ///
+    /// # Returns
+    ///
+    /// * Success: The user Azure UUID
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn uuid_from_prt(
+        &self,
+        sealed_data: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<Uuid, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
+        prt.uuid()
     }
 
     fn seal_user_prt(
