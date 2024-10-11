@@ -108,12 +108,35 @@ async fn request_federation_provider(
 }
 
 impl Graph {
-    pub async fn new(odc_provider: &str, domain: &str) -> Result<Self, MsalError> {
+    pub async fn new(
+        odc_provider: &str,
+        domain: &str,
+        authority_host: Option<&str>,
+        tenant_id: Option<&str>,
+        graph_url: Option<&str>,
+    ) -> Result<Self, MsalError> {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
-        let (authority_host, tenant_id, graph_url) =
-            request_federation_provider(&client, odc_provider, domain).await?;
+
+        let (authority_host, tenant_id, graph_url) = if let Some(authority_host) = authority_host {
+            if let Some(tenant_id) = tenant_id {
+                if let Some(graph_url) = graph_url {
+                    (
+                        authority_host.to_string(),
+                        tenant_id.to_string(),
+                        graph_url.to_string(),
+                    )
+                } else {
+                    request_federation_provider(&client, odc_provider, domain).await?
+                }
+            } else {
+                request_federation_provider(&client, odc_provider, domain).await?
+            }
+        } else {
+            request_federation_provider(&client, odc_provider, domain).await?
+        };
+
         Ok(Graph {
             client,
             authority_host,
