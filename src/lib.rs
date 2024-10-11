@@ -52,3 +52,5 @@ pub mod pyapi;
 
 #[cfg(any(feature = "pyapi", feature = "capi"))]
 pub mod serializer;
+
+pub mod aadsts_err_gen;

@@ -19,6 +19,8 @@
 use serde::{Deserialize, Serialize};
 use std::convert::From;
 
+pub use crate::aadsts_err_gen::*;
+
 pub const INVALID_CRED: u32 = 0xC3CE;
 pub const REQUIRES_MFA: u32 = 0xC39C;
 pub const INVALID_USER: u32 = 0xC372;
@@ -67,6 +69,8 @@ pub enum MsalError {
     ConfigError(String),
     /// Continuing polling for an MFA auth
     MFAPollContinue,
+    /// An AADSTSError
+    AADSTSError(AADSTSError),
 }
 
 #[repr(C)]
@@ -90,6 +94,7 @@ pub enum MSAL_ERROR {
     SUCCESS,
     INVALID_POINTER,
     NO_MEMORY,
+    AADSTS_ERROR,
 }
 
 impl From<MsalError> for MSAL_ERROR {
@@ -110,6 +115,7 @@ impl From<MsalError> for MSAL_ERROR {
             MsalError::NotImplemented => MSAL_ERROR::NOT_IMPLEMENTED,
             MsalError::ConfigError(_) => MSAL_ERROR::CONFIG_ERROR,
             MsalError::MFAPollContinue => MSAL_ERROR::MFA_POLL_CONTINUE,
+            MsalError::AADSTSError(_) => MSAL_ERROR::AADSTS_ERROR,
         }
     }
 }
