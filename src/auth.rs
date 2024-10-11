@@ -16,6 +16,7 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
+use crate::aadsts_err_gen::AADSTSError;
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -148,6 +149,10 @@ struct AuthConfig {
     max_poll_attempts: Option<u32>,
     #[serde(rename = "iPollingInterval")]
     polling_interval: Option<u32>,
+    #[serde(rename = "sErrorCode")]
+    error_code: Option<String>,
+    #[serde(rename = "sErrTxt")]
+    err_txt: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default)]
@@ -1275,7 +1280,7 @@ impl PublicClientApplication {
         }
     }
 
-    fn parse_auth_config(&self, text: &str) -> Result<AuthConfig, MsalError> {
+    fn parse_auth_config(&self, text: &str, initial: bool) -> Result<AuthConfig, MsalError> {
         let document = Html::parse_document(text);
         for script in
             document.select(&Selector::parse("script").map_err(|e| {
@@ -1290,6 +1295,25 @@ impl PublicClientApplication {
                     let auth_config: AuthConfig = json_from_str(config).map_err(|e| {
                         MsalError::InvalidJson(format!("Failed parsing auth config: {}", e))
                     })?;
+                    // MS always throws errors when we're just setting up the
+                    // *initial* authorize. MS then ignores them, so shall we.
+                    if !initial {
+                        if let Some(error_code) = auth_config.error_code {
+                            // Check to see if we can get the failure message
+                            if let Some(err_txt) = auth_config.err_txt {
+                                if !err_txt.is_empty() {
+                                    error!("{}", err_txt);
+                                }
+                            }
+                            let error_code = error_code.parse::<u32>().map_err(|e| {
+                                MsalError::InvalidParse(format!(
+                                    "error_code {}: {:?}",
+                                    error_code, e
+                                ))
+                            })?;
+                            return Err(MsalError::AADSTSError(AADSTSError::new(error_code)));
+                        }
+                    }
                     return Ok(auth_config);
                 }
             }
@@ -1341,7 +1365,7 @@ impl PublicClientApplication {
         let text;
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
-            self.parse_auth_config(&text)
+            self.parse_auth_config(&text, false)
         } else {
             Err(MsalError::GeneralFailure(
                 resp.text()
@@ -1408,6 +1432,24 @@ impl PublicClientApplication {
                     .await?;
                 return Ok(flow.into());
             };
+            ($err:expr) => {
+                // If we got an AADSTSError, then we don't want to perform a
+                // fallback, since the authentication legitimately failed.
+                if let MsalError::AADSTSError(_) = $err {
+                    return Err($err);
+                }
+
+                let mut dag_scopes: Vec<String> =
+                    scopes.into_iter().map(|s| s.to_string()).collect();
+                if let Some(resource) = resource {
+                    dag_scopes.push(format!("{}/.default", resource));
+                }
+                info!("MFA auth failed, falling back to Device Authorization Grant.");
+                let flow = self
+                    .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
+                    .await?;
+                return Ok(flow.into());
+            };
         }
         let request_id = Uuid::new_v4().to_string();
         let auth_config = match self
@@ -1427,7 +1469,7 @@ impl PublicClientApplication {
             Ok(cred_type) => cred_type,
             Err(e) => {
                 error!("{:?}", e);
-                dag_fallback!();
+                dag_fallback!(e);
             }
         };
         if cred_type.credentials.federation_redirect_url.is_some() {
@@ -1511,7 +1553,7 @@ impl PublicClientApplication {
                             Ok(auth_config) => auth_config,
                             Err(e) => {
                                 error!("{:?}", e);
-                                dag_fallback!();
+                                dag_fallback!(e);
                             }
                         };
                     }
@@ -1534,7 +1576,7 @@ impl PublicClientApplication {
                                 Ok(auth_config) => auth_config,
                                 Err(e) => {
                                     error!("{:?}", e);
-                                    dag_fallback!();
+                                    dag_fallback!(e);
                                 }
                             };
                         } else {
@@ -1621,7 +1663,7 @@ impl PublicClientApplication {
                         },
                         Err(e) => {
                             error!("{:?}", e);
-                            dag_fallback!();
+                            dag_fallback!(e);
                         }
                     };
                     let msg = match default_auth_method.auth_method_id.as_str() {
@@ -1660,7 +1702,7 @@ impl PublicClientApplication {
             }
             Err(e) => {
                 error!("{:?}", e);
-                dag_fallback!();
+                dag_fallback!(e);
             }
         }
     }
@@ -1743,9 +1785,12 @@ impl PublicClientApplication {
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            self.parse_auth_config(&resp.text().await.map_err(|e| {
-                MsalError::GeneralFailure(format!("Failed parsing auth config: {}", e))
-            })?)
+            self.parse_auth_config(
+                &resp.text().await.map_err(|e| {
+                    MsalError::GeneralFailure(format!("Failed parsing auth config: {}", e))
+                })?,
+                true,
+            )
         } else {
             Err(MsalError::GeneralFailure(
                 "Failed requesting auth config".to_string(),
@@ -2056,7 +2101,7 @@ impl PublicClientApplication {
                         .await
                         .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
                     // Check for an error in an auth Config
-                    if let Ok(auth_config) = self.parse_auth_config(&text) {
+                    if let Ok(auth_config) = self.parse_auth_config(&text, false) {
                         if let Some(service_exception_msg) = auth_config.service_exception_msg {
                             return Err(MsalError::GeneralFailure(
                                 service_exception_msg.to_string(),
@@ -2120,7 +2165,7 @@ impl PublicClientApplication {
                         .await
                         .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
                     // Check for an error in an auth Config
-                    if let Ok(auth_config) = self.parse_auth_config(&text) {
+                    if let Ok(auth_config) = self.parse_auth_config(&text, false) {
                         if let Some(service_exception_msg) = auth_config.service_exception_msg {
                             return Err(MsalError::GeneralFailure(
                                 service_exception_msg.to_string(),
