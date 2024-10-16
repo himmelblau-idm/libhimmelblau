@@ -122,6 +122,28 @@ pub struct GroupObject {
     pub id: String,
 }
 
+#[derive(Deserialize)]
+struct IntuneServiceEndpoint {
+    #[serde(rename = "providerName")]
+    provider_name: String,
+    uri: String,
+}
+
+#[derive(Deserialize)]
+pub struct IntuneServiceEndpoints {
+    value: Vec<IntuneServiceEndpoint>,
+}
+
+impl IntuneServiceEndpoints {
+    pub fn get(&self, provider_name: &str) -> Result<&str, MsalError> {
+        self.value
+            .iter()
+            .find(|ep| ep.provider_name == provider_name)
+            .map(|ep| ep.uri.as_str())
+            .ok_or_else(|| MsalError::Missing(provider_name.to_string()))
+    }
+}
+
 pub struct Graph {
     client: Client,
     odc_provider: String,
@@ -495,6 +517,33 @@ impl Graph {
             Ok(result_map)
         } else {
             Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+        }
+    }
+
+    pub async fn intune_service_endpoints(
+        &self,
+        access_token: &str,
+    ) -> Result<IntuneServiceEndpoints, MsalError> {
+        let url = format!(
+            "{}/v1.0/servicePrincipals/appId=0000000a-0000-0000-c000-000000000000/endpoints",
+            self.graph_url().await?
+        );
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        if resp.status().is_success() {
+            let json_resp: IntuneServiceEndpoints = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            Ok(json_resp)
+        } else {
+            Err(MsalError::RequestFailed(format!("{}", resp.status())))
         }
     }
 }
