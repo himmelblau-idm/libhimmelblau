@@ -1026,10 +1026,11 @@ impl ClientApplication {
         }
     }
 
-    fn get_auth_redirect_uri(&self, resource: Option<&str>) -> String {
+    fn get_auth_redirect_uri(&self, client_id: Option<&str>, resource: Option<&str>) -> String {
+        let client_id = client_id.unwrap_or(self.client_id.as_str());
         let resource = resource.unwrap_or("");
 
-        let redirect_uri = match self.client_id.as_str() {
+        let redirect_uri = match client_id {
             "1fec8e78-bce4-4aaf-ab1b-5451cc387264" => {
                 "https://login.microsoftonline.com/common/oauth2/nativeclient".to_string()
             },
@@ -1755,7 +1756,10 @@ impl PublicClientApplication {
         resource: Option<&str>,
     ) -> Result<AuthConfig, MsalError> {
         let scope = format!("openid profile {}", scopes.join(" "));
-        let redirect_uri = self.app.get_auth_redirect_uri(resource);
+        let redirect_uri = self.app.get_auth_redirect_uri(None, resource);
+        let caller_app_redirect_uri = self
+            .app
+            .get_auth_redirect_uri(Some(LINUX_BROKER_APP_ID), resource);
         let params = vec![
             ("client_id", self.client_id()),
             ("response_type", "code"),
@@ -1770,6 +1774,8 @@ impl PublicClientApplication {
                 "resource",
                 (resource.unwrap_or("https://graph.microsoft.com")),
             ),
+            ("caller_app_client_id", LINUX_BROKER_APP_ID),
+            ("caller_app_redirect_uri", caller_app_redirect_uri.as_str()),
         ];
         let url = Url::parse_with_params(
             &format!("{}/oauth2/authorize", self.authority()),
@@ -1989,7 +1995,7 @@ impl PublicClientApplication {
         authorization_code: String,
         resource: Option<&str>,
     ) -> Result<UserToken, MsalError> {
-        let redirect_uri = self.app.get_auth_redirect_uri(resource);
+        let redirect_uri = self.app.get_auth_redirect_uri(None, resource);
         let params = [
             ("client_id", self.client_id()),
             ("grant_type", "authorization_code"),
@@ -2204,8 +2210,8 @@ impl PublicClientApplication {
         }
     }
 
-    fn get_auth_redirect_uri(&self, resource: Option<&str>) -> String {
-        self.app.get_auth_redirect_uri(resource)
+    fn get_auth_redirect_uri(&self, client_id: Option<&str>, resource: Option<&str>) -> String {
+        self.app.get_auth_redirect_uri(client_id, resource)
     }
 }
 
@@ -2459,6 +2465,12 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
+        let v2_endpoint = !scopes.is_empty();
+        if scopes.len() > 0 && request_resource.is_some() {
+            return Err(MsalError::GeneralFailure(
+                "Scopes cannot be specified with a request_resource".to_string(),
+            ));
+        }
         let prt = self
             .acquire_user_prt_by_username_password_internal(username, password, tpm, machine_key)
             .await?;
@@ -2468,6 +2480,7 @@ impl BrokerClientApplication {
             .exchange_prt_for_access_token_internal(
                 &prt,
                 scopes.clone(),
+                v2_endpoint,
                 tpm,
                 machine_key,
                 &session_key,
@@ -2510,10 +2523,17 @@ impl BrokerClientApplication {
             .await?;
         let transport_key = self.transport_key(tpm, machine_key)?;
         let session_key = prt.session_key()?;
+        let v2_endpoint = !scopes.is_empty();
+        if scopes.len() > 0 && request_resource.is_some() {
+            return Err(MsalError::GeneralFailure(
+                "Scopes cannot be specified with a request_resource".to_string(),
+            ));
+        }
         let mut token = self
             .exchange_prt_for_access_token_internal(
                 &prt,
                 scopes.clone(),
+                v2_endpoint,
                 tpm,
                 machine_key,
                 &session_key,
@@ -2955,12 +2975,19 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
+        let v2_endpoint = scope.is_empty();
+        if scope.len() > 0 && request_resource.is_some() {
+            return Err(MsalError::GeneralFailure(
+                "Scopes cannot be specified with a request_resource".to_string(),
+            ));
+        }
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
         let session_key = prt.session_key()?;
         self.exchange_prt_for_access_token_internal(
             &prt,
             scope,
+            v2_endpoint,
             tpm,
             machine_key,
             &session_key,
@@ -2973,6 +3000,7 @@ impl BrokerClientApplication {
         &self,
         prt: &PrimaryRefreshToken,
         scope: Vec<&str>,
+        v2_endpoint: bool,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
         session_key: &SessionKey,
@@ -2987,6 +3015,7 @@ impl BrokerClientApplication {
                 scope.clone(),
                 &request_id,
                 request_resource.as_deref(),
+                v2_endpoint,
                 session_key,
                 tpm,
                 machine_key,
@@ -2996,8 +3025,9 @@ impl BrokerClientApplication {
         self.exchange_auth_code_for_access_token_internal(
             scope,
             &request_id,
+            v2_endpoint,
             auth_code,
-            request_resource,
+            request_resource.as_deref(),
         )
         .await
     }
@@ -3232,6 +3262,13 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
         pin: &str,
     ) -> Result<UserToken, MsalError> {
+        let v2_endpoint = !scopes.is_empty();
+        if scopes.len() > 0 && request_resource.is_some() {
+            return Err(MsalError::GeneralFailure(
+                "Scopes cannot be specified with a request_resource".to_string(),
+            ));
+        }
+
         let pin = PinValue::new(pin)
             .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
 
@@ -3250,6 +3287,7 @@ impl BrokerClientApplication {
             .exchange_prt_for_access_token_internal(
                 &prt,
                 scopes.clone(),
+                v2_endpoint,
                 tpm,
                 machine_key,
                 &session_key,
@@ -3417,30 +3455,42 @@ impl BrokerClientApplication {
         scope: Vec<&str>,
         request_id: &str,
         resource: Option<&str>,
+        v2_endpoint: bool,
         signed_prt_payload: Option<String>,
         signed_device_payload: Option<String>,
     ) -> Result<String, MsalError> {
         let scope = format!("openid profile {}", scope.join(" "));
-        let redirect_uri = self.app.get_auth_redirect_uri(resource);
+        let client_id = if v2_endpoint {
+            LINUX_BROKER_APP_ID
+        } else {
+            self.app.client_id()
+        };
+        let redirect_uri = self.app.get_auth_redirect_uri(Some(client_id), resource);
 
-        let params = [
-            ("client_id", self.app.client_id()),
+        let mut params = vec![
+            ("client_id", client_id),
             ("response_type", "code"),
             ("redirect_uri", redirect_uri.as_str()),
             ("client-request-id", request_id),
-            ("scope", &scope),
-            (
-                "resource",
-                (resource.unwrap_or("https://graph.microsoft.com")),
-            ),
         ];
+        if v2_endpoint {
+            params.push(("scope", &scope));
+        } else if let Some(resource) = resource {
+            params.push(("resource", resource));
+        } else {
+            params.push(("resource", "https://graph.microsoft.com"));
+        }
         let payload = params
             .iter()
             .map(|(k, v)| format!("{}={}", k, url_encode(v)))
             .collect::<Vec<String>>()
             .join("&");
 
-        let url = format!("{}/oauth2/authorize?{}", self.authority(), payload);
+        let url = if v2_endpoint {
+            format!("{}/oAuth2/v2.0/authorize?{}", self.authority(), payload)
+        } else {
+            format!("{}/oauth2/authorize?{}", self.authority(), payload)
+        };
         debug!("GET {}", url);
 
         let mut req = self.client().get(url).header(header::USER_AGENT, "");
@@ -3537,6 +3587,7 @@ impl BrokerClientApplication {
         scope: Vec<&str>,
         request_id: &str,
         resource: Option<&str>,
+        v2_endpoint: bool,
         session_key: &SessionKey,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
@@ -3580,6 +3631,7 @@ impl BrokerClientApplication {
             scope,
             request_id,
             resource,
+            v2_endpoint,
             Some(signed_prt_payload),
             Some(signed_device_payload),
         )
@@ -3590,29 +3642,47 @@ impl BrokerClientApplication {
         &self,
         scope: Vec<&str>,
         request_id: &str,
+        v2_endpoint: bool,
         authorization_code: String,
-        request_resource: Option<String>,
+        request_resource: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging an Authorization Code for an Access Token");
 
-        let scopes_str = scope.join(" ");
+        let scopes_str = format!("openid profile offline_access {}", scope.join(" "));
+        let client_id = if v2_endpoint {
+            LINUX_BROKER_APP_ID
+        } else {
+            self.app.client_id()
+        };
 
-        let redirect_uri = self.app.get_auth_redirect_uri(request_resource.as_deref());
-        let params = [
-            ("client_id", self.app.client_id()),
+        let redirect_uri = self
+            .app
+            .get_auth_redirect_uri(Some(client_id), request_resource.as_deref());
+        let mut params = vec![
+            ("client_id", client_id),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
-            ("scope", &scopes_str),
             ("redirect_uri", &redirect_uri),
             ("client-request-id", request_id),
         ];
+        if v2_endpoint {
+            params.push(("scope", &scopes_str));
+        } else if let Some(request_resource) = request_resource {
+            params.push(("resource", request_resource));
+        } else {
+            params.push(("resource", "https://graph.microsoft.com"));
+        }
         let payload = params
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect::<Vec<String>>()
             .join("&");
 
-        let url = format!("{}/oauth2/token", self.authority());
+        let url = if v2_endpoint {
+            format!("{}/oAuth2/v2.0/token", self.authority())
+        } else {
+            format!("{}/oauth2/token", self.authority())
+        };
         let mut debug_payload = params;
         debug_payload[2] = ("code", "**********");
         if let Ok(pretty) = to_string_pretty(&debug_payload) {
