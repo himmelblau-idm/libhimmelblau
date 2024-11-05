@@ -1026,10 +1026,11 @@ impl ClientApplication {
         }
     }
 
-    fn get_auth_redirect_uri(&self, resource: Option<&str>) -> String {
+    fn get_auth_redirect_uri(&self, client_id: Option<&str>, resource: Option<&str>) -> String {
+        let client_id = client_id.unwrap_or(self.client_id.as_str());
         let resource = resource.unwrap_or("");
 
-        let redirect_uri = match self.client_id.as_str() {
+        let redirect_uri = match client_id {
             "1fec8e78-bce4-4aaf-ab1b-5451cc387264" => {
                 "https://login.microsoftonline.com/common/oauth2/nativeclient".to_string()
             },
@@ -1755,7 +1756,10 @@ impl PublicClientApplication {
         resource: Option<&str>,
     ) -> Result<AuthConfig, MsalError> {
         let scope = format!("openid profile {}", scopes.join(" "));
-        let redirect_uri = self.app.get_auth_redirect_uri(resource);
+        let redirect_uri = self.app.get_auth_redirect_uri(None, resource);
+        let caller_app_redirect_uri = self
+            .app
+            .get_auth_redirect_uri(Some(LINUX_BROKER_APP_ID), resource);
         let params = vec![
             ("client_id", self.client_id()),
             ("response_type", "code"),
@@ -1770,6 +1774,8 @@ impl PublicClientApplication {
                 "resource",
                 (resource.unwrap_or("https://graph.microsoft.com")),
             ),
+            ("caller_app_client_id", LINUX_BROKER_APP_ID),
+            ("caller_app_redirect_uri", caller_app_redirect_uri.as_str()),
         ];
         let url = Url::parse_with_params(
             &format!("{}/oauth2/authorize", self.authority()),
@@ -1989,7 +1995,7 @@ impl PublicClientApplication {
         authorization_code: String,
         resource: Option<&str>,
     ) -> Result<UserToken, MsalError> {
-        let redirect_uri = self.app.get_auth_redirect_uri(resource);
+        let redirect_uri = self.app.get_auth_redirect_uri(None, resource);
         let params = [
             ("client_id", self.client_id()),
             ("grant_type", "authorization_code"),
@@ -2204,8 +2210,8 @@ impl PublicClientApplication {
         }
     }
 
-    fn get_auth_redirect_uri(&self, resource: Option<&str>) -> String {
-        self.app.get_auth_redirect_uri(resource)
+    fn get_auth_redirect_uri(&self, client_id: Option<&str>, resource: Option<&str>) -> String {
+        self.app.get_auth_redirect_uri(client_id, resource)
     }
 }
 
@@ -2462,7 +2468,7 @@ impl BrokerClientApplication {
         let v2_endpoint = !scopes.is_empty();
         if scopes.len() > 0 && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
-                "Scopes cannot be specified with a request_resource".to_string()
+                "Scopes cannot be specified with a request_resource".to_string(),
             ));
         }
         let prt = self
@@ -2520,7 +2526,7 @@ impl BrokerClientApplication {
         let v2_endpoint = !scopes.is_empty();
         if scopes.len() > 0 && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
-                "Scopes cannot be specified with a request_resource".to_string()
+                "Scopes cannot be specified with a request_resource".to_string(),
             ));
         }
         let mut token = self
@@ -2972,7 +2978,7 @@ impl BrokerClientApplication {
         let v2_endpoint = scope.is_empty();
         if scope.len() > 0 && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
-                "Scopes cannot be specified with a request_resource".to_string()
+                "Scopes cannot be specified with a request_resource".to_string(),
             ));
         }
         let transport_key = self.transport_key(tpm, machine_key)?;
@@ -3259,7 +3265,7 @@ impl BrokerClientApplication {
         let v2_endpoint = !scopes.is_empty();
         if scopes.len() > 0 && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
-                "Scopes cannot be specified with a request_resource".to_string()
+                "Scopes cannot be specified with a request_resource".to_string(),
             ));
         }
 
@@ -3454,10 +3460,15 @@ impl BrokerClientApplication {
         signed_device_payload: Option<String>,
     ) -> Result<String, MsalError> {
         let scope = format!("openid profile {}", scope.join(" "));
-        let redirect_uri = self.app.get_auth_redirect_uri(resource);
+        let client_id = if v2_endpoint {
+            LINUX_BROKER_APP_ID
+        } else {
+            self.app.client_id()
+        };
+        let redirect_uri = self.app.get_auth_redirect_uri(Some(client_id), resource);
 
         let mut params = vec![
-            ("client_id", self.app.client_id()),
+            ("client_id", client_id),
             ("response_type", "code"),
             ("redirect_uri", redirect_uri.as_str()),
             ("client-request-id", request_id),
@@ -3638,10 +3649,17 @@ impl BrokerClientApplication {
         debug!("Exchanging an Authorization Code for an Access Token");
 
         let scopes_str = format!("openid profile offline_access {}", scope.join(" "));
+        let client_id = if v2_endpoint {
+            LINUX_BROKER_APP_ID
+        } else {
+            self.app.client_id()
+        };
 
-        let redirect_uri = self.app.get_auth_redirect_uri(request_resource.as_deref());
+        let redirect_uri = self
+            .app
+            .get_auth_redirect_uri(Some(client_id), request_resource.as_deref());
         let mut params = vec![
-            ("client_id", self.app.client_id()),
+            ("client_id", client_id),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
             ("redirect_uri", &redirect_uri),
