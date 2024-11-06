@@ -74,6 +74,10 @@ pub(crate) struct FileCredentialCache {
 }
 
 impl FileCredentialCache {
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        self.ccache.clone().build()
+    }
+
     pub(crate) fn save_keytab_file(&self, filename: &str) -> Result<(), MsalError> {
         let bytes = self.ccache.clone().build();
         let mut keytab_file = OpenOptions::new()
