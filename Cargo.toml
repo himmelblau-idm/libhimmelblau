@@ -1,7 +1,7 @@
 [package]
 name = "libhimmelblau"
 description = "Samba Library for Azure Entra ID Authentication"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
@@ -44,6 +44,12 @@ tokio = { version = "1.37.0", features = ["full"] }
 tracing-subscriber = "0.3.18"
 pyo3 = { version = "0.21.2", features = ["extension-module"], optional = true }
 paste = "1.0.15"
+picky-krb = "0.8.0"
+picky-asn1-der = "0.4.1"
+picky-asn1 = "0.8.0"
+himmelblau_kerberos_crypto = "0.4.0"
+himmelblau_kerberos_ccache = "0.4.0"
+chrono = "0.4.38"
 
 [build-dependencies]
 cbindgen = "0.26.0"

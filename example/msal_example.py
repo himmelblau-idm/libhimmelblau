@@ -64,3 +64,12 @@ print("access_token: %s, spn: %s, uuid: %s, mfa?: %d" % (token0.access_token, to
 print("Acquiring a PRT SSO Cookie")
 cookie = client.acquire_prt_sso_cookie(token0.prt, tpm, machine_key)
 print("cookie:", cookie)
+
+print("Parse the TGT into a Kerberos ccache")
+client.store_cloud_tgt(prt, './test_ccache', tpm, machine_key)
+with open('./test_ccache', 'rb') as c:
+    print(c.read())
+
+print("Unseal the Kerberos top level names")
+kerberos_top_level_names = client.unseal_prt_kerberos_top_level_names(token0.prt, tpm, machine_key)
+print(kerberos_top_level_names)

@@ -1813,6 +1813,174 @@ pub unsafe extern "C" fn user_token_amr_mfa(token: *mut UserToken, out: *mut boo
 
 /// # Safety
 ///
+/// The calling function must ensure that the `token` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer to a bool.
+#[no_mangle]
+pub unsafe extern "C" fn user_token_prt(
+    token: *mut UserToken,
+    out: *mut *mut SealedData,
+) -> MSAL_ERROR {
+    let token = unsafe { &mut *token };
+    match &token.prt {
+        Some(prt) => {
+            unsafe {
+                *out = Box::into_raw(Box::new(SealedData(prt.clone())));
+            }
+            MSAL_ERROR::SUCCESS
+        }
+        None => {
+            error!("PRT not found!");
+            MSAL_ERROR::INVALID_POINTER
+        }
+    }
+}
+
+macro_rules! broker_store_tgt {
+    ($func:ident, $client:ident, $sealed_prt:ident, $filename:ident, $tpm:ident, $machine_key:ident) => {{
+        if $client.is_null() || $sealed_prt.is_null() || $tpm.is_null() || $machine_key.is_null() {
+            error!("Invalid input parameters!");
+            return MSAL_ERROR::INVALID_POINTER;
+        }
+
+        let client = unsafe { &mut *$client };
+        let sealed_prt = unsafe { &mut *$sealed_prt };
+        let filename = match wrap_c_char($filename) {
+            Some(filename) => filename,
+            None => {
+                error!("Invalid input username!");
+                return MSAL_ERROR::INVALID_POINTER;
+            }
+        };
+        let tpm = unsafe { &mut *$tpm };
+        let machine_key = unsafe { &mut *$machine_key };
+
+        match client.$func(&sealed_prt.0, &filename, &mut tpm.0, &machine_key.0) {
+            Ok(res) => res,
+            Err(e) => {
+                error!("{:?}", e);
+                return MSAL_ERROR::from(e);
+            }
+        }
+
+        MSAL_ERROR::SUCCESS
+    }};
+}
+
+/// Gets the Cloud TGT from a sealed PRT and stores it in the Kerberos CCache
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` -  An encrypted primary refresh token that was
+///   previously received from the server.
+///
+/// * `filename` - The filename for the Kerberos Credential Cache.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// # Safety
+///
+/// The calling function must ensure that `sealed_prt`, `tpm`, and
+/// `machine_key` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_store_cloud_tgt(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    filename: *const c_char,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+) -> MSAL_ERROR {
+    broker_store_tgt!(
+        store_cloud_tgt,
+        client,
+        sealed_prt,
+        filename,
+        tpm,
+        machine_key
+    )
+}
+
+/// Gets the AD TGT from a sealed PRT and stores it in the Kerberos CCache
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` -  An encrypted primary refresh token that was
+///   previously received from the server.
+///
+/// * `filename` - The filename for the Kerberos Credential Cache.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// # Safety
+///
+/// The calling function must ensure that `sealed_prt`, `tpm`, and
+/// `machine_key` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_store_ad_tgt(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    filename: *const c_char,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+) -> MSAL_ERROR {
+    broker_store_tgt!(store_ad_tgt, client, sealed_prt, filename, tpm, machine_key)
+}
+
+/// Get the Kerberos top level names from a sealed PRT
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` -  An encrypted primary refresh token that was
+///   previously received from the server.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// * `out` - The Kerberos top level names
+///
+/// # Safety
+///
+/// The calling function must ensure that `sealed_prt`, `tpm`, and
+/// `machine_key` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_unseal_prt_kerberos_top_level_names(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out: *mut *mut c_char,
+) -> MSAL_ERROR {
+    let sealed_prt = unsafe { &mut *sealed_prt };
+    let tpm = unsafe { &mut *tpm };
+    let machine_key = unsafe { &mut *machine_key };
+    c_str_from_object_func!(
+        client,
+        unseal_prt_kerberos_top_level_names,
+        out,
+        &sealed_prt.0,
+        &mut tpm.0,
+        &machine_key.0
+    )
+}
+
+/// # Safety
+///
 /// The calling function must ensure that the `client` raw pointer is valid and
 /// can be dereferenced.
 #[cfg(feature = "broker")]

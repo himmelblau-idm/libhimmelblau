@@ -71,6 +71,10 @@ pub enum MsalError {
     MFAPollContinue,
     /// An AADSTSError
     AADSTSError(AADSTSError),
+    /// TGT missing from PRT
+    Missing(String),
+    /// A formatting error
+    FormatError(String),
 }
 
 #[repr(C)]
@@ -91,6 +95,8 @@ pub enum MSAL_ERROR {
     NOT_IMPLEMENTED,
     CONFIG_ERROR,
     MFA_POLL_CONTINUE,
+    MISSING,
+    FORMAT_ERROR,
     SUCCESS,
     INVALID_POINTER,
     NO_MEMORY,
@@ -116,6 +122,8 @@ impl From<MsalError> for MSAL_ERROR {
             MsalError::ConfigError(_) => MSAL_ERROR::CONFIG_ERROR,
             MsalError::MFAPollContinue => MSAL_ERROR::MFA_POLL_CONTINUE,
             MsalError::AADSTSError(_) => MSAL_ERROR::AADSTS_ERROR,
+            MsalError::Missing(_) => MSAL_ERROR::MISSING,
+            MsalError::FormatError(_) => MSAL_ERROR::FORMAT_ERROR,
         }
     }
 }

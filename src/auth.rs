@@ -88,9 +88,21 @@ use crate::discovery::Services;
 #[cfg(feature = "broker")]
 use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 #[cfg(feature = "broker")]
+use crate::krb5::FileCredentialCache;
+#[cfg(feature = "broker")]
+use crate::krb5::IntegerAsn1;
+#[cfg(feature = "broker")]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
+use compact_jwt::JwtError;
+#[cfg(feature = "broker")]
+use himmelblau_kerberos_crypto::{AesCipher, AesSizes, KerberosCipher};
+#[cfg(feature = "broker")]
+use picky_krb::messages::AsRep;
+#[cfg(feature = "broker")]
 use serde_json::to_string_pretty;
+#[cfg(feature = "broker")]
+use zeroize::Zeroizing;
 
 #[cfg(feature = "broker")]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
@@ -771,12 +783,12 @@ impl FromStr for TGT {
 #[derive(Default, Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct TGT {
     #[serde(rename = "clientKey")]
-    pub client_key: Option<String>,
+    client_key: Option<String>,
     #[serde(rename = "keyType")]
-    pub key_type: u32,
-    pub error: Option<String>,
+    key_type: u32,
+    error: Option<String>,
     #[serde(rename = "messageBuffer")]
-    pub message_buffer: Option<String>,
+    message_buffer: Option<String>,
     pub realm: Option<String>,
     pub sn: Option<String>,
     pub cn: Option<String>,
@@ -784,6 +796,99 @@ pub struct TGT {
     pub session_key_type: u32,
     #[serde(rename = "accountType")]
     pub account_type: u32,
+}
+
+#[cfg(feature = "broker")]
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct AesKey {
+    key: Vec<u8>,
+    etype: u16,
+}
+
+impl AesKey {
+    fn new(key: &[u8], etype: u16) -> Result<Self, MsalError> {
+        Ok(AesKey {
+            key: key.to_vec(),
+            etype,
+        })
+    }
+
+    pub(crate) fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, MsalError> {
+        let aes_sizes = match self.etype {
+            17 => AesSizes::Aes128,
+            18 => AesSizes::Aes256,
+            _ => {
+                return Err(MsalError::CryptoFail(format!(
+                    "Encryption type {} not supported",
+                    self.etype
+                )))
+            }
+        };
+        let cipher = AesCipher::new(aes_sizes);
+        cipher
+            .decrypt(&self.key, 3, ciphertext)
+            .map_err(|e| MsalError::CryptoFail(format!("{:?}", e)))
+            .map(Zeroizing::new)
+    }
+}
+
+#[cfg(feature = "broker")]
+impl TGT {
+    fn client_key(
+        &self,
+        tpm: &mut BoxedDynTpm,
+        transport_key: &MsOapxbcRsaKey,
+        session_key: &SessionKey,
+    ) -> Result<AesKey, MsalError> {
+        if self.key_type == 0 {
+            return Err(MsalError::CryptoFail("TGT key type is invalid".to_string()));
+        }
+        let tgt = self.message()?;
+        let etype: u16 = IntegerAsn1(&tgt.0.enc_part.0.etype.0).try_into()?;
+        if etype != 18 && etype != 17 {
+            return Err(MsalError::CryptoFail(format!(
+                "Encryption type {} not supported",
+                etype
+            )));
+        }
+        match &self.client_key {
+            Some(client_key) => {
+                let jwe = JweCompact::from_str(client_key)
+                    .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+                let client_key = session_key
+                    .decipher_tgt_client_key(tpm, transport_key, &jwe)
+                    .map_err(|e| {
+                        MsalError::CryptoFail(format!(
+                            "Failed to unwrap the tgt session key: {:?}",
+                            e
+                        ))
+                    })?;
+                Ok(AesKey::new(&client_key, etype).map_err(|e| {
+                    MsalError::CryptoFail(format!("Failed to load the Aes256 key: {:?}", e))
+                })?)
+            }
+            None => Err(MsalError::CryptoFail(
+                "TGT client key is missing".to_string(),
+            )),
+        }
+    }
+
+    pub fn message(&self) -> Result<AsRep, MsalError> {
+        let tgt: AsRep = match &self.message_buffer {
+            Some(message_buffer) => picky_asn1_der::from_bytes(
+                &STANDARD
+                    .decode(message_buffer.as_str())
+                    .map_err(|e| MsalError::CryptoFail(format!("{:?}", e)))?,
+            )
+            .map_err(|e| MsalError::CryptoFail(format!("{:?}", e)))?,
+            None => {
+                return Err(MsalError::CryptoFail(
+                    "TGT message buffer is missing".to_string(),
+                ))
+            }
+        };
+        Ok(tgt)
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -871,6 +976,34 @@ impl SessionKey {
         session_key
             .decipher_prt_v2(tpm, transport_key, jwe)
             .map_err(|e| MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e)))
+    }
+
+    fn decipher_tgt_client_key(
+        &self,
+        tpm: &mut BoxedDynTpm,
+        transport_key: &MsOapxbcRsaKey,
+        jwe: &JweCompact,
+    ) -> Result<Zeroizing<Vec<u8>>, MsalError> {
+        let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
+            tpm,
+            transport_key,
+            &self.session_key_jwe,
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
+        match session_key.decipher_prt_v2(tpm, transport_key, jwe) {
+            Ok(decrypted) => Ok(Zeroizing::new(decrypted.payload().to_vec())),
+            Err(JwtError::OpenSSLError) => match session_key.decipher(tpm, transport_key, jwe) {
+                Ok(decrypted) => Ok(Zeroizing::new(decrypted.payload().to_vec())),
+                Err(e) => Err(MsalError::CryptoFail(format!(
+                    "Failed to decipher Jwe: {}",
+                    e
+                ))),
+            },
+            Err(e) => Err(MsalError::CryptoFail(format!(
+                "Failed to decipher Jwe: {}",
+                e
+            ))),
+        }
     }
 
     fn sign<V: JwsSignable>(
@@ -1030,7 +1163,7 @@ impl ClientApplication {
         let client_id = client_id.unwrap_or(self.client_id.as_str());
         let resource = resource.unwrap_or("");
 
-        let redirect_uri = match client_id {
+        match client_id {
             "1fec8e78-bce4-4aaf-ab1b-5451cc387264" => {
                 "https://login.microsoftonline.com/common/oauth2/nativeclient".to_string()
             },
@@ -1094,9 +1227,7 @@ impl ClientApplication {
             _ => {
                 "https://login.microsoftonline.com/common/oauth2/nativeclient".to_string()
             },
-        };
-
-        redirect_uri
+        }
     }
 }
 
@@ -1235,7 +1366,7 @@ impl PublicClientApplication {
     /// # Arguments
     ///
     /// * `flow` - A DeviceAuthorizationResponse previously generated by
-    /// initiate_device_flow.
+    ///   initiate_device_flow.
     ///
     /// # Returns
     ///
@@ -2045,7 +2176,7 @@ impl PublicClientApplication {
     /// * `poll_attempt` - The polling attempt number.
     ///
     /// * `flow` - A MFAAuthContinue previously generated by
-    /// initiate_acquire_token_by_mfa_flow.
+    ///   initiate_acquire_token_by_mfa_flow.
     ///
     /// # Returns
     ///
@@ -2331,7 +2462,7 @@ impl BrokerClientApplication {
     /// # Returns
     ///
     /// * Success: A LoadableMsOapxbcRsaKey transport key, a LoadableIdentityKey certificate key,
-    /// and a `device_id`.
+    ///   and a `device_id`.
     /// * Failure: An MsalError, indicating the failure.
     pub async fn enroll_device(
         &mut self,
@@ -2466,7 +2597,7 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
         let v2_endpoint = !scopes.is_empty();
-        if scopes.len() > 0 && request_resource.is_some() {
+        if !scopes.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
                 "Scopes cannot be specified with a request_resource".to_string(),
             ));
@@ -2524,7 +2655,7 @@ impl BrokerClientApplication {
         let transport_key = self.transport_key(tpm, machine_key)?;
         let session_key = prt.session_key()?;
         let v2_endpoint = !scopes.is_empty();
-        if scopes.len() > 0 && request_resource.is_some() {
+        if !scopes.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
                 "Scopes cannot be specified with a request_resource".to_string(),
             ));
@@ -2598,7 +2729,7 @@ impl BrokerClientApplication {
     /// # Arguments
     ///
     /// * `flow` - A DeviceAuthorizationResponse previously generated by
-    /// initiate_device_flow.
+    ///   initiate_device_flow.
     ///
     /// # Returns
     ///
@@ -2659,7 +2790,7 @@ impl BrokerClientApplication {
     /// * `poll_attempt` - The polling attempt number.
     ///
     /// * `flow` - A MFAAuthContinue previously generated by
-    /// initiate_acquire_token_by_mfa_flow.
+    ///   initiate_acquire_token_by_mfa_flow.
     ///
     /// # Returns
     ///
@@ -2976,7 +3107,7 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
         let v2_endpoint = scope.is_empty();
-        if scope.len() > 0 && request_resource.is_some() {
+        if !scope.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
                 "Scopes cannot be specified with a request_resource".to_string(),
             ));
@@ -3263,7 +3394,7 @@ impl BrokerClientApplication {
         pin: &str,
     ) -> Result<UserToken, MsalError> {
         let v2_endpoint = !scopes.is_empty();
-        if scopes.len() > 0 && request_resource.is_some() {
+        if !scopes.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
                 "Scopes cannot be specified with a request_resource".to_string(),
             ));
@@ -3581,6 +3712,7 @@ impl BrokerClientApplication {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn exchange_prt_for_auth_code(
         &self,
         prt: &PrimaryRefreshToken,
@@ -3657,7 +3789,7 @@ impl BrokerClientApplication {
 
         let redirect_uri = self
             .app
-            .get_auth_redirect_uri(Some(client_id), request_resource.as_deref());
+            .get_auth_redirect_uri(Some(client_id), request_resource);
         let mut params = vec![
             ("client_id", client_id),
             ("grant_type", "authorization_code"),
@@ -3795,6 +3927,107 @@ impl BrokerClientApplication {
         let transport_key = self.transport_key(tpm, machine_key)?;
         let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
         prt.uuid()
+    }
+
+    /// Gets the Cloud TGT from a sealed PRT and stores it in the Kerberos CCache
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `filename` - The filename for the Kerberos Credential Cache.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn store_cloud_tgt(
+        &self,
+        sealed_prt: &SealedData,
+        filename: &str,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<(), MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        if let Some(error) = &prt.tgt_cloud.error {
+            return Err(MsalError::Missing(error.to_string()));
+        }
+        let session_key = prt.session_key()?;
+        let client_key = prt
+            .tgt_cloud
+            .client_key(tpm, &transport_key, &session_key)?;
+        let message = prt.tgt_cloud.message()?;
+        let ccache = FileCredentialCache::new(&message, &client_key)?;
+        ccache.save_keytab_file(filename)
+    }
+
+    /// Gets the AD TGT from a sealed PRT and stores it in the Kerberos CCache
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `filename` - The filename for the Kerberos Credential Cache.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn store_ad_tgt(
+        &self,
+        sealed_prt: &SealedData,
+        filename: &str,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<(), MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        if let Some(error) = &prt.tgt_ad.error {
+            return Err(MsalError::Missing(error.to_string()));
+        }
+        let session_key = prt.session_key()?;
+        let client_key = prt.tgt_ad.client_key(tpm, &transport_key, &session_key)?;
+        let message = prt.tgt_ad.message()?;
+        let ccache = FileCredentialCache::new(&message, &client_key)?;
+        ccache.save_keytab_file(filename)
+    }
+
+    /// Get the Kerberos top level names from a sealed PRT
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: The Kerberos top level names
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn unseal_prt_kerberos_top_level_names(
+        &self,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<String, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let kerberos_top_level_names =
+            prt.kerberos_top_level_names
+                .clone()
+                .ok_or(MsalError::Missing(
+                    "kerberos_top_level_names missing from PRT".to_string(),
+                ))?;
+        Ok(kerberos_top_level_names.clone())
     }
 
     fn seal_user_prt(

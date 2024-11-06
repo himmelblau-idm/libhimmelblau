@@ -20,12 +20,30 @@
 #include <himmelblau/himmelblau.h>
 #include <string.h>
 #include <unistd.h>
+#include <ctype.h>
 
 void strip_newline(char *str) {
 	int len = strlen(str);
 	if (str[len-1] == '\n') {
 		str[len-1] = '\0';
 	}
+}
+
+void cat_file(const char *filename) {
+	FILE *f = fopen(filename, "rb");
+	if (f == NULL) {
+		printf("Failed opening the ccache for reading\n");
+		return;
+	}
+	int b = 0;
+	while ((b = fgetc(f)) != EOF) {
+		if (isprint(b)) {
+			printf("%c", b);
+		} else {
+			printf(".");
+		}
+	}
+	fclose(f);
 }
 
 int main() {
@@ -40,6 +58,7 @@ int main() {
 	LoadableMsOapxbcRsaKey *transport_key = NULL;
 	LoadableIdentityKey *cert_key = NULL;
 	LoadableIdentityKey *hello_key = NULL;
+	SealedData *prt = NULL;
 	MSAL_ERROR err;
 	char* auth_value = NULL;
 	char *domain = NULL;
@@ -53,6 +72,7 @@ int main() {
 	char *access_token = NULL;
 	char *spn = NULL;
 	char *uuid = NULL;
+	char *kerberos_top_level_names = NULL;
 	bool mfa = false;
 	bool user_exists;
 
@@ -306,6 +326,37 @@ int main() {
 	       uuid,
 	       mfa);
 
+	printf("Unseal the TGT from the PRT\n");
+	err = user_token_prt(token0, &prt);
+	if (err != SUCCESS) {
+		printf("Failed fetching token prt\n");
+		goto OUT;
+	}
+
+	printf("Parse the TGT into a Kerberos ccache\n");
+	err = broker_store_cloud_tgt(client,
+				     prt,
+				     "./c_test_ccache",
+				     tpm,
+				     machine_key);
+	if (err != SUCCESS) {
+		printf("Failed storing TGT\n");
+		goto OUT;
+	}
+	cat_file("./c_test_ccache");
+
+	printf("\nUnseal the Kerberos top level names\n");
+	err = broker_unseal_prt_kerberos_top_level_names(client,
+							 prt,
+							 tpm,
+							 machine_key,
+							 &kerberos_top_level_names);
+	if (err != SUCCESS) {
+		printf("Failed to unseal the kerberos top level names\n");
+		goto OUT;
+	}
+	printf("%s\n", kerberos_top_level_names);
+
 OUT:
 	user_token_free(token);
 	user_token_free(token0);
@@ -322,8 +373,10 @@ OUT:
 	loadable_ms_oapxbc_rsa_key_free(transport_key);
 	loadable_identity_key_free(cert_key);
 	loadable_identity_key_free(hello_key);
+	sealed_data_free(prt);
 	string_free(refresh_token);
 	string_free(access_token);
 	string_free(spn);
 	string_free(uuid);
+	string_free(kerberos_top_level_names);
 }

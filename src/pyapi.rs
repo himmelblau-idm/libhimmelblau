@@ -1,6 +1,8 @@
+use crate::krb5::CCache;
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
-    BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue, UserToken,
+    AesKey, BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue,
+    UserToken, TGT,
 };
 use kanidm_hsm_crypto::soft::SoftTpm;
 #[cfg(feature = "tpm")]
@@ -10,6 +12,7 @@ use kanidm_hsm_crypto::{
     MachineKey, SealedData, Tpm,
 };
 use paste::paste;
+use picky_krb::messages::AsRep;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyType};
@@ -181,6 +184,14 @@ impl PyUserToken {
     fn get_amr_mfa(&self) -> PyResult<bool> {
         self.token.amr_mfa().map_err(|e| to_pyerr!(e))
     }
+
+    #[getter]
+    fn get_prt(&self) -> PyResult<PySealedData> {
+        match &self.token.prt {
+            Some(prt) => Ok(PySealedData { data: prt.clone() }),
+            None => Err(general_py_err!("PRT not found!")),
+        }
+    }
 }
 
 #[pyclass(name = "SealedData", module = "himmelblau", subclass)]
@@ -188,6 +199,65 @@ pub struct PySealedData {
     data: SealedData,
 }
 serialize_impl!(SealedData, data);
+
+#[pyclass(name = "AsRep", module = "himmelblau", subclass)]
+pub struct PyAsRep {
+    msg: AsRep,
+}
+
+#[pyclass(name = "TGT", module = "himmelblau", subclass)]
+pub struct PyTGT {
+    tgt: TGT,
+}
+
+#[pymethods]
+impl PyTGT {
+    #[getter]
+    fn get_message(&self) -> PyResult<PyAsRep> {
+        Ok(PyAsRep {
+            msg: self.tgt.message().map_err(|e| to_pyerr!(e))?,
+        })
+    }
+
+    #[getter]
+    fn get_realm(&self) -> PyResult<String> {
+        match &self.tgt.realm {
+            Some(realm) => Ok(realm.clone()),
+            None => Err(general_py_err!("Realm not found!")),
+        }
+    }
+
+    #[getter]
+    fn get_sn(&self) -> PyResult<String> {
+        match &self.tgt.sn {
+            Some(sn) => Ok(sn.clone()),
+            None => Err(general_py_err!("sn not found!")),
+        }
+    }
+
+    #[getter]
+    fn get_cn(&self) -> PyResult<String> {
+        match &self.tgt.cn {
+            Some(cn) => Ok(cn.clone()),
+            None => Err(general_py_err!("cn not found!")),
+        }
+    }
+
+    #[getter]
+    fn get_session_key_type(&self) -> PyResult<u32> {
+        Ok(self.tgt.session_key_type)
+    }
+
+    #[getter]
+    fn get_account_type(&self) -> PyResult<u32> {
+        Ok(self.tgt.account_type)
+    }
+}
+
+#[pyclass(name = "AesKey", module = "himmelblau", subclass)]
+pub struct PyAesKey {
+    client_key: AesKey,
+}
 
 #[pyclass(name = "Tpm", module = "himmelblau", subclass)]
 pub struct PyBoxedDynTpm {
@@ -666,6 +736,62 @@ impl PyBrokerClientApplication {
         )?;
         Ok(jwt)
     }
+
+    pub fn store_cloud_tgt(
+        &self,
+        sealed_prt: &PySealedData,
+        filename: &str,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyMachineKey,
+    ) -> PyResult<()> {
+        self.client
+            .store_cloud_tgt(&sealed_prt.data, filename, &mut tpm.tpm, &machine_key.key)
+            .map_err(|e| to_pyerr!(e))
+    }
+
+    pub fn store_ad_tgt(
+        &self,
+        sealed_prt: &PySealedData,
+        filename: &str,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyMachineKey,
+    ) -> PyResult<()> {
+        self.client
+            .store_ad_tgt(&sealed_prt.data, filename, &mut tpm.tpm, &machine_key.key)
+            .map_err(|e| to_pyerr!(e))
+    }
+
+    pub fn unseal_prt_kerberos_top_level_names(
+        &self,
+        sealed_prt: &PySealedData,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyMachineKey,
+    ) -> PyResult<String> {
+        self.client
+            .unseal_prt_kerberos_top_level_names(&sealed_prt.data, &mut tpm.tpm, &machine_key.key)
+            .map_err(|e| to_pyerr!(e))
+    }
+}
+
+#[pyclass(name = "CCache", module = "himmelblau", subclass)]
+pub struct PyCCache {
+    ccache: CCache,
+}
+
+#[pymethods]
+impl PyCCache {
+    #[new]
+    pub fn new(tgt: &PyAsRep, client_key: &PyAesKey, _py: Python) -> PyResult<Self> {
+        Ok(PyCCache {
+            ccache: CCache::new(&tgt.msg, &client_key.client_key).map_err(|e| to_pyerr!(e))?,
+        })
+    }
+
+    pub fn save_keytab_file(&self, filename: &str) -> PyResult<()> {
+        self.ccache
+            .save_keytab_file(filename)
+            .map_err(|e| to_pyerr!(e))
+    }
 }
 
 #[pymodule]
@@ -682,6 +808,9 @@ fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyUserToken>()?;
     m.add_class::<PySealedData>()?;
     m.add_class::<TracingLevel>()?;
+    m.add_class::<PyAsRep>()?;
+    m.add_class::<PyAesKey>()?;
+    m.add_class::<PyCCache>()?;
     m.add_function(wrap_pyfunction!(auth_value_generate, m)?)?;
     m.add_function(wrap_pyfunction!(set_global_tracing_level, m)?)?;
     Ok(())
