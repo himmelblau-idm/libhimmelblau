@@ -59,10 +59,6 @@ int main() {
 	LoadableIdentityKey *cert_key = NULL;
 	LoadableIdentityKey *hello_key = NULL;
 	SealedData *prt = NULL;
-	TGT *tgt = NULL;
-	AsRep *as_rep = NULL;
-	CCache *ccache = NULL;
-	AesKey *client_key = NULL;
 	MSAL_ERROR err;
 	char* auth_value = NULL;
 	char *domain = NULL;
@@ -336,31 +332,15 @@ int main() {
 		printf("Failed fetching token prt\n");
 		goto OUT;
 	}
-	err = broker_unseal_cloud_tgt(client,
-				      prt,
-				      tpm,
-				      machine_key,
-				      &tgt,
-				      &client_key);
-	if (err != SUCCESS) {
-		printf("Failed fetching TGT and client key from PRT\n");
-		goto OUT;
-	}
 
 	printf("Parse the TGT into a Kerberos ccache\n");
-	err = tgt_message(tgt, &as_rep);
+	err = broker_store_cloud_tgt(client,
+				     prt,
+				     "./c_test_ccache",
+				     tpm,
+				     machine_key);
 	if (err != SUCCESS) {
-		printf("Failed fetching the as_rep\n");
-		goto OUT;
-	}
-	err = ccache_init(as_rep, client_key, &ccache);
-	if (err != SUCCESS) {
-		printf("Failed initializing ccache\n");
-		goto OUT;
-	}
-	err = ccache_save_keytab_file(ccache, "./c_test_ccache");
-	if (err != SUCCESS) {
-		printf("Failed storing the ccache to a file\n");
+		printf("Failed storing TGT\n");
 		goto OUT;
 	}
 	cat_file("./c_test_ccache");
@@ -394,10 +374,6 @@ OUT:
 	loadable_identity_key_free(cert_key);
 	loadable_identity_key_free(hello_key);
 	sealed_data_free(prt);
-	as_rep_free(as_rep);
-	tgt_free(tgt);
-	aes_key_free(client_key);
-	ccache_free(ccache);
 	string_free(refresh_token);
 	string_free(access_token);
 	string_free(spn);
