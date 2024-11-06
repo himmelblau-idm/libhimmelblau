@@ -3999,6 +3999,72 @@ impl BrokerClientApplication {
         ccache.save_keytab_file(filename)
     }
 
+    /// Gets the Cloud TGT from a sealed PRT and returns it in a Kerberos CCache
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: Byte representation of a Kerberos CCache
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn fetch_cloud_ccache(
+        &self,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<Vec<u8>, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        if let Some(error) = &prt.tgt_cloud.error {
+            return Err(MsalError::Missing(error.to_string()));
+        }
+        let session_key = prt.session_key()?;
+        let client_key = prt
+            .tgt_cloud
+            .client_key(tpm, &transport_key, &session_key)?;
+        let message = prt.tgt_cloud.message()?;
+        let ccache = FileCredentialCache::new(&message, &client_key)?;
+        Ok(ccache.to_bytes())
+    }
+
+    /// Gets the AD TGT from a sealed PRT and returns it in a Kerberos CCache
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` -  An encrypted primary refresh token that was
+    ///   previously received from the server.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `machine_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: Byte representation of a Kerberos CCache
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn fetch_ad_ccache(
+        &self,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<Vec<u8>, MsalError> {
+        let transport_key = self.transport_key(tpm, machine_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        if let Some(error) = &prt.tgt_ad.error {
+            return Err(MsalError::Missing(error.to_string()));
+        }
+        let session_key = prt.session_key()?;
+        let client_key = prt.tgt_ad.client_key(tpm, &transport_key, &session_key)?;
+        let message = prt.tgt_ad.message()?;
+        let ccache = FileCredentialCache::new(&message, &client_key)?;
+        Ok(ccache.to_bytes())
+    }
+
     /// Get the Kerberos top level names from a sealed PRT
     ///
     /// # Arguments
