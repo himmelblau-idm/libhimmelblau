@@ -50,6 +50,7 @@ picky-asn1 = "0.8.0"
 himmelblau_kerberos_crypto = "0.4.0"
 himmelblau_kerberos_ccache = "0.4.0"
 chrono = "0.4.38"
+percent-encoding = "2.3.1"
 
 [build-dependencies]
 cbindgen = "0.26.0"
