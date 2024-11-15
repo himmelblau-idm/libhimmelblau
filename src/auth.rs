@@ -3656,9 +3656,10 @@ impl BrokerClientApplication {
                     }
                 }
             }
-            Err(MsalError::GeneralFailure(
-                "Authorization code not found!".to_string(),
-            ))
+            Err(MsalError::GeneralFailure(format!(
+                "Authorization code not found in: {}",
+                text
+            )))
         } else {
             let json_resp: ErrorResponse = resp
                 .json()

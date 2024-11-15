@@ -153,6 +153,10 @@ impl Graph {
         self.tenant_id.clone()
     }
 
+    pub fn graph_url(&self) -> String {
+        self.graph_url.clone()
+    }
+
     pub async fn request_user(
         &self,
         access_token: &str,
