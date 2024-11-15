@@ -20,6 +20,7 @@ use crate::aadsts_err_gen::AADSTSError;
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
 #[cfg(feature = "proxyable")]
 use reqwest::Proxy;
@@ -113,6 +114,12 @@ pub const LINUX_BROKER_APP_ID: &str = "b743a22d-6705-4147-8670-d92fa515ee2b";
 #[cfg(feature = "broker")]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 
+/* FIDO Authentication requires specifying a user agent which
+ * MS endorses as appropriate for FIDO */
+#[cfg(feature = "broker")]
+const FIDO_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0";
+
 /* RFC8628: 3.2. Device Authorization Response */
 #[derive(Default, Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct DeviceAuthorizationResponse {
@@ -146,6 +153,8 @@ struct AuthConfig {
     #[serde(rename = "urlPost")]
     url_post: Option<String>,
     canary: String,
+    #[serde(rename = "iAllowedIdentities")]
+    allowed_identities: Option<u32>,
     #[serde(rename = "strServiceExceptionMessage")]
     service_exception_msg: Option<String>,
     pgid: Option<String>,
@@ -153,10 +162,16 @@ struct AuthConfig {
     remaining_days_to_skip_mfa_reg: Option<u32>,
     #[serde(rename = "arrUserProofs")]
     arr_user_proofs: Option<Vec<ArrUserProofs>>,
+    #[serde(rename = "arrFidoAllowList")]
+    fido_allow_list: Option<Vec<String>>,
     #[serde(rename = "urlEndAuth")]
     url_end_auth: Option<String>,
     #[serde(rename = "urlBeginAuth")]
     url_begin_auth: Option<String>,
+    #[serde(rename = "urlFidoLogin")]
+    url_fido_login: Option<String>,
+    #[serde(rename = "urlResume")]
+    url_resume: Option<String>,
     #[serde(rename = "iMaxPollAttempts")]
     max_poll_attempts: Option<u32>,
     #[serde(rename = "iPollingInterval")]
@@ -165,6 +180,10 @@ struct AuthConfig {
     error_code: Option<String>,
     #[serde(rename = "sErrTxt")]
     err_txt: Option<String>,
+    #[serde(rename = "sFidoChallenge")]
+    fido_challenge: Option<String>,
+    #[serde(rename = "sCrossDomainCanary")]
+    cross_domain_canary: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default)]
@@ -181,6 +200,9 @@ pub struct MFAAuthContinue {
     pub url_post: String,
     pub resource: Option<String>,
     pub dag: Option<DeviceAuthorizationResponse>,
+    pub fido_challenge: Option<String>,
+    pub fido_allow_list: Option<Vec<String>>,
+    pub cross_domain_canary: Option<String>,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -1024,6 +1046,11 @@ impl SessionKey {
     }
 }
 
+#[derive(PartialEq)]
+pub enum AuthOption {
+    Fido,
+}
+
 struct ClientApplication {
     client: Client,
     client_id: String,
@@ -1455,6 +1482,126 @@ impl PublicClientApplication {
         ))
     }
 
+    async fn handle_auth_config_fido_get(
+        &self,
+        username: &str,
+        auth_config: &AuthConfig,
+        request_id: &str,
+    ) -> Result<AuthConfig, MsalError> {
+        let url_post = match &auth_config.url_post {
+            Some(url_post) => url_post.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "urlPost missing from auth config".to_string(),
+                ))
+            }
+        };
+
+        let url_resume = match &auth_config.url_resume {
+            Some(url_resume) => url_resume.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "urlResume missing from auth config".to_string(),
+                ))
+            }
+        };
+
+        let credentials_json = match &auth_config.fido_allow_list {
+            Some(fido_allow_list) => {
+                if !fido_allow_list.is_empty() {
+                    &fido_allow_list[0]
+                } else {
+                    return Err(MsalError::GeneralFailure(
+                        "arrFidoAllowList missing from auth config".to_string(),
+                    ));
+                }
+            }
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "arrFidoAllowList missing from auth config".to_string(),
+                ))
+            }
+        };
+
+        let sctx = match &auth_config.sctx {
+            Some(sctx) => sctx.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "sCtx missing from auth config".to_string(),
+                ));
+            }
+        };
+
+        let sft = match &auth_config.sft {
+            Some(sft) => sft.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "sFt missing from auth config".to_string(),
+                ));
+            }
+        };
+
+        let allowed_identities = match &auth_config.allowed_identities {
+            Some(allowed_identities) => format!("{}", allowed_identities),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "iAllowedIdentities missing from auth config".to_string(),
+                ));
+            }
+        };
+
+        let params = [
+            ("flow", "mfa"),
+            ("allowedIdentities", &allowed_identities),
+            ("canary", &sft),
+            ("serverChallenge", &sft),
+            ("postBackUrl", &url_post),
+            ("postBackUrlAad", &url_post),
+            ("cancelUrl", &url_resume),
+            ("resumeUrl", &url_resume),
+            ("correlationId", request_id),
+            ("credentialsJson", credentials_json),
+            ("ctx", &sctx),
+            ("username", username),
+            ("loginCanary", &auth_config.canary),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let url_fido_login = match &auth_config.url_fido_login {
+            Some(url_fido_login) => url_fido_login.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "urlFidoLogin missing from auth config".to_string(),
+                ))
+            }
+        };
+
+        let mut resp = self
+            .client()
+            .post(url_fido_login)
+            .header(header::USER_AGENT, FIDO_USER_AGENT)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        let text;
+        (text, resp) = self.await_working(resp).await?;
+        if resp.status().is_success() {
+            self.parse_auth_config(&text, false)
+        } else {
+            Err(MsalError::GeneralFailure(
+                resp.text()
+                    .await
+                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+            ))
+        }
+    }
+
     async fn handle_auth_config_req_internal(
         &self,
         req_params: &[(&str, &str)],
@@ -1488,7 +1635,7 @@ impl PublicClientApplication {
         let mut resp = self
             .client()
             .post(url)
-            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::USER_AGENT, FIDO_USER_AGENT)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
@@ -1522,7 +1669,7 @@ impl PublicClientApplication {
             .request_auth_config_internal(vec![], &request_id, None)
             .await?;
         let cred_type = self
-            .get_cred_type(username, &auth_config, &request_id)
+            .get_cred_type(username, &auth_config, &request_id, vec![])
             .await?;
         Ok(cred_type.if_exists_result == 0)
     }
@@ -1540,6 +1687,8 @@ impl PublicClientApplication {
     /// * `request_resource` - A resource for obtaining an access token.
     ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
     ///
+    /// * `options` - Authentication options to enable, such as Fido.
+    ///
     /// # Returns
     /// * Success: A MFAAuthContinue containing the information needed to continue the
     ///   authentication flow.
@@ -1550,6 +1699,7 @@ impl PublicClientApplication {
         password: &str,
         scopes: Vec<&str>,
         resource: Option<&str>,
+        options: Vec<AuthOption>,
     ) -> Result<MFAAuthContinue, MsalError> {
         macro_rules! dag_fallback {
             () => {
@@ -1595,7 +1745,7 @@ impl PublicClientApplication {
             }
         };
         let cred_type = match self
-            .get_cred_type(username, &auth_config, &request_id)
+            .get_cred_type(username, &auth_config, &request_id, options)
             .await
         {
             Ok(cred_type) => cred_type,
@@ -1717,13 +1867,13 @@ impl PublicClientApplication {
                         }
                     }
                 }
-                if let Some(pgid) = auth_config.pgid {
+                if let Some(ref pgid) = auth_config.pgid {
                     if pgid == "ConvergedChangePassword" {
                         info!("Password is expired!");
                         dag_fallback!();
                     }
                 }
-                if let Some(arr_user_proofs) = auth_config.arr_user_proofs {
+                if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
                     let default_auth_method =
                         match arr_user_proofs.iter().find(|proof| proof.is_default) {
                             Some(default_auth_method) => default_auth_method,
@@ -1775,30 +1925,41 @@ impl PublicClientApplication {
                             dag_fallback!();
                         }
                     };
-                    let auth_response = match self
-                        .mfa_begin_auth_internal(
-                            &default_auth_method.auth_method_id,
-                            &url_begin_auth,
-                            &sctx,
-                            &sft,
-                            &auth_config.canary,
-                        )
-                        .await
+                    let (flow_token, ctx, msg) = if default_auth_method.auth_method_id == "FidoKey"
                     {
-                        Ok(auth_response) => match auth_response.success {
-                            true => auth_response,
-                            false => {
-                                return Err(MsalError::GeneralFailure(
-                                    "Begin Auth failed".to_string(),
-                                ))
+                        let fido_auth_config = self
+                            .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                            .await?;
+                        auth_config.fido_challenge = fido_auth_config.fido_challenge.clone();
+                        auth_config.session_id = fido_auth_config.session_id.clone();
+                        auth_config.cross_domain_canary =
+                            fido_auth_config.cross_domain_canary.clone();
+                        (sft, sctx, "".to_string())
+                    } else {
+                        let auth_response = match self
+                            .mfa_begin_auth_internal(
+                                &default_auth_method.auth_method_id,
+                                &url_begin_auth,
+                                &sctx,
+                                &sft,
+                                &auth_config.canary,
+                            )
+                            .await
+                        {
+                            Ok(auth_response) => match auth_response.success {
+                                true => auth_response,
+                                false => {
+                                    return Err(MsalError::GeneralFailure(
+                                        "Begin Auth failed".to_string(),
+                                    ))
+                                }
+                            },
+                            Err(e) => {
+                                error!("{:?}", e);
+                                dag_fallback!(e);
                             }
-                        },
-                        Err(e) => {
-                            error!("{:?}", e);
-                            dag_fallback!(e);
-                        }
-                    };
-                    let msg = match default_auth_method.auth_method_id.as_str() {
+                        };
+                        let msg = match default_auth_method.auth_method_id.as_str() {
                             "PhoneAppNotification" => format!("Open your Authenticator app, and enter the number '{}' to sign in.", auth_response.entropy),
                             "PhoneAppOTP" =>
                                 "Please type in the code displayed on your authenticator app from your device:".to_string(),
@@ -1813,19 +1974,24 @@ impl PublicClientApplication {
                                 dag_fallback!();
                             }
                         };
+                        (auth_response.flow_token, auth_response.ctx, msg)
+                    };
                     Ok(MFAAuthContinue {
                         mfa_method: default_auth_method.auth_method_id.clone(),
                         msg,
                         max_poll_attempts: auth_config.max_poll_attempts,
                         polling_interval: auth_config.polling_interval,
                         session_id: auth_config.session_id,
-                        flow_token: auth_response.flow_token,
-                        ctx: auth_response.ctx,
+                        flow_token,
+                        ctx,
                         canary: auth_config.canary,
                         url_end_auth,
                         url_post,
                         resource: resource.map(|s| s.to_string()),
                         dag: None,
+                        fido_challenge: auth_config.fido_challenge.clone(),
+                        fido_allow_list: auth_config.fido_allow_list.clone(),
+                        cross_domain_canary: auth_config.cross_domain_canary.clone(),
                     })
                 } else {
                     info!("No MFA methods found");
@@ -1844,6 +2010,7 @@ impl PublicClientApplication {
         username: &str,
         auth_config: &AuthConfig,
         request_id: &str,
+        options: Vec<AuthOption>,
     ) -> Result<CredType, MsalError> {
         let payload = json!({
             "username": username,
@@ -1851,7 +2018,7 @@ impl PublicClientApplication {
             "checkPhones": true,
             "isRemoteNGCSupported": false,
             "isCookieBannerShown": false,
-            "isFidoSupported": false,
+            "isFidoSupported": options.contains(&AuthOption::Fido),
             "originalRequest": &auth_config.sctx,
             "flowToken": &auth_config.sft,
         });
@@ -1861,6 +2028,7 @@ impl PublicClientApplication {
             .post(format!("{}/GetCredentialType", self.authority()))
             .header(header::CONTENT_TYPE, "application/json; charset=UTF-8")
             .header("client-request-id", request_id)
+            .header(header::USER_AGENT, FIDO_USER_AGENT)
             .json(&payload)
             .send()
             .await
@@ -1917,7 +2085,7 @@ impl PublicClientApplication {
         let resp = self
             .client()
             .get(url)
-            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::USER_AGENT, FIDO_USER_AGENT)
             .send()
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
@@ -1953,7 +2121,7 @@ impl PublicClientApplication {
         let resp = self
             .client()
             .post(url_begin_auth)
-            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::USER_AGENT, FIDO_USER_AGENT)
             .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
             .header("canary", canary)
             .json(&payload)
@@ -2164,6 +2332,104 @@ impl PublicClientApplication {
         }
     }
 
+    async fn exchange_fido_assertion_for_auth_code_internal(
+        &self,
+        assertion: &str,
+        flow: &mut MFAAuthContinue,
+    ) -> Result<String, MsalError> {
+        let cross_domain_canary = flow.cross_domain_canary.clone().ok_or(MsalError::Missing(
+            "sCrossDomainCanary missing from response".to_string(),
+        ))?;
+        let params = [
+            ("type", "23"),
+            ("ps", "23"),
+            ("assertion", assertion),
+            ("lmcCanary", &cross_domain_canary),
+            ("hpgrequestid", &flow.session_id),
+            ("ctx", &flow.ctx),
+            ("canary", &flow.canary),
+            ("flowToken", &flow.flow_token),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let mut resp = self
+            .client()
+            .post(&flow.url_post)
+            .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        let text;
+        (text, resp) = self.await_working(resp).await?;
+        if resp.status().is_redirection() {
+            let document = Html::parse_document(&text);
+            let selector = Selector::parse("a[href]").map_err(|_| {
+                MsalError::RequestFailed("Failed parsing auth code response".to_string())
+            })?;
+            if let Some(element) = document.select(&selector).next() {
+                if let Some(href_encoded) = element.value().attr("href") {
+                    let href = percent_decode_str(href_encoded)
+                        .decode_utf8()
+                        .map_err(|e| {
+                            MsalError::URLFormatFailed(format!("Failed decoding url: {:?}", e))
+                        })?;
+                    if let Ok(url) = Url::parse(&href) {
+                        return url
+                            .query_pairs()
+                            .find_map(|(key, value)| {
+                                if key == "code" {
+                                    Some(value.into_owned())
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or(MsalError::GeneralFailure(
+                                "Authorization code not found".to_string(),
+                            ));
+                    }
+                }
+            }
+            Err(MsalError::GeneralFailure(
+                "Authorization code not found".to_string(),
+            ))
+        } else {
+            let document = Html::parse_document(&text);
+            let selector = Selector::parse("a[href]").map_err(|_| {
+                MsalError::RequestFailed(format!("Failed parsing error response: {}", text))
+            })?;
+            if let Some(element) = document.select(&selector).next() {
+                if let Some(href_encoded) = element.value().attr("href") {
+                    let href = percent_decode_str(href_encoded)
+                        .decode_utf8()
+                        .map_err(|e| {
+                            MsalError::URLFormatFailed(format!("Failed decoding url: {:?}", e))
+                        })?;
+                    if let Ok(url) = Url::parse(&href) {
+                        if let Some(error) = url.query_pairs().find_map(|(key, value)| {
+                            if key == "error_description" {
+                                Some(value.to_string())
+                            } else {
+                                None
+                            }
+                        }) {
+                            return Err(MsalError::RequestFailed(error));
+                        }
+                    }
+                }
+            }
+            Err(MsalError::RequestFailed(format!(
+                "Failed parsing error response: {}",
+                text
+            )))
+        }
+    }
+
     /// Obtain token by a MFA flow object.
     ///
     /// # Arguments
@@ -2171,7 +2437,8 @@ impl PublicClientApplication {
     /// * `username` - Typically a UPN in the form of an email address.
     ///
     /// * `auth_data` - An optional token received for the MFA flow (some MFA
-    ///   flows do not require input).
+    ///   flows do not require input). For a FidoKey flow, this will be a fido
+    ///   assertion.
     ///
     /// * `poll_attempt` - The polling attempt number.
     ///
@@ -2213,59 +2480,71 @@ impl PublicClientApplication {
         }
         match auth_data {
             Some(auth_data) => {
-                let payload = json!({
-                    "AdditionalAuthData": auth_data.trim(),
-                    "AuthMethodId": &flow.mfa_method,
-                    "SessionId": &flow.session_id,
-                    "FlowToken": &flow.flow_token,
-                    "Ctx": &flow.ctx,
-                    "Method": "EndAuth",
-                });
-
-                let resp = self
-                    .client()
-                    .post(&flow.url_end_auth)
-                    .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
-                    .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
-                    .header("canary", &flow.canary)
-                    .json(&payload)
-                    .send()
+                if flow.mfa_method == "FidoKey" {
+                    let auth_code = self
+                        .exchange_fido_assertion_for_auth_code_internal(auth_data, flow)
+                        .await?;
+                    self.exchange_authorization_code_for_access_token_internal(
+                        auth_code,
+                        flow.resource.as_deref(),
+                    )
                     .await
-                    .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-                if resp.status().is_success() {
-                    let text = resp
-                        .text()
-                        .await
-                        .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
-                    // Check for an error in an auth Config
-                    if let Ok(auth_config) = self.parse_auth_config(&text, false) {
-                        if let Some(service_exception_msg) = auth_config.service_exception_msg {
-                            return Err(MsalError::GeneralFailure(
-                                service_exception_msg.to_string(),
-                            ));
-                        }
-                    }
-                    // Parse what should be a json response otherwise
-                    let auth_response: AuthResponse = json_from_str(&text)
-                        .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-                    if auth_response.success {
-                        flow.ctx = auth_response.ctx;
-                        flow.flow_token = auth_response.flow_token;
-                        let auth_code = self.request_authorization_internal(username, flow).await?;
-                        self.exchange_authorization_code_for_access_token_internal(
-                            auth_code,
-                            flow.resource.as_deref(),
-                        )
-                        .await
-                    } else if let Some(msg) = auth_response.message {
-                        Err(MsalError::GeneralFailure(msg))
-                    } else {
-                        Err(MsalError::GeneralFailure("EndAuth failed".to_string()))
-                    }
                 } else {
-                    Err(MsalError::GeneralFailure(
-                        "EndAuth Authentication request failed".to_string(),
-                    ))
+                    let payload = json!({
+                        "AdditionalAuthData": auth_data.trim(),
+                        "AuthMethodId": &flow.mfa_method,
+                        "SessionId": &flow.session_id,
+                        "FlowToken": &flow.flow_token,
+                        "Ctx": &flow.ctx,
+                        "Method": "EndAuth",
+                    });
+
+                    let resp = self
+                        .client()
+                        .post(&flow.url_end_auth)
+                        .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
+                        .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+                        .header("canary", &flow.canary)
+                        .json(&payload)
+                        .send()
+                        .await
+                        .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+                    if resp.status().is_success() {
+                        let text = resp
+                            .text()
+                            .await
+                            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+                        // Check for an error in an auth Config
+                        if let Ok(auth_config) = self.parse_auth_config(&text, false) {
+                            if let Some(service_exception_msg) = auth_config.service_exception_msg {
+                                return Err(MsalError::GeneralFailure(
+                                    service_exception_msg.to_string(),
+                                ));
+                            }
+                        }
+                        // Parse what should be a json response otherwise
+                        let auth_response: AuthResponse = json_from_str(&text)
+                            .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                        if auth_response.success {
+                            flow.ctx = auth_response.ctx;
+                            flow.flow_token = auth_response.flow_token;
+                            let auth_code =
+                                self.request_authorization_internal(username, flow).await?;
+                            self.exchange_authorization_code_for_access_token_internal(
+                                auth_code,
+                                flow.resource.as_deref(),
+                            )
+                            .await
+                        } else if let Some(msg) = auth_response.message {
+                            Err(MsalError::GeneralFailure(msg))
+                        } else {
+                            Err(MsalError::GeneralFailure("EndAuth failed".to_string()))
+                        }
+                    } else {
+                        Err(MsalError::GeneralFailure(
+                            "EndAuth Authentication request failed".to_string(),
+                        ))
+                    }
                 }
             }
             None => {
@@ -2763,6 +3042,8 @@ impl BrokerClientApplication {
     ///
     /// * `password` - The password.
     ///
+    /// * `options` - Authentication options to enable, such as Fido.
+    ///
     /// # Returns
     /// * Success: A MFAAuthContinue containing the information needed to continue the
     ///   authentication flow.
@@ -2771,10 +3052,17 @@ impl BrokerClientApplication {
         &self,
         username: &str,
         password: &str,
+        options: Vec<AuthOption>,
     ) -> Result<MFAAuthContinue, MsalError> {
         let drs_resource = "https://enrollment.manage.microsoft.com/";
         self.app
-            .initiate_acquire_token_by_mfa_flow(username, password, vec![], Some(drs_resource))
+            .initiate_acquire_token_by_mfa_flow(
+                username,
+                password,
+                vec![],
+                Some(drs_resource),
+                options,
+            )
             .await
     }
 
