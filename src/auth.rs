@@ -532,6 +532,40 @@ impl UserToken {
             )),
         }
     }
+
+    /// Check if the access token amr contains an NGC MFA authorization
+    ///
+    /// Sometimes it isn't sufficient simply to know if MFA has been
+    /// performed. Key enrollment (such as a Hello Key), for example,
+    /// explicitly requires an NGC MFA authorization.
+    ///
+    /// # Returns
+    ///
+    /// * Success: Whether or not the token has an NGC MFA authorization.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn amr_ngcmfa(&self) -> Result<bool, MsalError> {
+        match &self.access_token {
+            Some(access_token) => {
+                let mut siter = access_token.splitn(3, '.');
+                siter.next(); // Ignore the header
+                let payload: AccessTokenPayload = json_from_str(
+                    &String::from_utf8(
+                        URL_SAFE_NO_PAD
+                            .decode(siter.next().ok_or_else(|| {
+                                MsalError::InvalidParse("Payload not present".to_string())
+                            })?)
+                            .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?,
+                    )
+                    .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                Ok(payload.amr.iter().any(|s| s == "ngcmfa"))
+            }
+            None => Err(MsalError::GeneralFailure(
+                "No access token available for UserToken".to_string(),
+            )),
+        }
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -3601,6 +3635,13 @@ impl BrokerClientApplication {
         pin: &str,
     ) -> Result<LoadableIdentityKey, MsalError> {
         debug!("Provisioning a Hello for Business Key");
+
+        if !token.amr_ngcmfa()? {
+            error!("Key provisioning is impossible without an ngcmfa amr!");
+            return Err(MsalError::GeneralFailure(
+                "Token is missing an ngcmfa amr".to_string(),
+            ));
+        }
 
         let pin = PinValue::new(pin)
             .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
