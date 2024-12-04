@@ -113,6 +113,8 @@ pub const BROKER_APP_ID: &str = "29d9ed98-a469-4536-ade2-f981bc1d605e";
 pub const LINUX_BROKER_APP_ID: &str = "b743a22d-6705-4147-8670-d92fa515ee2b";
 #[cfg(feature = "broker")]
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
+#[cfg(feature = "broker")]
+const AZURE_PORTAL_APP_ID: &str = "c44b4083-3bb0-49c1-b47d-974e53cbdf3c";
 
 /* FIDO Authentication requires specifying a user agent which
  * MS endorses as appropriate for FIDO */
@@ -524,6 +526,40 @@ impl UserToken {
                 )
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
                 Ok(payload.amr.iter().any(|s| s == "ngcmfa" || s == "mfa"))
+            }
+            None => Err(MsalError::GeneralFailure(
+                "No access token available for UserToken".to_string(),
+            )),
+        }
+    }
+
+    /// Check if the access token amr contains an NGC MFA authorization
+    ///
+    /// Sometimes it isn't sufficient simply to know if MFA has been
+    /// performed. Key enrollment (such as a Hello Key), for example,
+    /// explicitly requires an NGC MFA authorization.
+    ///
+    /// # Returns
+    ///
+    /// * Success: Whether or not the token has an NGC MFA authorization.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn amr_ngcmfa(&self) -> Result<bool, MsalError> {
+        match &self.access_token {
+            Some(access_token) => {
+                let mut siter = access_token.splitn(3, '.');
+                siter.next(); // Ignore the header
+                let payload: AccessTokenPayload = json_from_str(
+                    &String::from_utf8(
+                        URL_SAFE_NO_PAD
+                            .decode(siter.next().ok_or_else(|| {
+                                MsalError::InvalidParse("Payload not present".to_string())
+                            })?)
+                            .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?,
+                    )
+                    .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                Ok(payload.amr.iter().any(|s| s == "ngcmfa"))
             }
             None => Err(MsalError::GeneralFailure(
                 "No access token available for UserToken".to_string(),
@@ -1705,14 +1741,15 @@ impl PublicClientApplication {
             () => {
                 let mut dag_scopes: Vec<String> =
                     scopes.into_iter().map(|s| s.to_string()).collect();
-                if let Some(resource) = resource {
-                    dag_scopes.push(format!("{}/.default", resource));
-                }
+                // Enforce MFA via the azure portal
+                dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
                 info!("MFA auth failed, falling back to Device Authorization Grant.");
                 let flow = self
                     .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
                     .await?;
-                return Ok(flow.into());
+                let mut flow: MFAAuthContinue = flow.into();
+                flow.resource = resource.map(|s| s.to_string());
+                return Ok(flow);
             };
             ($err:expr) => {
                 // If we got an AADSTSError, then we don't want to perform a
@@ -1723,14 +1760,15 @@ impl PublicClientApplication {
 
                 let mut dag_scopes: Vec<String> =
                     scopes.into_iter().map(|s| s.to_string()).collect();
-                if let Some(resource) = resource {
-                    dag_scopes.push(format!("{}/.default", resource));
-                }
+                // Enforce MFA via the azure portal
+                dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
                 info!("MFA auth failed, falling back to Device Authorization Grant.");
                 let flow = self
                     .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
                     .await?;
-                return Ok(flow.into());
+                let mut flow: MFAAuthContinue = flow.into();
+                flow.resource = resource.map(|s| s.to_string());
+                return Ok(flow);
             };
         }
         let request_id = Uuid::new_v4().to_string();
@@ -2465,6 +2503,14 @@ impl PublicClientApplication {
                             "The authenticating user did not match".to_string(),
                         ));
                     }
+                    // Exchange the Portal MFA token for the requested token
+                    let token = if let Some(resource) = &flow.resource {
+                        let scope = format!("{}/.default", resource);
+                        self.acquire_token_by_refresh_token(&token.refresh_token, vec![&scope])
+                            .await?
+                    } else {
+                        token
+                    };
                     Ok(token)
                 }
                 Err(MsalError::AcquireTokenFailed(ref resp)) => {
@@ -2998,8 +3044,8 @@ impl BrokerClientApplication {
     pub async fn initiate_device_flow_for_device_enrollment(
         &self,
     ) -> Result<DeviceAuthorizationResponse, MsalError> {
-        let drs_scope = "https://enrollment.manage.microsoft.com/.default";
-        self.app.initiate_device_flow(vec![drs_scope]).await
+        let portal_scope = format!("{}/.default", AZURE_PORTAL_APP_ID);
+        self.app.initiate_device_flow(vec![&portal_scope]).await
     }
 
     /// Obtain token for enrollment by a device flow object, with customizable
@@ -3018,7 +3064,11 @@ impl BrokerClientApplication {
         &self,
         flow: DeviceAuthorizationResponse,
     ) -> Result<UserToken, MsalError> {
-        self.app.acquire_token_by_device_flow(flow).await
+        let portal_token = self.app.acquire_token_by_device_flow(flow).await?;
+        let drs_scope = "https://enrollment.manage.microsoft.com/.default";
+        self.app
+            .acquire_token_by_refresh_token(&portal_token.refresh_token, vec![&drs_scope])
+            .await
     }
 
     /// Check if a user exists in Azure Entra ID
@@ -3585,6 +3635,13 @@ impl BrokerClientApplication {
         pin: &str,
     ) -> Result<LoadableIdentityKey, MsalError> {
         debug!("Provisioning a Hello for Business Key");
+
+        if !token.amr_ngcmfa()? {
+            error!("Key provisioning is impossible without an ngcmfa amr!");
+            return Err(MsalError::GeneralFailure(
+                "Token is missing an ngcmfa amr".to_string(),
+            ));
+        }
 
         let pin = PinValue::new(pin)
             .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
