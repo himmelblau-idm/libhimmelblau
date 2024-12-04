@@ -1642,6 +1642,7 @@ impl PublicClientApplication {
         &self,
         req_params: &[(&str, &str)],
         auth_config: &AuthConfig,
+        options: &[AuthOption],
     ) -> Result<AuthConfig, MsalError> {
         let payload = req_params
             .iter()
@@ -1668,10 +1669,15 @@ impl PublicClientApplication {
             false => url_post.clone(),
         };
 
+        let user_agent = if options.contains(&AuthOption::Fido) {
+            FIDO_USER_AGENT
+        } else {
+            env!("CARGO_PKG_NAME")
+        };
         let mut resp = self
             .client()
             .post(url)
-            .header(header::USER_AGENT, FIDO_USER_AGENT)
+            .header(header::USER_AGENT, user_agent)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
             .send()
@@ -1705,7 +1711,7 @@ impl PublicClientApplication {
             .request_auth_config_internal(vec![], &request_id, None)
             .await?;
         let cred_type = self
-            .get_cred_type(username, &auth_config, &request_id, vec![])
+            .get_cred_type(username, &auth_config, &request_id, &[])
             .await?;
         Ok(cred_type.if_exists_result == 0)
     }
@@ -1786,7 +1792,7 @@ impl PublicClientApplication {
             }
         };
         let cred_type = match self
-            .get_cred_type(username, &auth_config, &request_id, options)
+            .get_cred_type(username, &auth_config, &request_id, &options)
             .await
         {
             Ok(cred_type) => cred_type,
@@ -1838,7 +1844,7 @@ impl PublicClientApplication {
             ("client-request-id", &request_id),
         ];
         match self
-            .handle_auth_config_req_internal(&params, &auth_config)
+            .handle_auth_config_req_internal(&params, &auth_config, &options)
             .await
         {
             Ok(mut auth_config) => {
@@ -1870,7 +1876,7 @@ impl PublicClientApplication {
                             ("client-request-id", &request_id),
                         ];
                         auth_config = match self
-                            .handle_auth_config_req_internal(&params, &auth_config)
+                            .handle_auth_config_req_internal(&params, &auth_config, &options)
                             .await
                         {
                             Ok(auth_config) => auth_config,
@@ -1893,7 +1899,7 @@ impl PublicClientApplication {
                                 ("client-request-id", &request_id),
                             ];
                             auth_config = match self
-                                .handle_auth_config_req_internal(&params, &auth_config)
+                                .handle_auth_config_req_internal(&params, &auth_config, &options)
                                 .await
                             {
                                 Ok(auth_config) => auth_config,
@@ -2051,7 +2057,7 @@ impl PublicClientApplication {
         username: &str,
         auth_config: &AuthConfig,
         request_id: &str,
-        options: Vec<AuthOption>,
+        options: &[AuthOption],
     ) -> Result<CredType, MsalError> {
         let payload = json!({
             "username": username,
