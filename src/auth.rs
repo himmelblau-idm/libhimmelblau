@@ -1754,8 +1754,11 @@ impl PublicClientApplication {
             ($err:expr) => {
                 // If we got an AADSTSError, then we don't want to perform a
                 // fallback, since the authentication legitimately failed.
-                if let MsalError::AADSTSError(_) = $err {
-                    return Err($err);
+                if let MsalError::AADSTSError(ref e) = $err {
+                    if e.code != 16000 {
+                        // AADSTS16000: InteractionRequired
+                        return Err($err);
+                    }
                 }
 
                 let mut dag_scopes: Vec<String> =
