@@ -20,6 +20,7 @@ use crate::aadsts_err_gen::AADSTSError;
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use browser_window::{application::*, browser::*};
 use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
 #[cfg(feature = "proxyable")]
@@ -33,6 +34,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::sync::mpsc::channel;
 use std::thread::sleep;
 use std::time::Duration;
 use tracing::{error, info};
@@ -2340,13 +2342,18 @@ impl PublicClientApplication {
         &self,
         authorization_code: String,
         resource: Option<&str>,
+        custom_redirect_uri: Option<&str>,
     ) -> Result<UserToken, MsalError> {
-        let redirect_uri = self.app.get_auth_redirect_uri(None, resource);
+        let redirect_uri = if let Some(custom_redirect_uri) = custom_redirect_uri {
+            custom_redirect_uri
+        } else {
+            &self.app.get_auth_redirect_uri(None, resource)
+        };
         let params = [
             ("client_id", self.client_id()),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
-            ("redirect_uri", &redirect_uri),
+            ("redirect_uri", redirect_uri),
         ];
         let payload = params
             .iter()
@@ -2542,6 +2549,7 @@ impl PublicClientApplication {
                     self.exchange_authorization_code_for_access_token_internal(
                         auth_code,
                         flow.resource.as_deref(),
+                        None,
                     )
                     .await
                 } else {
@@ -2588,6 +2596,7 @@ impl PublicClientApplication {
                             self.exchange_authorization_code_for_access_token_internal(
                                 auth_code,
                                 flow.resource.as_deref(),
+                                None,
                             )
                             .await
                         } else if let Some(msg) = auth_response.message {
@@ -2654,6 +2663,7 @@ impl PublicClientApplication {
                             .exchange_authorization_code_for_access_token_internal(
                                 auth_code,
                                 flow.resource.as_deref(),
+                                None,
                             )
                             .await;
                     } else if !auth_response.retry.ok_or(MsalError::GeneralFailure(
@@ -2673,6 +2683,92 @@ impl PublicClientApplication {
                 }
             }
         }
+    }
+
+    /// Obtain token interactively.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `resource` - A resource for obtaining an access token.
+    ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_interactive(
+        &self,
+        username: &str,
+        resource: Option<&str>,
+    ) -> Result<UserToken, MsalError> {
+        // We use this redirect because it's the only approved https redirect
+        let broker_redirect = "https://login.microsoftonline.com/applebroker/msauth";
+        let params = [
+            ("client_id", self.client_id()),
+            ("login_hint", username),
+            ("response_type", "code"),
+            ("redirect_uri", broker_redirect),
+            ("response_mode", "query"),
+            (
+                "resource",
+                (resource.unwrap_or("https://graph.microsoft.com")),
+            ),
+            ("amr_values", "ngcmfa"),
+        ];
+        let url = Url::parse_with_params(
+            &format!("{}/oauth2/authorize", self.authority()),
+            &params.to_vec(),
+        )
+        .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+
+        let application = Application::initialize(&ApplicationSettings::default())
+            .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
+        let runtime = application.start();
+
+        let (tx, rx) = channel();
+        runtime.run_async(|app| async move {
+            let mut bwb = BrowserWindowBuilder::new(Source::Url(url.to_string()));
+            bwb.dev_tools(false);
+            bwb.size(800, 600);
+            bwb.title("Azure Entra Id Interactive Authentication");
+            let bw = bwb.build_async(&app).await;
+            bw.show();
+
+            while !bw.url().contains(broker_redirect) {
+                app.sleep(Duration::from_millis(100)).await;
+            }
+
+            let redirect = bw.url().to_string();
+            tx.send(redirect).unwrap_or_else(|e| {
+                error!("{:?}", e);
+            });
+            app.exit(0);
+        });
+
+        let redirect = rx.recv_timeout(Duration::from_secs(900)).map_err(|e| {
+            error!("{:?}", e);
+            MsalError::GeneralFailure(
+                "Failed receiving redirect from interactive acquire".to_string(),
+            )
+        })?;
+        let url = Url::parse(&redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+        let (_, auth_code) =
+            url.query_pairs()
+                .find(|(k, _)| k == "code")
+                .ok_or(MsalError::InvalidParse(
+                    "Authorization code missing from redirect".to_string(),
+                ))?;
+
+        application.finish();
+
+        self.exchange_authorization_code_for_access_token_internal(
+            auth_code.to_string(),
+            resource,
+            Some(broker_redirect),
+        )
+        .await
     }
 
     fn get_auth_redirect_uri(&self, client_id: Option<&str>, resource: Option<&str>) -> String {
@@ -4474,5 +4570,25 @@ impl BrokerClientApplication {
             .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
         json_from_slice(&prt_data)
             .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))
+    }
+
+    /// Obtain token interactively for device enrollment.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_interactive_for_device_enrollment(
+        &self,
+        username: &str,
+    ) -> Result<UserToken, MsalError> {
+        let resource = "https://enrollment.manage.microsoft.com";
+        self.app
+            .acquire_token_interactive(username, Some(resource))
+            .await
     }
 }
