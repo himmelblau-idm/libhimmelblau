@@ -20,7 +20,6 @@ use crate::aadsts_err_gen::AADSTSError;
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use browser_window::{application::*, browser::*};
 use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
 #[cfg(feature = "proxyable")]
@@ -34,13 +33,17 @@ use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
-use std::sync::mpsc::channel;
 use std::thread::sleep;
 use std::time::Duration;
 use tracing::{error, info};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+#[cfg(feature = "interactive")]
+use browser_window::{application::*, browser::*};
+#[cfg(feature = "interactive")]
+use std::sync::mpsc::channel;
 
 #[cfg(feature = "broker")]
 use compact_jwt::compact::JweCompact;
@@ -2698,6 +2701,7 @@ impl PublicClientApplication {
     ///
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "interactive")]
     pub async fn acquire_token_interactive(
         &self,
         username: &str,
@@ -4582,6 +4586,7 @@ impl BrokerClientApplication {
     ///
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[cfg(feature = "interactive")]
     pub async fn acquire_token_interactive_for_device_enrollment(
         &self,
         username: &str,
