@@ -20,6 +20,7 @@ use crate::error::MsalError;
 use reqwest::{header, Client, Url};
 use serde::Deserialize;
 use serde_json::{json, to_string_pretty};
+use tokio::sync::RwLock;
 use tracing::{debug, error};
 
 #[derive(Debug, Deserialize)]
@@ -65,16 +66,16 @@ pub struct GroupObject {
 
 pub struct Graph {
     client: Client,
-    authority_host: String,
-    tenant_id: String,
-    graph_url: String,
+    odc_provider: String,
+    domain: String,
+    federation_provider: RwLock<Option<FederationProvider>>,
 }
 
 async fn request_federation_provider(
     client: &Client,
     odc_provider: &str,
     domain: &str,
-) -> Result<(String, String, String), MsalError> {
+) -> Result<FederationProvider, MsalError> {
     let url = Url::parse_with_params(
         &format!("https://{}/odc/v2.1/federationProvider", odc_provider),
         &[("domain", domain)],
@@ -91,20 +92,42 @@ async fn request_federation_provider(
             .json()
             .await
             .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
-        debug!("Discovered tenant_id: {}", json_resp.tenant_id);
-        debug!("Discovered authority_host: {}", json_resp.authority_host);
-        debug!("Discovered graph: {}", json_resp.graph);
-        Ok((
-            json_resp.authority_host,
-            json_resp.tenant_id,
-            json_resp.graph,
-        ))
+        debug!("Discovered: {:?}", json_resp);
+        Ok(json_resp)
     } else {
         Err(MsalError::RequestFailed(format!(
             "Federation Provider request failed: {}",
             resp.status(),
         )))
     }
+}
+
+macro_rules! federation_provider_or_none {
+    ($client:expr, $odc_provider:expr, $domain:expr) => {{
+        match request_federation_provider(&$client, $odc_provider, $domain).await {
+            Ok(resp) => Some(resp),
+            Err(e) => {
+                debug!("{:?}", e);
+                None
+            }
+        }
+    }};
+}
+
+macro_rules! federation_provider_fetch {
+    ($graph:ident, $val:ident) => {{
+        let mut federation_provider = $graph.federation_provider.write().await;
+        if federation_provider.is_none() {
+            *federation_provider =
+                federation_provider_or_none!($graph.client, &$graph.odc_provider, &$graph.domain);
+        }
+        match &*$graph.federation_provider.read().await {
+            Some(federation_provider) => Ok(federation_provider.$val.clone()),
+            None => Err(MsalError::RequestFailed(
+                "federation provider not set".to_string(),
+            )),
+        }
+    }};
 }
 
 impl Graph {
@@ -119,42 +142,42 @@ impl Graph {
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
 
-        let (authority_host, tenant_id, graph_url) = if let Some(authority_host) = authority_host {
+        let federation_provider = if let Some(authority_host) = authority_host {
             if let Some(tenant_id) = tenant_id {
                 if let Some(graph_url) = graph_url {
-                    (
-                        authority_host.to_string(),
-                        tenant_id.to_string(),
-                        graph_url.to_string(),
-                    )
+                    Some(FederationProvider {
+                        authority_host: authority_host.to_string(),
+                        tenant_id: tenant_id.to_string(),
+                        graph: graph_url.to_string(),
+                    })
                 } else {
-                    request_federation_provider(&client, odc_provider, domain).await?
+                    federation_provider_or_none!(client, odc_provider, domain)
                 }
             } else {
-                request_federation_provider(&client, odc_provider, domain).await?
+                federation_provider_or_none!(client, odc_provider, domain)
             }
         } else {
-            request_federation_provider(&client, odc_provider, domain).await?
+            federation_provider_or_none!(client, odc_provider, domain)
         };
 
         Ok(Graph {
             client,
-            authority_host,
-            tenant_id,
-            graph_url,
+            odc_provider: odc_provider.to_string(),
+            domain: domain.to_string(),
+            federation_provider: RwLock::new(federation_provider),
         })
     }
 
-    pub fn authority_host(&self) -> String {
-        self.authority_host.clone()
+    pub async fn authority_host(&self) -> Result<String, MsalError> {
+        federation_provider_fetch!(self, authority_host)
     }
 
-    pub fn tenant_id(&self) -> String {
-        self.tenant_id.clone()
+    pub async fn tenant_id(&self) -> Result<String, MsalError> {
+        federation_provider_fetch!(self, tenant_id)
     }
 
-    pub fn graph_url(&self) -> String {
-        self.graph_url.clone()
+    pub async fn graph_url(&self) -> Result<String, MsalError> {
+        federation_provider_fetch!(self, graph)
     }
 
     pub async fn request_user(
@@ -162,7 +185,7 @@ impl Graph {
         access_token: &str,
         upn: &str,
     ) -> Result<UserObject, MsalError> {
-        let url = &format!("{}/v1.0/users/{}", self.graph_url, upn);
+        let url = &format!("{}/v1.0/users/{}", self.graph_url().await?, upn);
         let resp = self
             .client
             .get(url)
@@ -185,7 +208,7 @@ impl Graph {
         &self,
         access_token: &str,
     ) -> Result<Vec<DirectoryObject>, MsalError> {
-        let url = &format!("{}/v1.0/me/memberOf", self.graph_url);
+        let url = &format!("{}/v1.0/me/memberOf", self.graph_url().await?);
         let resp = self
             .client
             .get(url)
@@ -225,11 +248,12 @@ impl Graph {
     ) -> Result<(), MsalError> {
         let url = &format!(
             "{}/v1.0/devices/{}/registeredOwners/$ref",
-            self.graph_url, device_id
+            self.graph_url().await?,
+            device_id
         );
         let user_obj = self.request_user(access_token, upn).await?;
         let payload = json!({
-            "@odata.id": format!("{}/v1.0/directoryObjects/{}", self.graph_url, user_obj.id),
+            "@odata.id": format!("{}/v1.0/directoryObjects/{}", self.graph_url().await?, user_obj.id),
         });
         if let Ok(pretty) = to_string_pretty(&payload) {
             debug!("POST {}: {}", url, pretty);
@@ -256,7 +280,7 @@ impl Graph {
         displayname: &str,
     ) -> Result<GroupObject, MsalError> {
         let url = Url::parse_with_params(
-            &format!("{}/v1.0/groups", self.graph_url),
+            &format!("{}/v1.0/groups", self.graph_url().await?),
             &[("$filter", format!("displayName eq '{}'", displayname))],
         )
         .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
