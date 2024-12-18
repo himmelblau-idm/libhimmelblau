@@ -116,11 +116,19 @@ macro_rules! federation_provider_or_none {
 
 macro_rules! federation_provider_fetch {
     ($graph:ident, $val:ident) => {{
-        let mut federation_provider = $graph.federation_provider.write().await;
-        if federation_provider.is_none() {
-            *federation_provider =
-                federation_provider_or_none!($graph.client, &$graph.odc_provider, &$graph.domain);
+        {
+            let mut federation_provider = $graph.federation_provider.write().await;
+            if federation_provider.is_none() {
+                *federation_provider = federation_provider_or_none!(
+                    $graph.client,
+                    &$graph.odc_provider,
+                    &$graph.domain
+                );
+            }
         }
+        // This nested scope forces the drop of the federation_provider write
+        // lock, otherwise we deadlock when we request a read lock next.
+
         match &*$graph.federation_provider.read().await {
             Some(federation_provider) => Ok(federation_provider.$val.clone()),
             None => Err(MsalError::RequestFailed(
