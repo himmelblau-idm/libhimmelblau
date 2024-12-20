@@ -20,6 +20,8 @@ use crate::error::MsalError;
 use reqwest::{header, Client, Url};
 use serde::Deserialize;
 use serde_json::{json, to_string_pretty};
+use std::fs::File;
+use std::io::Write;
 use tokio::sync::RwLock;
 use tracing::{debug, error};
 
@@ -305,6 +307,33 @@ impl Graph {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(json_resp)
+        } else {
+            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+        }
+    }
+
+    pub async fn fetch_user_profile_photo(
+        &self,
+        access_token: &str,
+        mut file: File,
+    ) -> Result<(), MsalError> {
+        let url = format!("{}/v1.0/me/photo/$value", self.graph_url().await?);
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        if resp.status().is_success() {
+            let content = resp
+                .bytes()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("Failed to read bytes: {:?}", e)))?;
+            file.write_all(&content)
+                .map_err(|e| MsalError::GeneralFailure(format!("Failed to write file: {:?}", e)))?;
+
+            Ok(())
         } else {
             Err(MsalError::RequestFailed(format!("{}", resp.status())))
         }
