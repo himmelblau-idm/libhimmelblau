@@ -1837,8 +1837,12 @@ impl PublicClientApplication {
                 // If we got an AADSTSError, then we don't want to perform a
                 // fallback, since the authentication legitimately failed.
                 if let MsalError::AADSTSError(ref e) = $err {
-                    if e.code != 16000 {
-                        // AADSTS16000: InteractionRequired
+                    // There are a couple of exceptions to the rule. If
+                    // interaction is required, or MFA enrollment is required,
+                    // continue with the fallback.
+                    // AADSTS16000: InteractionRequired
+                    // AADSTS50072: UserStrongAuthEnrollmentRequiredInterrupt
+                    if ![16000, 50072].contains(&e.code) {
                         return Err($err);
                     }
                 }
