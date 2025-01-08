@@ -24,7 +24,7 @@ use std::fmt;
 
 #[derive(Serialize, Debug)]
 pub struct AADSTSError {
-    pub(crate) code: u32,
+    pub code: u32,
     description: &'static str,
 }
 
