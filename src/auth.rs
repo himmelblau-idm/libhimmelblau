@@ -1126,6 +1126,7 @@ impl SessionKey {
 pub enum AuthOption {
     Fido,
     Passwordless,
+    NoDAGFallback,
 }
 
 struct ClientApplication {
@@ -1821,43 +1822,53 @@ impl PublicClientApplication {
     ) -> Result<MFAAuthContinue, MsalError> {
         macro_rules! dag_fallback {
             () => {
-                let mut dag_scopes: Vec<String> =
-                    scopes.into_iter().map(|s| s.to_string()).collect();
-                // Enforce MFA via the azure portal
-                dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
-                info!("MFA auth failed, falling back to Device Authorization Grant.");
-                let flow = self
-                    .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
-                    .await?;
-                let mut flow: MFAAuthContinue = flow.into();
-                flow.resource = resource.map(|s| s.to_string());
-                return Ok(flow);
+                if !options.contains(&AuthOption::NoDAGFallback) {
+                    let mut dag_scopes: Vec<String> =
+                        scopes.into_iter().map(|s| s.to_string()).collect();
+                    // Enforce MFA via the azure portal
+                    dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    info!("MFA auth failed, falling back to Device Authorization Grant.");
+                    let flow = self
+                        .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
+                        .await?;
+                    let mut flow: MFAAuthContinue = flow.into();
+                    flow.resource = resource.map(|s| s.to_string());
+                    return Ok(flow);
+                } else {
+                    return Err(MsalError::GeneralFailure(
+                        "MFA failed and DAG fallback is disabled".to_string(),
+                    ));
+                }
             };
             ($err:expr) => {
-                // If we got an AADSTSError, then we don't want to perform a
-                // fallback, since the authentication legitimately failed.
-                if let MsalError::AADSTSError(ref e) = $err {
-                    // There are a couple of exceptions to the rule. If
-                    // interaction is required, or MFA enrollment is required,
-                    // continue with the fallback.
-                    // AADSTS16000: InteractionRequired
-                    // AADSTS50072: UserStrongAuthEnrollmentRequiredInterrupt
-                    if ![16000, 50072].contains(&e.code) {
-                        return Err($err);
+                if !options.contains(&AuthOption::NoDAGFallback) {
+                    // If we got an AADSTSError, then we don't want to perform a
+                    // fallback, since the authentication legitimately failed.
+                    if let MsalError::AADSTSError(ref e) = $err {
+                        // There are a couple of exceptions to the rule. If
+                        // interaction is required, or MFA enrollment is required,
+                        // continue with the fallback.
+                        // AADSTS16000: InteractionRequired
+                        // AADSTS50072: UserStrongAuthEnrollmentRequiredInterrupt
+                        if ![16000, 50072].contains(&e.code) {
+                            return Err($err);
+                        }
                     }
-                }
 
-                let mut dag_scopes: Vec<String> =
-                    scopes.into_iter().map(|s| s.to_string()).collect();
-                // Enforce MFA via the azure portal
-                dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
-                info!("MFA auth failed, falling back to Device Authorization Grant.");
-                let flow = self
-                    .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
-                    .await?;
-                let mut flow: MFAAuthContinue = flow.into();
-                flow.resource = resource.map(|s| s.to_string());
-                return Ok(flow);
+                    let mut dag_scopes: Vec<String> =
+                        scopes.into_iter().map(|s| s.to_string()).collect();
+                    // Enforce MFA via the azure portal
+                    dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    info!("MFA auth failed, falling back to Device Authorization Grant.");
+                    let flow = self
+                        .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
+                        .await?;
+                    let mut flow: MFAAuthContinue = flow.into();
+                    flow.resource = resource.map(|s| s.to_string());
+                    return Ok(flow);
+                } else {
+                    return Err($err);
+                }
             };
         }
         let request_id = Uuid::new_v4().to_string();
