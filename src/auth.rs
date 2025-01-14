@@ -4432,6 +4432,11 @@ impl BrokerClientApplication {
                     }
                 }
             }
+            // MS may have returned an AuthConfig here with an error attached.
+            // Return the error from that AuthConfig if possible.
+            if let Err(MsalError::AADSTSError(e)) = self.app.parse_auth_config(&text, false) {
+                return Err(MsalError::AADSTSError(e));
+            }
             Err(MsalError::GeneralFailure(format!(
                 "Authorization code not found in: {}",
                 text
