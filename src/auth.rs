@@ -197,6 +197,10 @@ struct AuthConfig {
     url_get_credential_type: Option<String>,
     #[serde(rename = "urlSessionState")]
     url_session_state: Option<String>,
+    #[serde(rename = "urlAsyncSsprBegin")]
+    url_async_sspr_begin: Option<String>,
+    #[serde(rename = "urlAsyncSsprPoll")]
+    url_async_sspr_poll: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default)]
@@ -1353,6 +1357,22 @@ impl AuthInit {
     }
 }
 
+#[derive(Deserialize)]
+struct SsprResponse {
+    #[serde(rename = "IsJobPending")]
+    is_job_pending: bool,
+    #[serde(rename = "Ctx")]
+    ctx: String,
+    #[serde(rename = "FlowToken")]
+    flow_token: String,
+    #[serde(rename = "CoupledDataCenter")]
+    coupled_data_center: String,
+    #[serde(rename = "CoupledScaleUnit")]
+    coupled_scale_unit: String,
+    #[serde(rename = "ErrorMessage")]
+    error_message: Option<String>,
+}
+
 pub struct PublicClientApplication {
     app: ClientApplication,
 }
@@ -1534,7 +1554,12 @@ impl PublicClientApplication {
         }
     }
 
-    fn parse_auth_config(&self, text: &str, initial: bool) -> Result<AuthConfig, MsalError> {
+    fn parse_auth_config(
+        &self,
+        text: &str,
+        initial: bool,
+        password_change: bool,
+    ) -> Result<AuthConfig, MsalError> {
         let document = Html::parse_document(text);
         for script in
             document.select(&Selector::parse("script").map_err(|e| {
@@ -1568,6 +1593,13 @@ impl PublicClientApplication {
                             return Err(MsalError::AADSTSError(AADSTSError::new(error_code)));
                         }
                     }
+                    if !password_change {
+                        if let Some(ref pgid) = auth_config.pgid {
+                            if pgid == "ConvergedChangePassword" {
+                                return Err(MsalError::ChangePassword);
+                            }
+                        }
+                    }
                     return Ok(auth_config);
                 }
             }
@@ -1575,6 +1607,202 @@ impl PublicClientApplication {
         Err(MsalError::GeneralFailure(
             "Auth config was not found".to_string(),
         ))
+    }
+
+    /// Change the password for an Entra Id user.
+    ///
+    /// This function allows changing the password for an Entra Id user. It
+    /// requires the current username and password to validate the user's
+    /// identity before updating the password.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The username associated with the account for which the
+    ///   password is being changed.
+    /// * `password` - The current password for the account.
+    /// * `new_password` - The new password that will replace the current
+    ///   password.
+    ///
+    /// # Returns
+    ///
+    /// * Success: An empty Ok result indicating the password has been changed
+    ///   successfully.
+    /// * Failure: An MsalError, indicating problems such as authentication
+    ///   failures or password complexity requirements not met.
+    pub async fn handle_password_change(
+        &self,
+        username: &str,
+        password: &str,
+        new_password: &str,
+    ) -> Result<(), MsalError> {
+        let request_id = Uuid::new_v4().to_string();
+        let auth_config = self
+            .request_auth_config_internal(vec![], &request_id, None)
+            .await?;
+        let ctx = auth_config
+            .sctx
+            .clone()
+            .ok_or(MsalError::GeneralFailure("ctx is missing".to_string()))?;
+        let flow_token = auth_config
+            .sft
+            .clone()
+            .ok_or(MsalError::GeneralFailure("sft is missing".to_string()))?;
+
+        let params = vec![
+            ("login", username),
+            ("passwd", password),
+            ("ctx", &ctx),
+            ("flowToken", &flow_token),
+            ("canary", &auth_config.canary),
+            ("client_id", self.client_id()),
+            ("client-request-id", &request_id),
+        ];
+        let auth_config = self
+            .handle_auth_config_req_internal(&params, &auth_config, &[], true)
+            .await?;
+
+        let payload = json!({
+            "Ctx": &auth_config
+                    .sctx
+                    .ok_or(MsalError::GeneralFailure("ctx is missing".to_string()))?,
+            "FlowToken": &auth_config
+                    .sft
+                    .ok_or(MsalError::GeneralFailure("sft is missing".to_string()))?,
+            "OldPassword": password,
+            "NewPassword": new_password,
+        });
+
+        let url_async_sspr_begin = match &auth_config.url_async_sspr_begin {
+            Some(url_async_sspr_begin) => url_async_sspr_begin.clone(),
+            None => {
+                return Err(MsalError::GeneralFailure(
+                    "url_async_sspr_begin missing from auth config".to_string(),
+                ))
+            }
+        };
+        let url = match url_async_sspr_begin.starts_with('/') {
+            true => {
+                let authority = self.authority().to_string();
+                let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
+                    "Failed to splice auth config url".to_string(),
+                ))?;
+                format!("{}/{}", &authority[..index], &url_async_sspr_begin)
+            }
+            false => url_async_sspr_begin.clone(),
+        };
+
+        let resp = self
+            .client()
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let mut sspr_response: SsprResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+            let url_async_sspr_poll = match &auth_config.url_async_sspr_poll {
+                Some(url_async_sspr_poll) => url_async_sspr_poll.clone(),
+                None => {
+                    return Err(MsalError::GeneralFailure(
+                        "url_async_sspr_poll missing from auth config".to_string(),
+                    ))
+                }
+            };
+            let url = match url_async_sspr_poll.starts_with('/') {
+                true => {
+                    let authority = self.authority().to_string();
+                    let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
+                        "Failed to splice auth config url".to_string(),
+                    ))?;
+                    format!("{}/{}", &authority[..index], &url_async_sspr_poll)
+                }
+                false => url_async_sspr_poll.clone(),
+            };
+
+            while sspr_response.is_job_pending {
+                sleep(Duration::from_secs(1));
+                let poll_body = json!({
+                    "Ctx": sspr_response.ctx,
+                    "FlowToken": sspr_response.flow_token,
+                    "CoupledDataCenter": sspr_response.coupled_data_center,
+                    "CoupledScaleUnit": sspr_response.coupled_scale_unit,
+                });
+                sspr_response = self
+                    .client()
+                    .post(&url)
+                    .json(&poll_body)
+                    .send()
+                    .await
+                    .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?
+                    .json()
+                    .await
+                    .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+                if let Some(e) = sspr_response.error_message {
+                    return Err(MsalError::GeneralFailure(format!(
+                        "Failed changing password: {}",
+                        e
+                    )));
+                }
+            }
+
+            let url_post = match &auth_config.url_post {
+                Some(url_post) => url_post.clone(),
+                None => {
+                    return Err(MsalError::GeneralFailure(
+                        "urlPost missing from auth config".to_string(),
+                    ))
+                }
+            };
+            let url = match url_post.starts_with('/') {
+                true => {
+                    let authority = self.authority().to_string();
+                    let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
+                        "Failed to splice auth config url".to_string(),
+                    ))?;
+                    format!("{}/{}", &authority[..index], &url_post)
+                }
+                false => url_post.clone(),
+            };
+
+            let final_body = json!({
+                "Ctx": sspr_response.ctx,
+                "FlowToken": sspr_response.flow_token,
+                "currentpasswd": password,
+                "confirmnewpasswd": new_password,
+                "canary": auth_config.canary,
+            });
+            let resp = self
+                .client()
+                .post(&url)
+                .json(&final_body)
+                .send()
+                .await
+                .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            if resp.status().is_success() {
+                Ok(())
+            } else {
+                let text = resp.text().await.map_err(|e| {
+                    MsalError::GeneralFailure(format!("Failed changing password: {}", e))
+                })?;
+                Err(MsalError::GeneralFailure(format!(
+                    "Failed changing password: {}",
+                    text
+                )))
+            }
+        } else {
+            let text = resp.text().await.map_err(|e| {
+                MsalError::GeneralFailure(format!("Failed changing password: {}", e))
+            })?;
+            Err(MsalError::GeneralFailure(format!(
+                "Failed changing password: {}",
+                text
+            )))
+        }
     }
 
     async fn handle_auth_config_fido_get(
@@ -1687,7 +1915,7 @@ impl PublicClientApplication {
         let text;
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
-            self.parse_auth_config(&text, false)
+            self.parse_auth_config(&text, false, false)
         } else {
             Err(MsalError::GeneralFailure(
                 resp.text()
@@ -1702,6 +1930,7 @@ impl PublicClientApplication {
         req_params: &[(&str, &str)],
         auth_config: &AuthConfig,
         options: &[AuthOption],
+        password_change: bool,
     ) -> Result<AuthConfig, MsalError> {
         let payload = req_params
             .iter()
@@ -1745,7 +1974,7 @@ impl PublicClientApplication {
         let text;
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
-            self.parse_auth_config(&text, false)
+            self.parse_auth_config(&text, false, password_change)
         } else {
             Err(MsalError::GeneralFailure(
                 resp.text()
@@ -1842,6 +2071,11 @@ impl PublicClientApplication {
             };
             ($err:expr) => {
                 if !options.contains(&AuthOption::NoDAGFallback) {
+                    // If we got a change password request, return it.
+                    if let MsalError::ChangePassword = $err {
+                        return Err($err);
+                    }
+
                     // If we got an AADSTSError, then we don't want to perform a
                     // fallback, since the authentication legitimately failed.
                     if let MsalError::AADSTSError(ref e) = $err {
@@ -1988,7 +2222,7 @@ impl PublicClientApplication {
             ("client-request-id", &request_id),
         ];
         match self
-            .handle_auth_config_req_internal(&params, &auth_config, options)
+            .handle_auth_config_req_internal(&params, &auth_config, options, false)
             .await
         {
             Ok(mut auth_config) => {
@@ -2020,7 +2254,7 @@ impl PublicClientApplication {
                             ("client-request-id", &request_id),
                         ];
                         auth_config = match self
-                            .handle_auth_config_req_internal(&params, &auth_config, options)
+                            .handle_auth_config_req_internal(&params, &auth_config, options, false)
                             .await
                         {
                             Ok(auth_config) => auth_config,
@@ -2043,7 +2277,12 @@ impl PublicClientApplication {
                                 ("client-request-id", &request_id),
                             ];
                             auth_config = match self
-                                .handle_auth_config_req_internal(&params, &auth_config, options)
+                                .handle_auth_config_req_internal(
+                                    &params,
+                                    &auth_config,
+                                    options,
+                                    false,
+                                )
                                 .await
                             {
                                 Ok(auth_config) => auth_config,
@@ -2061,7 +2300,7 @@ impl PublicClientApplication {
                 if let Some(ref pgid) = auth_config.pgid {
                     if pgid == "ConvergedChangePassword" {
                         info!("Password is expired!");
-                        dag_fallback!();
+                        return Err(MsalError::ChangePassword);
                     }
                 }
                 if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
@@ -2334,6 +2573,7 @@ impl PublicClientApplication {
                     MsalError::GeneralFailure(format!("Failed parsing auth config: {}", e))
                 })?,
                 true,
+                false,
             )
         } else {
             Err(MsalError::GeneralFailure(
@@ -2844,7 +3084,7 @@ impl PublicClientApplication {
                             .await
                             .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
                         // Check for an error in an auth Config
-                        if let Ok(auth_config) = self.parse_auth_config(&text, false) {
+                        if let Ok(auth_config) = self.parse_auth_config(&text, false, false) {
                             if let Some(service_exception_msg) = auth_config.service_exception_msg {
                                 return Err(MsalError::GeneralFailure(
                                     service_exception_msg.to_string(),
@@ -2932,7 +3172,7 @@ impl PublicClientApplication {
                         .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
                     if flow.url_end_auth.is_some() {
                         // Check for an error in an auth Config
-                        if let Ok(auth_config) = self.parse_auth_config(&text, false) {
+                        if let Ok(auth_config) = self.parse_auth_config(&text, false, false) {
                             if let Some(service_exception_msg) = auth_config.service_exception_msg {
                                 return Err(MsalError::GeneralFailure(
                                     service_exception_msg.to_string(),
@@ -4432,6 +4672,16 @@ impl BrokerClientApplication {
                     }
                 }
             }
+
+            // MS may have returned an AuthConfig here with an error attached.
+            // Return the error from that AuthConfig if possible. If a required
+            // password change is indicated, raise an error.
+            match self.app.parse_auth_config(&text, false, false) {
+                Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
+                Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                _ => {}
+            }
+
             Err(MsalError::GeneralFailure(format!(
                 "Authorization code not found in: {}",
                 text
@@ -4620,6 +4870,37 @@ impl BrokerClientApplication {
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
+    }
+
+    /// Change the password for an Entra Id user.
+    ///
+    /// This function allows changing the password for an Entra Id user. It
+    /// requires the current username and password to validate the user's
+    /// identity before updating the password.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The username associated with the account for which the
+    ///   password is being changed.
+    /// * `password` - The current password for the account.
+    /// * `new_password` - The new password that will replace the current
+    ///   password.
+    ///
+    /// # Returns
+    ///
+    /// * Success: An empty Ok result indicating the password has been changed
+    ///   successfully.
+    /// * Failure: An MsalError, indicating problems such as authentication
+    ///   failures or password complexity requirements not met.
+    pub async fn handle_password_change(
+        &self,
+        username: &str,
+        password: &str,
+        new_password: &str,
+    ) -> Result<(), MsalError> {
+        self.app
+            .handle_password_change(username, password, new_password)
+            .await
     }
 
     /// Fetch the name (GECOS) from the PRT
