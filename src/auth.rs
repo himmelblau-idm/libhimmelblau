@@ -197,8 +197,10 @@ struct AuthConfig {
     url_get_credential_type: Option<String>,
     #[serde(rename = "urlSessionState")]
     url_session_state: Option<String>,
+    #[cfg(feature = "changepassword")]
     #[serde(rename = "urlAsyncSsprBegin")]
     url_async_sspr_begin: Option<String>,
+    #[cfg(feature = "changepassword")]
     #[serde(rename = "urlAsyncSsprPoll")]
     url_async_sspr_poll: Option<String>,
 }
@@ -1357,6 +1359,7 @@ impl AuthInit {
     }
 }
 
+#[cfg(feature = "changepassword")]
 #[derive(Deserialize)]
 struct SsprResponse {
     #[serde(rename = "IsJobPending")]
@@ -1554,6 +1557,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[allow(unused_variables)]
     fn parse_auth_config(
         &self,
         text: &str,
@@ -1593,6 +1597,7 @@ impl PublicClientApplication {
                             return Err(MsalError::AADSTSError(AADSTSError::new(error_code)));
                         }
                     }
+                    #[cfg(feature = "changepassword")]
                     if !password_change {
                         if let Some(ref pgid) = auth_config.pgid {
                             if pgid == "ConvergedChangePassword" {
@@ -1629,6 +1634,7 @@ impl PublicClientApplication {
     ///   successfully.
     /// * Failure: An MsalError, indicating problems such as authentication
     ///   failures or password complexity requirements not met.
+    #[cfg(feature = "changepassword")]
     pub async fn handle_password_change(
         &self,
         username: &str,
@@ -2072,6 +2078,7 @@ impl PublicClientApplication {
             ($err:expr) => {
                 if !options.contains(&AuthOption::NoDAGFallback) {
                     // If we got a change password request, return it.
+                    #[cfg(feature = "changepassword")]
                     if let MsalError::ChangePassword = $err {
                         return Err($err);
                     }
@@ -2300,7 +2307,10 @@ impl PublicClientApplication {
                 if let Some(ref pgid) = auth_config.pgid {
                     if pgid == "ConvergedChangePassword" {
                         info!("Password is expired!");
+                        #[cfg(feature = "changepassword")]
                         return Err(MsalError::ChangePassword);
+                        #[cfg(not(feature = "changepassword"))]
+                        dag_fallback!();
                     }
                 }
                 if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
@@ -4677,6 +4687,7 @@ impl BrokerClientApplication {
             // Return the error from that AuthConfig if possible. If a required
             // password change is indicated, raise an error.
             match self.app.parse_auth_config(&text, false, false) {
+                #[cfg(feature = "changepassword")]
                 Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
                 Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
                 _ => {}
@@ -4892,6 +4903,7 @@ impl BrokerClientApplication {
     ///   successfully.
     /// * Failure: An MsalError, indicating problems such as authentication
     ///   failures or password complexity requirements not met.
+    #[cfg(feature = "changepassword")]
     pub async fn handle_password_change(
         &self,
         username: &str,

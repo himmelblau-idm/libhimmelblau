@@ -76,6 +76,7 @@ pub enum MsalError {
     /// A formatting error
     FormatError(String),
     /// A password change was requested
+    #[cfg(feature = "changepassword")]
     ChangePassword,
 }
 
@@ -103,6 +104,7 @@ pub enum MSAL_ERROR {
     INVALID_POINTER,
     NO_MEMORY,
     AADSTS_ERROR,
+    #[cfg(feature = "changepassword")]
     CHANGE_PASSWORD,
 }
 
@@ -127,6 +129,7 @@ impl From<MsalError> for MSAL_ERROR {
             MsalError::AADSTSError(_) => MSAL_ERROR::AADSTS_ERROR,
             MsalError::Missing(_) => MSAL_ERROR::MISSING,
             MsalError::FormatError(_) => MSAL_ERROR::FORMAT_ERROR,
+            #[cfg(feature = "changepassword")]
             MsalError::ChangePassword => MSAL_ERROR::CHANGE_PASSWORD,
         }
     }
