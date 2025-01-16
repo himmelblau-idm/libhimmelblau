@@ -2731,8 +2731,8 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        let _text;
-        (_text, resp) = self.await_working(resp).await?;
+        let text;
+        (text, resp) = self.await_working(resp).await?;
         if resp.status().is_redirection() {
             let redirect = resp.headers()["location"]
                 .to_str()
@@ -2746,6 +2746,16 @@ impl PublicClientApplication {
                         "Authorization code missing from redirect".to_string(),
                     ))?;
             Ok(code.to_string())
+        } else if resp.status().is_success() {
+            // MS may have returned an AuthConfig here with an error attached.
+            // Return the error from that AuthConfig if possible. If a required
+            // password change is indicated, raise an error.
+            match self.parse_auth_config(&text, false, false) {
+                #[cfg(feature = "changepassword")]
+                Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
+                Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                _ => return Err(MsalError::GeneralFailure(text)),
+            }
         } else {
             Err(MsalError::GeneralFailure(
                 "ProcessAuth Authorization request failed".to_string(),
