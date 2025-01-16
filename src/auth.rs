@@ -1643,7 +1643,7 @@ impl PublicClientApplication {
     ) -> Result<(), MsalError> {
         let request_id = Uuid::new_v4().to_string();
         let auth_config = self
-            .request_auth_config_internal(vec![], &request_id, None)
+            .request_auth_config_internal(vec![], &request_id, None, false)
             .await?;
         let ctx = auth_config
             .sctx
@@ -2013,7 +2013,7 @@ impl PublicClientApplication {
     ) -> Result<AuthInit, MsalError> {
         let request_id = Uuid::new_v4().to_string();
         let auth_config = self
-            .request_auth_config_internal(vec![], &request_id, resource)
+            .request_auth_config_internal(vec![], &request_id, resource, true)
             .await?;
         let cred_type = self
             .get_cred_type(username, &auth_config, &request_id, options)
@@ -2117,7 +2117,7 @@ impl PublicClientApplication {
             (auth_init.auth_config, auth_init.cred_type)
         } else {
             let auth_config = match self
-                .request_auth_config_internal(scopes.clone(), &request_id, resource)
+                .request_auth_config_internal(scopes.clone(), &request_id, resource, true)
                 .await
             {
                 Ok(auth_config) => auth_config,
@@ -2541,13 +2541,14 @@ impl PublicClientApplication {
         scopes: Vec<&str>,
         request_id: &str,
         resource: Option<&str>,
+        mfa: bool,
     ) -> Result<AuthConfig, MsalError> {
         let scope = format!("openid profile {}", scopes.join(" "));
         let redirect_uri = self.app.get_auth_redirect_uri(None, resource);
         let caller_app_redirect_uri = self
             .app
             .get_auth_redirect_uri(Some(LINUX_BROKER_APP_ID), resource);
-        let params = vec![
+        let mut params = vec![
             ("client_id", self.client_id()),
             ("response_type", "code"),
             ("redirect_uri", redirect_uri.as_str()),
@@ -2556,7 +2557,6 @@ impl PublicClientApplication {
             ("scope", &scope),
             ("response_mode", "query"),
             ("sso_reload", "True"),
-            ("amr_values", "ngcmfa"),
             (
                 "resource",
                 (resource.unwrap_or("https://graph.microsoft.com")),
@@ -2564,6 +2564,11 @@ impl PublicClientApplication {
             ("caller_app_client_id", LINUX_BROKER_APP_ID),
             ("caller_app_redirect_uri", caller_app_redirect_uri.as_str()),
         ];
+        // This will almost always be true. We have to disable it for password
+        // changes though.
+        if mfa {
+            params.push(("amr_values", "ngcmfa"));
+        }
         let url = Url::parse_with_params(
             &format!("{}/oauth2/authorize", self.authority()),
             &params.to_vec(),
