@@ -2868,15 +2868,15 @@ impl PublicClientApplication {
         custom_redirect_uri: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         let redirect_uri = if let Some(custom_redirect_uri) = custom_redirect_uri {
-            custom_redirect_uri
+            custom_redirect_uri.to_string()
         } else {
-            &self.app.get_auth_redirect_uri(None, resource)
+            self.app.get_auth_redirect_uri(None, resource)
         };
         let params = [
             ("client_id", self.client_id()),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
-            ("redirect_uri", redirect_uri),
+            ("redirect_uri", &redirect_uri),
         ];
         let payload = params
             .iter()
