@@ -19,7 +19,9 @@
 use crate::error::MsalError;
 use reqwest::{header, Client, Url};
 use serde::Deserialize;
+use serde_json::Value;
 use serde_json::{json, to_string_pretty};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use tokio::sync::RwLock;
@@ -334,6 +336,91 @@ impl Graph {
                 .map_err(|e| MsalError::GeneralFailure(format!("Failed to write file: {:?}", e)))?;
 
             Ok(())
+        } else {
+            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+        }
+    }
+
+    pub async fn fetch_user_extension_attributes(
+        &self,
+        access_token: &str,
+        extension_attributes: Vec<&str>,
+    ) -> Result<HashMap<String, String>, MsalError> {
+        let url = format!("{}/beta/me", self.graph_url().await?);
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        if resp.status().is_success() {
+            let json_resp: Value = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+
+            let mut result_map = HashMap::new();
+            if let Value::Object(obj) = json_resp {
+                for (key, value) in obj.iter() {
+                    if key.starts_with("extension_") {
+                        for &attr in &extension_attributes {
+                            if key.ends_with(&format!("_{}", attr)) {
+                                if let Value::String(val) = value {
+                                    result_map.insert(attr.to_string(), val.clone());
+                                } else if let Value::Number(num) = value {
+                                    result_map.insert(attr.to_string(), num.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(result_map)
+        } else {
+            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+        }
+    }
+
+    pub async fn fetch_group_extension_attributes(
+        &self,
+        groupname: &str,
+        access_token: &str,
+        extension_attributes: Vec<&str>,
+    ) -> Result<HashMap<String, String>, MsalError> {
+        let url = format!("{}/beta/groups/{}", self.graph_url().await?, groupname);
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        if resp.status().is_success() {
+            let json_resp: Value = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+
+            let mut result_map = HashMap::new();
+            if let Value::Object(obj) = json_resp {
+                for (key, value) in obj.iter() {
+                    if key.starts_with("extension_") {
+                        for &attr in &extension_attributes {
+                            if key.ends_with(&format!("_{}", attr)) {
+                                if let Value::String(val) = value {
+                                    result_map.insert(attr.to_string(), val.clone());
+                                } else if let Value::Number(num) = value {
+                                    result_map.insert(attr.to_string(), num.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(result_map)
         } else {
             Err(MsalError::RequestFailed(format!("{}", resp.status())))
         }
