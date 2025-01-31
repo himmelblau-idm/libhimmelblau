@@ -4140,7 +4140,7 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
-        let v2_endpoint = scope.is_empty();
+        let v2_endpoint = !scope.is_empty();
         if !scope.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
                 "Scopes cannot be specified with a request_resource".to_string(),
