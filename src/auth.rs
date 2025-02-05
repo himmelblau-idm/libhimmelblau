@@ -120,6 +120,7 @@ pub const LINUX_BROKER_APP_ID: &str = "b743a22d-6705-4147-8670-d92fa515ee2b";
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 #[cfg(feature = "broker")]
 const AZURE_PORTAL_APP_ID: &str = "c44b4083-3bb0-49c1-b47d-974e53cbdf3c";
+const HIMMELBLAU_REDIRECT_URI: &str = "himmelblau://Himmelblau.EntraId.BrokerPlugin";
 
 /* FIDO Authentication requires specifying a user agent which
  * MS endorses as appropriate for FIDO */
@@ -3357,6 +3358,7 @@ pub struct BrokerClientApplication {
     app: PublicClientApplication,
     transport_key: Option<LoadableMsOapxbcRsaKey>,
     cert_key: Option<LoadableIdentityKey>,
+    on_behalf_of_client_id: Option<String>,
 }
 
 #[cfg(feature = "broker")]
@@ -3369,6 +3371,11 @@ impl BrokerClientApplication {
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
     ///
+    /// * `client_id` - The optional client id of an app which you may
+    ///   register in Azure Entra Id. If not specified, certain group
+    ///   attributes will be unresolvable. This app may also delegate
+    ///   permissions for your logon script access token.
+    ///
     /// * `transport_key` - An optional LoadableMsOapxbcRsaKey transport key
     ///   from enrolling the device.
     ///
@@ -3379,6 +3386,7 @@ impl BrokerClientApplication {
     /// device enrollment, then enrollment will be required.
     pub fn new(
         authority: Option<&str>,
+        client_id: Option<&str>,
         transport_key: Option<LoadableMsOapxbcRsaKey>,
         cert_key: Option<LoadableIdentityKey>,
     ) -> Result<Self, MsalError> {
@@ -3386,6 +3394,7 @@ impl BrokerClientApplication {
             app: PublicClientApplication::new(BROKER_APP_ID, authority)?,
             transport_key,
             cert_key,
+            on_behalf_of_client_id: client_id.map(|s| s.to_string()),
         })
     }
 
@@ -4632,15 +4641,28 @@ impl BrokerClientApplication {
         signed_device_payload: Option<String>,
     ) -> Result<String, MsalError> {
         let scope = format!("openid profile {}", scope.join(" "));
-        let client_id = if v2_endpoint {
-            LINUX_BROKER_APP_ID
+        let (client_id, redirect_uri) = if v2_endpoint {
+            if let Some(on_behalf_of_client_id) = &self.on_behalf_of_client_id {
+                (
+                    on_behalf_of_client_id.clone(),
+                    HIMMELBLAU_REDIRECT_URI.to_string(),
+                )
+            } else {
+                (
+                    LINUX_BROKER_APP_ID.to_string(),
+                    self.app
+                        .get_auth_redirect_uri(Some(LINUX_BROKER_APP_ID), resource),
+                )
+            }
         } else {
-            self.app.client_id()
+            (
+                self.app.client_id().to_string(),
+                self.app.get_auth_redirect_uri(None, resource),
+            )
         };
-        let redirect_uri = self.app.get_auth_redirect_uri(Some(client_id), resource);
 
         let mut params = vec![
-            ("client_id", client_id),
+            ("client_id", client_id.as_str()),
             ("response_type", "code"),
             ("redirect_uri", redirect_uri.as_str()),
             ("client-request-id", request_id),
@@ -4834,17 +4856,27 @@ impl BrokerClientApplication {
         debug!("Exchanging an Authorization Code for an Access Token");
 
         let scopes_str = format!("openid profile offline_access {}", scope.join(" "));
-        let client_id = if v2_endpoint {
-            LINUX_BROKER_APP_ID
+        let (client_id, redirect_uri) = if v2_endpoint {
+            if let Some(on_behalf_of_client_id) = &self.on_behalf_of_client_id {
+                (
+                    on_behalf_of_client_id.clone(),
+                    HIMMELBLAU_REDIRECT_URI.to_string(),
+                )
+            } else {
+                (
+                    LINUX_BROKER_APP_ID.to_string(),
+                    self.app
+                        .get_auth_redirect_uri(Some(LINUX_BROKER_APP_ID), request_resource),
+                )
+            }
         } else {
-            self.app.client_id()
+            (
+                self.app.client_id().to_string(),
+                self.app.get_auth_redirect_uri(None, request_resource),
+            )
         };
-
-        let redirect_uri = self
-            .app
-            .get_auth_redirect_uri(Some(client_id), request_resource);
         let mut params = vec![
-            ("client_id", client_id),
+            ("client_id", client_id.as_str()),
             ("grant_type", "authorization_code"),
             ("code", &authorization_code),
             ("redirect_uri", &redirect_uri),
