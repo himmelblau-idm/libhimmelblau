@@ -18,9 +18,10 @@
 
 use crate::error::MsalError;
 use reqwest::{header, Client, Url};
+use serde::de::Error;
 use serde::Deserialize;
-use serde_json::Value;
 use serde_json::{json, to_string_pretty};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -35,16 +36,66 @@ struct FederationProvider {
     graph: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct DirectoryObject {
-    #[serde(rename = "@odata.type")]
     pub data_type: String,
     pub id: String,
     pub description: Option<String>,
-    #[serde(rename = "displayName")]
     pub display_name: Option<String>,
-    #[serde(rename = "securityIdentifier")]
     pub security_identifier: Option<String>,
+    pub extension_attrs: HashMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for DirectoryObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut map = Map::<String, Value>::deserialize(deserializer)?;
+
+        let data_type = map
+            .remove("@odata.type")
+            .ok_or_else(|| D::Error::missing_field("@odata.type"))?;
+        let data_type: String = serde_json::from_value(data_type).map_err(D::Error::custom)?;
+
+        let id = map
+            .remove("id")
+            .ok_or_else(|| D::Error::missing_field("id"))?;
+        let id: String = serde_json::from_value(id).map_err(D::Error::custom)?;
+
+        let description: Option<String> = map.remove("description").map_or(Ok(None), |v| {
+            serde_json::from_value(v).map_err(D::Error::custom)
+        })?;
+        let display_name: Option<String> = map.remove("displayName").map_or(Ok(None), |v| {
+            serde_json::from_value(v).map_err(D::Error::custom)
+        })?;
+        let security_identifier: Option<String> =
+            map.remove("securityIdentifier").map_or(Ok(None), |v| {
+                serde_json::from_value(v).map_err(D::Error::custom)
+            })?;
+
+        let mut extension_attrs = HashMap::new();
+        for (key, value) in map {
+            if key.starts_with("extension_") {
+                let s = if let Value::String(s) = value {
+                    s
+                } else {
+                    value.to_string()
+                };
+                let short_key = key.splitn(3, '_').nth(2).unwrap_or(&key).to_string();
+                extension_attrs.insert(short_key, s);
+            }
+        }
+
+        Ok(DirectoryObject {
+            data_type,
+            id,
+            description,
+            display_name,
+            security_identifier,
+            extension_attrs,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
