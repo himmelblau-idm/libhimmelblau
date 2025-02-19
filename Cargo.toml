@@ -25,6 +25,7 @@ developer = ["broker", "proxyable"]
 proxyable = []
 interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window/threadsafe"]
 changepassword = []
+on_behalf_of = ["broker"]
 
 [dependencies]
 base64 = "^0.22.0"
