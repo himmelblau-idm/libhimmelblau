@@ -3595,6 +3595,10 @@ impl BrokerClientApplication {
     /// * `request_resource` - A resource for obtaining an access token.
     ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
     ///
+    /// * `on_behalf_of_client_id`: Request a resource or scope on behalf of
+    ///   the specified client_id. Optional. This option requires libhimmelblau
+    ///   be built with the `on_behalf_of` feature.
+    ///
     /// * `tpm` - The tpm object.
     ///
     /// * `machine_key` - The TPM MachineKey associated with this application.
@@ -3608,6 +3612,7 @@ impl BrokerClientApplication {
         password: &str,
         scopes: Vec<&str>,
         request_resource: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
@@ -3631,6 +3636,8 @@ impl BrokerClientApplication {
                 machine_key,
                 &session_key,
                 request_resource,
+                #[cfg(feature = "on_behalf_of")]
+                on_behalf_of_client_id,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -3649,6 +3656,10 @@ impl BrokerClientApplication {
     /// * `request_resource` - A resource for obtaining an access token.
     ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
     ///
+    /// * `on_behalf_of_client_id`: Request a resource or scope on behalf of
+    ///   the specified client_id. Optional. This option requires libhimmelblau
+    ///   be built with the `on_behalf_of` feature.
+    ///
     /// * `tpm` - The tpm object.
     ///
     /// * `machine_key` - The TPM MachineKey associated with this application.
@@ -3661,6 +3672,7 @@ impl BrokerClientApplication {
         refresh_token: &str,
         scopes: Vec<&str>,
         request_resource: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
@@ -3684,6 +3696,8 @@ impl BrokerClientApplication {
                 machine_key,
                 &session_key,
                 request_resource,
+                #[cfg(feature = "on_behalf_of")]
+                on_behalf_of_client_id,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -4134,6 +4148,10 @@ impl BrokerClientApplication {
     /// * `request_resource` - A resource for obtaining an access token.
     ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
     ///
+    /// * `on_behalf_of_client_id`: Request a resource or scope on behalf of
+    ///   the specified client_id. Optional. This option requires libhimmelblau
+    ///   be built with the `on_behalf_of` feature.
+    ///
     /// * `tpm` - The tpm object.
     ///
     /// * `machine_key` - The TPM MachineKey associated with this application.
@@ -4146,6 +4164,7 @@ impl BrokerClientApplication {
         sealed_prt: &SealedData,
         scope: Vec<&str>,
         request_resource: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<UserToken, MsalError> {
@@ -4166,10 +4185,13 @@ impl BrokerClientApplication {
             machine_key,
             &session_key,
             request_resource,
+            #[cfg(feature = "on_behalf_of")]
+            on_behalf_of_client_id,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn exchange_prt_for_access_token_internal(
         &self,
         prt: &PrimaryRefreshToken,
@@ -4179,6 +4201,7 @@ impl BrokerClientApplication {
         machine_key: &MachineKey,
         session_key: &SessionKey,
         request_resource: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging a PRT for an Access Token");
 
@@ -4191,6 +4214,8 @@ impl BrokerClientApplication {
                 request_resource.as_deref(),
                 v2_endpoint,
                 session_key,
+                #[cfg(feature = "on_behalf_of")]
+                on_behalf_of_client_id,
                 tpm,
                 machine_key,
             )
@@ -4202,6 +4227,8 @@ impl BrokerClientApplication {
             v2_endpoint,
             auth_code,
             request_resource.as_deref(),
+            #[cfg(feature = "on_behalf_of")]
+            on_behalf_of_client_id,
         )
         .await
     }
@@ -4369,6 +4396,8 @@ impl BrokerClientApplication {
                 &token.refresh_token,
                 vec![],
                 Some(resource_id),
+                #[cfg(feature = "on_behalf_of")]
+                None,
                 tpm,
                 machine_key,
             )
@@ -4424,6 +4453,10 @@ impl BrokerClientApplication {
     /// * `request_resource` - A resource for obtaining an access token.
     ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
     ///
+    /// * `on_behalf_of_client_id`: Request a resource or scope on behalf of
+    ///   the specified client_id. Optional. This option requires libhimmelblau
+    ///   be built with the `on_behalf_of` feature.
+    ///
     /// * `tpm` - The tpm object.
     ///
     /// * `machine_key` - The TPM MachineKey associated with this application.
@@ -4433,12 +4466,14 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn acquire_token_by_hello_for_business_key(
         &self,
         username: &str,
         key: &LoadableIdentityKey,
         scopes: Vec<&str>,
         request_resource: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
         pin: &str,
@@ -4473,6 +4508,8 @@ impl BrokerClientApplication {
                 machine_key,
                 &session_key,
                 request_resource,
+                #[cfg(feature = "on_behalf_of")]
+                on_behalf_of_client_id,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -4639,10 +4676,20 @@ impl BrokerClientApplication {
         v2_endpoint: bool,
         signed_prt_payload: Option<String>,
         signed_device_payload: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
     ) -> Result<String, MsalError> {
+        #[cfg(not(feature = "on_behalf_of"))]
+        let on_behalf_of_client_id: Option<&str> = None;
+
         let scope = format!("openid profile {}", scope.join(" "));
         let (client_id, redirect_uri) = if v2_endpoint {
-            if let Some(on_behalf_of_client_id) = &self.on_behalf_of_client_id {
+            if let Some(on_behalf_of_client_id) = on_behalf_of_client_id {
+                (
+                    on_behalf_of_client_id.to_string(),
+                    self.app
+                        .get_auth_redirect_uri(Some(on_behalf_of_client_id), resource),
+                )
+            } else if let Some(on_behalf_of_client_id) = &self.on_behalf_of_client_id {
                 (
                     on_behalf_of_client_id.clone(),
                     HIMMELBLAU_REDIRECT_URI.to_string(),
@@ -4694,15 +4741,46 @@ impl BrokerClientApplication {
         if let Some(signed_device_payload) = signed_device_payload {
             req = req.header("x-ms-DeviceCredential", signed_device_payload);
         }
-        let resp = req
+        let mut resp = req
             .send()
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-        if resp.status().is_success() {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+        let text;
+        (text, resp) = self.app.await_working(resp).await?;
+        if resp.status().is_redirection() {
+            let document = Html::parse_document(&text);
+            let selector = Selector::parse("a[href]").map_err(|_| {
+                MsalError::RequestFailed("Failed parsing auth code response".to_string())
+            })?;
+            if let Some(element) = document.select(&selector).next() {
+                if let Some(href_encoded) = element.value().attr("href") {
+                    let href = percent_decode_str(href_encoded)
+                        .decode_utf8()
+                        .map_err(|e| {
+                            MsalError::URLFormatFailed(format!("Failed decoding url: {:?}", e))
+                        })?;
+                    if let Ok(url) = Url::parse(&href) {
+                        return url
+                            .query_pairs()
+                            .find_map(|(key, value)| {
+                                if key == "code" {
+                                    Some(value.into_owned())
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or(MsalError::GeneralFailure(
+                                "Authorization code not found".to_string(),
+                            ));
+                    }
+                }
+            }
+
+            Err(MsalError::GeneralFailure(format!(
+                "Authorization code not found in: {}",
+                text
+            )))
+        } else if resp.status().is_success() {
             let re = Regex::new(r#"document\.location\.replace\("([^"]+)"\)"#)
                 .map_err(|e| MsalError::InvalidRegex(format!("{}", e)))?;
             if let Some(m) = re.captures(&text) {
@@ -4796,6 +4874,7 @@ impl BrokerClientApplication {
         resource: Option<&str>,
         v2_endpoint: bool,
         session_key: &SessionKey,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<String, MsalError> {
@@ -4841,6 +4920,8 @@ impl BrokerClientApplication {
             v2_endpoint,
             Some(signed_prt_payload),
             Some(signed_device_payload),
+            #[cfg(feature = "on_behalf_of")]
+            on_behalf_of_client_id,
         )
         .await
     }
@@ -4852,12 +4933,21 @@ impl BrokerClientApplication {
         v2_endpoint: bool,
         authorization_code: String,
         request_resource: Option<&str>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging an Authorization Code for an Access Token");
+        #[cfg(not(feature = "on_behalf_of"))]
+        let on_behalf_of_client_id: Option<&str> = None;
 
         let scopes_str = format!("openid profile offline_access {}", scope.join(" "));
         let (client_id, redirect_uri) = if v2_endpoint {
-            if let Some(on_behalf_of_client_id) = &self.on_behalf_of_client_id {
+            if let Some(on_behalf_of_client_id) = on_behalf_of_client_id {
+                (
+                    on_behalf_of_client_id.to_string(),
+                    self.app
+                        .get_auth_redirect_uri(Some(on_behalf_of_client_id), request_resource),
+                )
+            } else if let Some(on_behalf_of_client_id) = &self.on_behalf_of_client_id {
                 (
                     on_behalf_of_client_id.clone(),
                     HIMMELBLAU_REDIRECT_URI.to_string(),

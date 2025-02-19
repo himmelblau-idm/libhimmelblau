@@ -1,7 +1,7 @@
 [package]
 name = "libhimmelblau"
 description = "Samba Library for Azure Entra ID Authentication"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
@@ -25,6 +25,7 @@ developer = ["broker", "proxyable"]
 proxyable = []
 interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window/threadsafe"]
 changepassword = []
+on_behalf_of = ["broker"]
 
 [dependencies]
 base64 = "^0.22.0"
