@@ -2658,7 +2658,11 @@ impl PublicClientApplication {
         let mut text = String::from_utf8(body)
             .map_err(|e| MsalError::GeneralFailure(format!("UTF-8 error: {}", e)))?;
         for _ in 0..10 {
-            if !text.contains("Click Submit to continue") && !text.contains("Working...") {
+            if !text.contains("Click Submit to continue")
+                && !text.contains("Working...")
+                && !text.contains("Click here to finish the authorization process")
+                && !text.contains("<input type=\"submit\"")
+            {
                 return Ok((text, resp));
             }
             sleep(Duration::from_secs(1));
