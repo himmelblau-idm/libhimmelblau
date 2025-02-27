@@ -4780,6 +4780,16 @@ impl BrokerClientApplication {
                 }
             }
 
+            // MS may have returned an AuthConfig here with an error attached.
+            // Return the error from that AuthConfig if possible. If a required
+            // password change is indicated, raise an error.
+            match self.app.parse_auth_config(&text, false, false) {
+                #[cfg(feature = "changepassword")]
+                Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
+                Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                _ => {}
+            }
+
             Err(MsalError::GeneralFailure(format!(
                 "Authorization code not found in: {}",
                 text
