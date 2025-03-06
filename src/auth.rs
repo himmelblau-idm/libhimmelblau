@@ -2394,7 +2394,7 @@ impl PublicClientApplication {
                             }
                         };
                         let msg = match default_auth_method.auth_method_id.as_str() {
-                            "PhoneAppNotification" => format!("Open your Authenticator app, and enter the number '{}' to sign in.", auth_response.entropy),
+                            "PhoneAppNotification" | "CompanionAppsNotification" => format!("Open your Authenticator app, and enter the number '{}' to sign in.", auth_response.entropy),
                             "PhoneAppOTP" =>
                                 "Please type in the code displayed on your authenticator app from your device:".to_string(),
                             "ConsolidatedTelephony" | "OneWaySMS" =>
