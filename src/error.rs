@@ -78,6 +78,8 @@ pub enum MsalError {
     /// A password change was requested
     #[cfg(feature = "changepassword")]
     ChangePassword,
+    /// A password entry is required
+    PasswordRequired,
 }
 
 #[repr(C)]
@@ -106,6 +108,7 @@ pub enum MSAL_ERROR {
     AADSTS_ERROR,
     #[cfg(feature = "changepassword")]
     CHANGE_PASSWORD,
+    PASSWORD_REQUIRED,
 }
 
 impl From<MsalError> for MSAL_ERROR {
@@ -131,6 +134,7 @@ impl From<MsalError> for MSAL_ERROR {
             MsalError::FormatError(_) => MSAL_ERROR::FORMAT_ERROR,
             #[cfg(feature = "changepassword")]
             MsalError::ChangePassword => MSAL_ERROR::CHANGE_PASSWORD,
+            MsalError::PasswordRequired => MSAL_ERROR::PASSWORD_REQUIRED,
         }
     }
 }
