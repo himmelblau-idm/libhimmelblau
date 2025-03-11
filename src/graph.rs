@@ -17,6 +17,8 @@
 */
 
 use crate::error::MsalError;
+#[cfg(feature = "proxyable")]
+use reqwest::Proxy;
 use reqwest::{header, Client, Url};
 use serde::de::Error;
 use serde::Deserialize;
@@ -201,7 +203,22 @@ impl Graph {
         tenant_id: Option<&str>,
         graph_url: Option<&str>,
     ) -> Result<Self, MsalError> {
-        let client = reqwest::Client::builder()
+        #[allow(unused_mut)]
+        let mut builder = reqwest::Client::builder().cookie_store(true);
+
+        #[cfg(feature = "proxyable")]
+        {
+            if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
+                .ok()
+                .or_else(|| std::env::var("ALL_PROXY").ok())
+            {
+                let proxy = Proxy::https(proxy_var)
+                    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
+                builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+            }
+        }
+
+        let client = builder
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
 

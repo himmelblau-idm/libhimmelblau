@@ -2226,10 +2226,7 @@ impl PublicClientApplication {
         };
         let params = vec![
             ("login", username),
-            (
-                "passwd",
-                password.ok_or(MsalError::PasswordRequired)?,
-            ),
+            ("passwd", password.ok_or(MsalError::PasswordRequired)?),
             ("ctx", &sctx),
             ("flowToken", &sft),
             ("canary", &auth_config.canary),
