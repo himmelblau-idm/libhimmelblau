@@ -2139,19 +2139,26 @@ impl PublicClientApplication {
             };
             (auth_config, cred_type)
         };
-        if let Some(remote_ngc_params) = cred_type.credentials.remote_ngc_params {
+        let sctx = match &auth_config.sctx {
+            Some(sctx) => sctx.clone(),
+            None => return Err(MsalError::GeneralFailure("sCtx is missing".to_string())),
+        };
+        let sft = match &auth_config.sft {
+            Some(sft) => sft.clone(),
+            None => return Err(MsalError::GeneralFailure("sFt is missing".to_string())),
+        };
+        let remote_ngc_params =
+            if let Some(remote_ngc_params) = cred_type.credentials.remote_ngc_params {
+                self.get_one_time_code(&auth_config, &remote_ngc_params, &request_id)
+                    .await
+            } else {
+                Err(MsalError::GeneralFailure(
+                    "No remote NGC params".to_string(),
+                ))
+            };
+        // Ensure the one time code didn't fail, if it did, we need to continue
+        if let Ok(remote_ngc_params) = remote_ngc_params {
             // Passwordless is enabled, we can drop out here
-            let sctx = match &auth_config.sctx {
-                Some(sctx) => sctx.clone(),
-                None => return Err(MsalError::GeneralFailure("sCtx is missing".to_string())),
-            };
-            let sft = match &auth_config.sft {
-                Some(sft) => sft.clone(),
-                None => return Err(MsalError::GeneralFailure("sFt is missing".to_string())),
-            };
-            let remote_ngc_params = self
-                .get_one_time_code(&auth_config, &remote_ngc_params, &request_id)
-                .await?;
             let msg = format!(
                 "Open your Authenticator app, and enter the number '{}' to sign in.",
                 remote_ngc_params.entropy
@@ -2221,7 +2228,7 @@ impl PublicClientApplication {
             ("login", username),
             (
                 "passwd",
-                password.ok_or(MsalError::GeneralFailure("password is missing".to_string()))?,
+                password.ok_or(MsalError::PasswordRequired)?,
             ),
             ("ctx", &sctx),
             ("flowToken", &sft),

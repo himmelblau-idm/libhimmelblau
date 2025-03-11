@@ -337,6 +337,7 @@ impl AADSTSError {
             7000114 => "AADSTS7000114: Application 'appIdentifier' isn't allowed to make application on-behalf-of calls.",
             7500529 => "AADSTS7500529: The value ‘SAMLId-Guid’ isn't a valid SAML ID - Microsoft Entra ID uses this attribute to populate the InResponseTo attribute of the returned response. ID must not begin with a number, so a common strategy is to prepend a string like \"ID\" to the string representation of a GUID. For example, id6c1c178c166d486687be4aaf5e482730 is a valid ID.",
             9002341 => "AADSTS9002341: V2Error: invalid_grant - The user is required to permit single sign-On (SSO). This error occurs when the user has not granted the necessary permissions for the application to perform SSO. The user should be redirected to the consent screen to grant the necessary permissions. Refer to this announcement for more information.\"",
+            701013 => "Unable to create remote auth session for user in activity store.",
             _ => "Unknown error code",
         };
         AADSTSError { code, description }
