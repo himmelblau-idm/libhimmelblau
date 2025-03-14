@@ -2956,7 +2956,7 @@ impl PublicClientApplication {
         if resp.status().is_redirection() {
             let document = Html::parse_document(&text);
             let selector = Selector::parse("a[href]").map_err(|_| {
-                MsalError::RequestFailed("Failed parsing auth code response".to_string())
+                MsalError::InvalidParse("Failed parsing auth code response".to_string())
             })?;
             if let Some(element) = document.select(&selector).next() {
                 if let Some(href_encoded) = element.value().attr("href") {
@@ -2987,7 +2987,7 @@ impl PublicClientApplication {
         } else {
             let document = Html::parse_document(&text);
             let selector = Selector::parse("a[href]").map_err(|_| {
-                MsalError::RequestFailed(format!("Failed parsing error response: {}", text))
+                MsalError::InvalidParse(format!("Failed parsing error response: {}", text))
             })?;
             if let Some(element) = document.select(&selector).next() {
                 if let Some(href_encoded) = element.value().attr("href") {
@@ -3004,12 +3004,12 @@ impl PublicClientApplication {
                                 None
                             }
                         }) {
-                            return Err(MsalError::RequestFailed(error));
+                            return Err(MsalError::GeneralFailure(error));
                         }
                     }
                 }
             }
-            Err(MsalError::RequestFailed(format!(
+            Err(MsalError::InvalidParse(format!(
                 "Failed parsing error response: {}",
                 text
             )))
@@ -4758,7 +4758,7 @@ impl BrokerClientApplication {
         if resp.status().is_redirection() {
             let document = Html::parse_document(&text);
             let selector = Selector::parse("a[href]").map_err(|_| {
-                MsalError::RequestFailed("Failed parsing auth code response".to_string())
+                MsalError::InvalidParse("Failed parsing auth code response".to_string())
             })?;
             if let Some(element) = document.select(&selector).next() {
                 if let Some(href_encoded) = element.value().attr("href") {

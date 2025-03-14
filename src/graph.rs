@@ -137,7 +137,7 @@ async fn request_federation_provider(
         &format!("https://{}/odc/v2.1/federationProvider", odc_provider),
         &[("domain", domain)],
     )
-    .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
 
     let resp = client
         .get(url)
@@ -152,7 +152,7 @@ async fn request_federation_provider(
         debug!("Discovered: {:?}", json_resp);
         Ok(json_resp)
     } else {
-        Err(MsalError::RequestFailed(format!(
+        Err(MsalError::GeneralFailure(format!(
             "Federation Provider request failed: {}",
             resp.status(),
         )))
@@ -188,7 +188,7 @@ macro_rules! federation_provider_fetch {
 
         match &*$graph.federation_provider.read().await {
             Some(federation_provider) => Ok(federation_provider.$val.clone()),
-            None => Err(MsalError::RequestFailed(
+            None => Err(MsalError::GeneralFailure(
                 "federation provider not set".to_string(),
             )),
         }
@@ -280,7 +280,7 @@ impl Graph {
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(json_resp)
         } else {
-            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
     }
 
@@ -316,7 +316,7 @@ impl Graph {
                     .await
                     .map_err(|e| { MsalError::GeneralFailure(format!("{:?}", e)) })?
             );
-            Err(MsalError::RequestFailed(format!("{}", status)))
+            Err(MsalError::GeneralFailure(format!("{}", status)))
         }
     }
 
@@ -350,7 +350,7 @@ impl Graph {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
     }
 
@@ -363,7 +363,7 @@ impl Graph {
             &format!("{}/v1.0/groups", self.graph_url().await?),
             &[("$filter", format!("displayName eq '{}'", displayname))],
         )
-        .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
         let resp = self
             .client
             .get(url)
@@ -378,7 +378,7 @@ impl Graph {
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(json_resp)
         } else {
-            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
     }
 
@@ -405,7 +405,7 @@ impl Graph {
 
             Ok(())
         } else {
-            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
     }
 
@@ -447,7 +447,7 @@ impl Graph {
 
             Ok(result_map)
         } else {
-            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
     }
 
@@ -490,7 +490,7 @@ impl Graph {
 
             Ok(result_map)
         } else {
-            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
     }
 }
