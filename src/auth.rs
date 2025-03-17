@@ -1146,6 +1146,8 @@ impl ClientApplication {
     fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(3))
             .redirect(Policy::none())
             .cookie_store(true);
 

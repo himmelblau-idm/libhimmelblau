@@ -27,6 +27,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error};
 
@@ -204,7 +205,10 @@ impl Graph {
         graph_url: Option<&str>,
     ) -> Result<Self, MsalError> {
         #[allow(unused_mut)]
-        let mut builder = reqwest::Client::builder().cookie_store(true);
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(3))
+            .cookie_store(true);
 
         #[cfg(feature = "proxyable")]
         {
