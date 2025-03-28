@@ -105,7 +105,7 @@ int main() {
 		goto OUT;
 	}
 
-	err = broker_init(NULL, NULL, NULL, &client);
+	err = broker_init(NULL, NULL, NULL, NULL, &client);
 	if (err != SUCCESS) {
 		printf("Failed to initialize the broker!\n");
 		goto OUT;

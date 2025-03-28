@@ -340,6 +340,11 @@ pub unsafe extern "C" fn tpm_machine_key_load(
 ///   be of the format <https://login.microsoftonline.com/your_tenant> By
 ///   default, we will use <https://login.microsoftonline.com/common>.
 ///
+/// * `client_id` - The optional client id of an app which you may
+///   register in Azure Entra Id. If not specified, certain group
+///   attributes will be unresolvable. This app may also delegate
+///   permissions for your logon script access token.
+///
 /// * `transport_key` - An optional LoadableMsOapxbcRsaKey transport key
 ///   from enrolling the device.
 ///
@@ -363,6 +368,7 @@ pub unsafe extern "C" fn tpm_machine_key_load(
 #[no_mangle]
 pub unsafe extern "C" fn broker_init(
     authority: *const c_char,
+    client_id: *const c_char,
     transport_key: *mut LoadableMsOapxbcRsaKey,
     cert_key: *mut LoadableIdentityKey,
     out: *mut *mut BrokerClientApplication,
@@ -378,7 +384,12 @@ pub unsafe extern "C" fn broker_init(
         true => None,
         false => Some(unsafe { &mut *cert_key }.0.clone()),
     };
-    match BrokerClientApplication::new(wrap_c_char(authority).as_deref(), transport_key, cert_key) {
+    match BrokerClientApplication::new(
+        wrap_c_char(authority).as_deref(),
+        wrap_c_char(client_id).as_deref(),
+        transport_key,
+        cert_key,
+    ) {
         Ok(client) => {
             unsafe {
                 *out = Box::into_raw(Box::new(client));
@@ -911,12 +922,12 @@ pub unsafe extern "C" fn broker_check_user_exists(
             return MSAL_ERROR::INVALID_POINTER;
         }
     };
-    let resp = match run_async!(client, check_user_exists, &username) {
+    let resp = match run_async!(client, check_user_exists, &username, &[]) {
         Ok(resp) => resp,
         Err(e) => return e,
     };
     unsafe {
-        *out = resp;
+        *out = resp.exists();
     }
     MSAL_ERROR::SUCCESS
 }
@@ -971,7 +982,9 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         client,
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
         &username,
-        &password,
+        Some(&password),
+        &[],
+        None,
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
