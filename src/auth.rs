@@ -2094,7 +2094,8 @@ impl PublicClientApplication {
                         // continue with the fallback.
                         // AADSTS16000: InteractionRequired
                         // AADSTS50072: UserStrongAuthEnrollmentRequiredInterrupt
-                        if ![16000, 50072].contains(&e.code) {
+                        // AADSTS50203: User has not registered the authenticator app
+                        if ![16000, 50072, 50203].contains(&e.code) {
                             return Err($err);
                         }
                     }
