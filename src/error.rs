@@ -80,6 +80,8 @@ pub enum MsalError {
     ChangePassword,
     /// A password entry is required
     PasswordRequired,
+    /// An error was encountered because MS Authenticator registration was requested
+    SkipMfaRegistration(String, Option<String>, String),
 }
 
 #[repr(C)]
@@ -109,6 +111,7 @@ pub enum MSAL_ERROR {
     #[cfg(feature = "changepassword")]
     CHANGE_PASSWORD,
     PASSWORD_REQUIRED,
+    SKIP_MFA_REGISTRATION,
 }
 
 impl From<MsalError> for MSAL_ERROR {
@@ -135,6 +138,7 @@ impl From<MsalError> for MSAL_ERROR {
             #[cfg(feature = "changepassword")]
             MsalError::ChangePassword => MSAL_ERROR::CHANGE_PASSWORD,
             MsalError::PasswordRequired => MSAL_ERROR::PASSWORD_REQUIRED,
+            MsalError::SkipMfaRegistration(_, _, _) => MSAL_ERROR::SKIP_MFA_REGISTRATION,
         }
     }
 }
