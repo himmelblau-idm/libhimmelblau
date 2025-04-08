@@ -166,6 +166,8 @@ struct AuthConfig {
     #[serde(rename = "strServiceExceptionMessage")]
     service_exception_msg: Option<String>,
     pgid: Option<String>,
+    #[serde(rename = "urlSkipMfaRegistration")]
+    url_skip_mfa_registration: Option<String>,
     #[serde(rename = "iRemainingDaysToSkipMfaRegistration")]
     remaining_days_to_skip_mfa_reg: Option<u32>,
     #[serde(rename = "arrUserProofs")]
@@ -1597,6 +1599,18 @@ impl PublicClientApplication {
                                     error_code, e
                                 ))
                             })?;
+                            // AADSTS50203: User has not registered the authenticator app
+                            if error_code == 50203 {
+                                if let Some(url_skip_mfa_registration) =
+                                    auth_config.url_skip_mfa_registration
+                                {
+                                    return Err(MsalError::SkipMfaRegistration(
+                                        url_skip_mfa_registration,
+                                        auth_config.sft,
+                                        auth_config.canary,
+                                    ));
+                                }
+                            }
                             return Err(MsalError::AADSTSError(AADSTSError::new(error_code)));
                         }
                     }
@@ -2766,6 +2780,13 @@ impl PublicClientApplication {
                 #[cfg(feature = "changepassword")]
                 Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
                 Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                Err(MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary)) => {
+                    return Err(MsalError::SkipMfaRegistration(
+                        url_skip_mfa_registration,
+                        sft,
+                        canary,
+                    ))
+                }
                 _ => return Err(MsalError::GeneralFailure(text)),
             }
         } else {
@@ -2869,8 +2890,30 @@ impl PublicClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
-        self.auth_code_intercept_internal(&flow.url_post, payload)
+        match self
+            .auth_code_intercept_internal(&flow.url_post, payload)
             .await
+        {
+            Ok(code) => Ok(code),
+            Err(MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary)) => {
+                let params = [
+                    (
+                        "flowtoken",
+                        &sft.ok_or(MsalError::GeneralFailure("Missing flow token".to_string()))?,
+                    ),
+                    ("ctx", &flow.ctx),
+                    ("canary", &canary),
+                ];
+                let payload = params
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+                    .collect::<Vec<String>>()
+                    .join("&");
+                self.auth_code_intercept_internal(&url_skip_mfa_registration, payload)
+                    .await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn exchange_authorization_code_for_access_token_internal(
