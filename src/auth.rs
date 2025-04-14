@@ -3557,7 +3557,7 @@ impl BrokerClientApplication {
             .map_err(|e| MsalError::TPMFail(format!("Failed creating certificate key: {:?}", e)))?;
         let loadable_transport_key = tpm
             .msoapxbc_rsa_key_create(machine_key)
-            .map_err(|e| MsalError::TPMFail(format!("Failed creating tranport key: {:?}", e)))?;
+            .map_err(|e| MsalError::TPMFail(format!("Failed creating transport key: {:?}", e)))?;
         self.transport_key = Some(loadable_transport_key.clone());
 
         // Create the CSR

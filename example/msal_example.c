@@ -293,7 +293,7 @@ int main() {
 							     "123456",
 							     &token0);
 	if (err != SUCCESS) {
-		printf("Failed to aquire a token using the provisioned hello key!\n");
+		printf("Failed to acquire a token using the provisioned hello key!\n");
 		goto OUT;
 	}
 

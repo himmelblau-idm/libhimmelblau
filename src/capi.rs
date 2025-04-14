@@ -175,7 +175,7 @@ pub extern "C" fn set_global_tracing_level(level: TracingLevel) -> MSAL_ERROR {
 ///
 /// # Arguments
 ///
-/// * `tcti_name` - An optional TPM Transmission Interface. If this paramenter
+/// * `tcti_name` - An optional TPM Transmission Interface. If this parameter
 ///   is NULL, a Soft Tpm is initialized.
 ///
 /// * `out` - An output parameter which will contain the initialized
