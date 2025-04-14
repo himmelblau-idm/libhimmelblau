@@ -1589,16 +1589,15 @@ impl PublicClientApplication {
                     // *initial* authorize. MS then ignores them, so shall we.
                     if !initial {
                         let error_code = match auth_config.error_code {
-                            Some(error_code) => Some(error_code.parse::<u32>().map_err(|e| {
-                                MsalError::InvalidParse(format!(
-                                    "error_code {}: {:?}",
-                                    error_code, e
-                                ))
-                            })?),
-                            None => match auth_config.error_code2 {
-                                Some(error_code) => Some(error_code),
-                                None => None,
-                            },
+                            Some(ref error_code) => {
+                                Some(error_code.parse::<u32>().map_err(|e| {
+                                    MsalError::InvalidParse(format!(
+                                        "error_code {}: {:?}",
+                                        error_code, e
+                                    ))
+                                })?)
+                            }
+                            None => auth_config.error_code2,
                         };
                         if let Some(error_code) = error_code {
                             // Check to see if we can get the failure message
