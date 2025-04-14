@@ -188,6 +188,8 @@ struct AuthConfig {
     polling_interval: Option<u32>,
     #[serde(rename = "sErrorCode")]
     error_code: Option<String>,
+    #[serde(rename = "iErrorCode")]
+    error_code2: Option<u32>,
     #[serde(rename = "sErrTxt")]
     err_txt: Option<String>,
     #[serde(rename = "sFidoChallenge")]
@@ -1586,19 +1588,25 @@ impl PublicClientApplication {
                     // MS always throws errors when we're just setting up the
                     // *initial* authorize. MS then ignores them, so shall we.
                     if !initial {
-                        if let Some(error_code) = auth_config.error_code {
+                        let error_code = match auth_config.error_code {
+                            Some(error_code) => Some(error_code.parse::<u32>().map_err(|e| {
+                                MsalError::InvalidParse(format!(
+                                    "error_code {}: {:?}",
+                                    error_code, e
+                                ))
+                            })?),
+                            None => match auth_config.error_code2 {
+                                Some(error_code) => Some(error_code),
+                                None => None,
+                            },
+                        };
+                        if let Some(error_code) = error_code {
                             // Check to see if we can get the failure message
                             if let Some(err_txt) = auth_config.err_txt {
                                 if !err_txt.is_empty() {
                                     error!("{}", err_txt);
                                 }
                             }
-                            let error_code = error_code.parse::<u32>().map_err(|e| {
-                                MsalError::InvalidParse(format!(
-                                    "error_code {}: {:?}",
-                                    error_code, e
-                                ))
-                            })?;
                             // AADSTS50203: User has not registered the authenticator app
                             if error_code == 50203 {
                                 if let Some(url_skip_mfa_registration) =

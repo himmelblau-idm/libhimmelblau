@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::convert::From;
+use std::fmt;
 
 pub use crate::aadsts_err_gen::*;
 
@@ -82,6 +83,39 @@ pub enum MsalError {
     PasswordRequired,
     /// An error was encountered because MS Authenticator registration was requested
     SkipMfaRegistration(String, Option<String>, String),
+}
+
+impl fmt::Display for MsalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MsalError::InvalidJson(msg) => write!(f, "Invalid JSON: {}", msg),
+            MsalError::InvalidBase64(msg) => write!(f, "Invalid base64: {}", msg),
+            MsalError::InvalidRegex(msg) => write!(f, "Invalid regex: {}", msg),
+            MsalError::InvalidParse(msg) => write!(f, "Parse error: {}", msg),
+            MsalError::AcquireTokenFailed(err) => write!(
+                f,
+                "Token acquisition failed: {} ({})",
+                err.error, err.error_description
+            ),
+            MsalError::GeneralFailure(msg) => write!(f, "General failure: {}", msg),
+            MsalError::RequestFailed(msg) => write!(f, "Request failed: {}", msg),
+            MsalError::AuthTypeUnsupported => write!(f, "Authentication type is not supported"),
+            MsalError::TPMFail(msg) => write!(f, "TPM error: {}", msg),
+            MsalError::URLFormatFailed(msg) => write!(f, "URL format error: {}", msg),
+            MsalError::DeviceEnrollmentFail(msg) => write!(f, "Device enrollment failed: {}", msg),
+            MsalError::CryptoFail(msg) => write!(f, "Cryptography failure: {}", msg),
+            MsalError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
+            MsalError::AADSTSError(err) => write!(f, "{}", err),
+            MsalError::Missing(msg) => write!(f, "Missing value: {}", msg),
+            MsalError::FormatError(msg) => write!(f, "Formatting error: {}", msg),
+            #[cfg(feature = "changepassword")]
+            MsalError::ChangePassword => write!(f, "Unexpected error"),
+            MsalError::NotImplemented
+            | MsalError::MFAPollContinue
+            | MsalError::PasswordRequired
+            | MsalError::SkipMfaRegistration(..) => write!(f, "Unexpected error"),
+        }
+    }
 }
 
 #[repr(C)]
