@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::sync::RwLock;
 use std::thread::sleep;
 use std::time::Duration;
 use tracing::{error, info};
@@ -1143,7 +1144,7 @@ pub enum AuthOption {
 struct ClientApplication {
     client: Client,
     client_id: String,
-    authority: String,
+    authority: RwLock<String>,
 }
 
 impl ClientApplication {
@@ -1174,11 +1175,35 @@ impl ClientApplication {
         Ok(ClientApplication {
             client,
             client_id: client_id.to_string(),
-            authority: match authority {
+            authority: RwLock::new(match authority {
                 Some(authority) => authority.to_string(),
                 None => "https://login.microsoftonline.com/common".to_string(),
-            },
+            }),
         })
+    }
+
+    fn authority(&self) -> Result<String, MsalError> {
+        self.authority
+            .read()
+            .map_err(|e| {
+                MsalError::GeneralFailure(format!(
+                    "Failed to lock authority URL for reading: {:?}",
+                    e
+                ))
+            })
+            .map(|authority| authority.clone())
+    }
+
+    fn set_authority(&self, new_authority: &str) -> Result<(), MsalError> {
+        self.authority
+            .write()
+            .map_err(|e| {
+                MsalError::GeneralFailure(format!(
+                    "Failed to acquire authority write lock: {:?}",
+                    e
+                ))
+            })
+            .map(|mut auth| *auth = new_authority.to_string())
     }
 
     async fn acquire_token_by_username_password(
@@ -1207,7 +1232,7 @@ impl ClientApplication {
 
         let resp = self
             .client
-            .post(format!("{}/oauth2/v2.0/token", self.authority))
+            .post(format!("{}/oauth2/v2.0/token", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -1254,7 +1279,7 @@ impl ClientApplication {
 
         let resp = self
             .client
-            .post(format!("{}/oauth2/v2.0/token", self.authority))
+            .post(format!("{}/oauth2/v2.0/token", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -1412,8 +1437,21 @@ impl PublicClientApplication {
         &self.app.client_id
     }
 
-    fn authority(&self) -> &str {
-        &self.app.authority
+    fn authority(&self) -> Result<String, MsalError> {
+        self.app.authority()
+    }
+
+    /// Changes the authority url set at initialization time
+    ///
+    /// # Arguments
+    ///
+    /// * `new_authority` - The new authority url to be used when communicating
+    ///   with Entra Id.
+    ///
+    /// # Returns
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn set_authority(&self, new_authority: &str) -> Result<(), MsalError> {
+        self.app.set_authority(new_authority)
     }
 
     /// Gets a token for a given resource via user credentials.
@@ -1491,7 +1529,7 @@ impl PublicClientApplication {
 
         let resp = self
             .client()
-            .post(format!("{}/oauth2/v2.0/devicecode", self.authority()))
+            .post(format!("{}/oauth2/v2.0/devicecode", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -1541,7 +1579,7 @@ impl PublicClientApplication {
 
         let resp = self
             .client()
-            .post(format!("{}/oauth2/v2.0/token", self.authority()))
+            .post(format!("{}/oauth2/v2.0/token", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -1712,7 +1750,7 @@ impl PublicClientApplication {
         };
         let url = match url_async_sspr_begin.starts_with('/') {
             true => {
-                let authority = self.authority().to_string();
+                let authority = self.authority()?.to_string();
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
@@ -1744,7 +1782,7 @@ impl PublicClientApplication {
             };
             let url = match url_async_sspr_poll.starts_with('/') {
                 true => {
-                    let authority = self.authority().to_string();
+                    let authority = self.authority()?.to_string();
                     let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                         "Failed to splice auth config url".to_string(),
                     ))?;
@@ -1790,7 +1828,7 @@ impl PublicClientApplication {
             };
             let url = match url_post.starts_with('/') {
                 true => {
-                    let authority = self.authority().to_string();
+                    let authority = self.authority()?.to_string();
                     let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                         "Failed to splice auth config url".to_string(),
                     ))?;
@@ -1978,7 +2016,7 @@ impl PublicClientApplication {
         };
         let url = match url_post.starts_with('/') {
             true => {
-                let authority = self.authority().to_string();
+                let authority = self.authority()?.to_string();
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
@@ -2484,7 +2522,7 @@ impl PublicClientApplication {
 
         let url = match &auth_config.url_get_one_time_code {
             Some(url) => url.to_string(),
-            None => format!("{}/GetOneTimeCode", self.authority()),
+            None => format!("{}/GetOneTimeCode", self.authority()?),
         };
 
         let resp = self
@@ -2537,7 +2575,7 @@ impl PublicClientApplication {
 
         let url = match &auth_config.url_get_credential_type {
             Some(url) => url.to_string(),
-            None => format!("{}/GetCredentialType", self.authority()),
+            None => format!("{}/GetCredentialType", self.authority()?),
         };
 
         let resp = self
@@ -2599,7 +2637,7 @@ impl PublicClientApplication {
             params.push(("amr_values", "ngcmfa"));
         }
         let url = Url::parse_with_params(
-            &format!("{}/oauth2/authorize", self.authority()),
+            &format!("{}/oauth2/authorize", self.authority()?),
             &params.to_vec(),
         )
         .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
@@ -2831,7 +2869,7 @@ impl PublicClientApplication {
 
         let url = match &flow.url_post.starts_with('/') {
             true => {
-                let authority = self.authority().to_string();
+                let authority = self.authority()?.to_string();
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
@@ -2948,7 +2986,7 @@ impl PublicClientApplication {
 
         let resp = self
             .client()
-            .post(format!("{}/oauth2/token", self.authority()))
+            .post(format!("{}/oauth2/token", self.authority()?))
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
@@ -3356,7 +3394,7 @@ impl PublicClientApplication {
             ("amr_values", "ngcmfa"),
         ];
         let url = Url::parse_with_params(
-            &format!("{}/oauth2/authorize", self.authority()),
+            &format!("{}/oauth2/authorize", self.authority()?),
             &params.to_vec(),
         )
         .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
@@ -3463,8 +3501,21 @@ impl BrokerClientApplication {
         self.app.client()
     }
 
-    fn authority(&self) -> &str {
+    fn authority(&self) -> Result<String, MsalError> {
         self.app.authority()
+    }
+
+    /// Changes the authority url set at initialization time
+    ///
+    /// # Arguments
+    ///
+    /// * `new_authority` - The new authority url to be used when communicating
+    ///   with Entra Id.
+    ///
+    /// # Returns
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn set_authority(&self, new_authority: &str) -> Result<(), MsalError> {
+        self.app.set_authority(new_authority)
     }
 
     fn transport_key(
@@ -3929,7 +3980,7 @@ impl BrokerClientApplication {
     async fn request_nonce(&self) -> Result<String, MsalError> {
         let resp = self
             .client()
-            .post(format!("{}/oauth2/token", self.authority()))
+            .post(format!("{}/oauth2/token", self.authority()?))
             .body("grant_type=srv_challenge")
             .send()
             .await
@@ -4153,7 +4204,7 @@ impl BrokerClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
-        let url = format!("{}/oauth2/token", self.authority());
+        let url = format!("{}/oauth2/token", self.authority()?);
 
         let mut debug_payload = params;
         debug_payload[2] = ("request", "**********");
@@ -4359,7 +4410,7 @@ impl BrokerClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
-        let url = format!("{}/oauth2/token", self.authority());
+        let url = format!("{}/oauth2/token", self.authority()?);
 
         let mut debug_payload = params.clone();
         debug_payload[2] = ("request", "**********");
@@ -4789,9 +4840,9 @@ impl BrokerClientApplication {
             .join("&");
 
         let url = if v2_endpoint {
-            format!("{}/oAuth2/v2.0/authorize?{}", self.authority(), payload)
+            format!("{}/oAuth2/v2.0/authorize?{}", self.authority()?, payload)
         } else {
-            format!("{}/oauth2/authorize?{}", self.authority(), payload)
+            format!("{}/oauth2/authorize?{}", self.authority()?, payload)
         };
         debug!("GET {}", url);
 
@@ -5057,9 +5108,9 @@ impl BrokerClientApplication {
             .join("&");
 
         let url = if v2_endpoint {
-            format!("{}/oAuth2/v2.0/token", self.authority())
+            format!("{}/oAuth2/v2.0/token", self.authority()?)
         } else {
-            format!("{}/oauth2/token", self.authority())
+            format!("{}/oauth2/token", self.authority()?)
         };
         let mut debug_payload = params;
         debug_payload[2] = ("code", "**********");

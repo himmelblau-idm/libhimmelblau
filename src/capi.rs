@@ -636,7 +636,8 @@ pub unsafe extern "C" fn broker_acquire_token_by_username_password(
     let request_resource = wrap_c_char(request_resource);
     let tpm = unsafe { &mut *tpm };
     let machine_key = unsafe { &mut *machine_key };
-    #[cfg(feature = "on_behalf_of")] let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
+    #[cfg(feature = "on_behalf_of")]
+    let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
     let resp = match run_async!(
         client,
         acquire_token_by_username_password,
@@ -644,7 +645,8 @@ pub unsafe extern "C" fn broker_acquire_token_by_username_password(
         &password,
         str_vec_ref!(scopes),
         request_resource,
-        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id.as_deref(),
+        #[cfg(feature = "on_behalf_of")]
+        on_behalf_of_client_id.as_deref(),
         &mut tpm.0,
         &machine_key.0,
     ) {
@@ -717,7 +719,8 @@ pub unsafe extern "C" fn broker_acquire_token_by_refresh_token(
         Err(e) => return e,
     };
     let request_resource = wrap_c_char(request_resource);
-    #[cfg(feature = "on_behalf_of")] let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
+    #[cfg(feature = "on_behalf_of")]
+    let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
     let tpm = unsafe { &mut *tpm };
     let machine_key = unsafe { &mut *machine_key };
     let resp = match run_async!(
@@ -726,7 +729,8 @@ pub unsafe extern "C" fn broker_acquire_token_by_refresh_token(
         &refresh_token,
         str_vec_ref!(scopes),
         request_resource,
-        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id.as_deref(),
+        #[cfg(feature = "on_behalf_of")]
+        on_behalf_of_client_id.as_deref(),
         &mut tpm.0,
         &machine_key.0,
     ) {
@@ -1328,7 +1332,8 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
         Err(e) => return e,
     };
     let request_resource = wrap_c_char(request_resource);
-    #[cfg(feature = "on_behalf_of")] let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
+    #[cfg(feature = "on_behalf_of")]
+    let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
     let tpm = unsafe { &mut *tpm };
     let machine_key = unsafe { &mut *machine_key };
     let resp = match run_async!(
@@ -1337,7 +1342,8 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
         &sealed_prt.0,
         str_vec_ref!(scopes),
         request_resource,
-        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id.as_deref(),
+        #[cfg(feature = "on_behalf_of")]
+        on_behalf_of_client_id.as_deref(),
         &mut tpm.0,
         &machine_key.0,
     ) {
@@ -1556,7 +1562,8 @@ pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
         Err(e) => return e,
     };
     let request_resource = wrap_c_char(request_resource);
-    #[cfg(feature = "on_behalf_of")] let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
+    #[cfg(feature = "on_behalf_of")]
+    let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
     let tpm = unsafe { &mut *tpm };
     let machine_key = unsafe { &mut *machine_key };
     let pin = match wrap_c_char(pin) {
@@ -1573,7 +1580,8 @@ pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
         &key.0,
         str_vec_ref!(scopes),
         request_resource,
-        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id.as_deref(),
+        #[cfg(feature = "on_behalf_of")]
+        on_behalf_of_client_id.as_deref(),
         &mut tpm.0,
         &machine_key.0,
         &pin,
