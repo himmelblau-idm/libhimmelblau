@@ -264,6 +264,8 @@ struct AuthResponse {
     retry: Option<bool>,
     #[serde(rename = "Message")]
     message: Option<String>,
+    #[serde(rename = "ErrCode")] // AADSTS error code
+    error_code: Option<u32>,
     #[serde(rename = "Ctx")]
     ctx: String,
     #[serde(rename = "FlowToken")]
@@ -2698,6 +2700,8 @@ impl PublicClientApplication {
                 json_from_str(&text).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             if auth_response.success {
                 Ok(auth_response)
+            } else if let Some(error_code) = auth_response.error_code {
+                Err(MsalError::AADSTSError(AADSTSError::new(error_code)))
             } else if let Some(msg) = auth_response.message {
                 Err(MsalError::GeneralFailure(msg))
             } else {
