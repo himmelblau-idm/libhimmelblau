@@ -3340,6 +3340,10 @@ impl PublicClientApplication {
                             .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
                         if status.authorization_state == 0 {
                             Err(MsalError::MFAPollContinue)
+                        } else if status.authorization_state == 1 {
+                            return Err(MsalError::GeneralFailure(
+                                "Authorization denied".to_string(),
+                            ));
                         } else if status.authorization_state == 2 {
                             let auth_code = self
                                 .request_authorization_passwordless_internal(username, flow)
