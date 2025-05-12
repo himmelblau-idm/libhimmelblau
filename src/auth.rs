@@ -301,6 +301,12 @@ struct OneTimeCode {
 }
 
 #[derive(Deserialize)]
+struct FidoParams {
+    #[serde(rename = "AllowList")]
+    fido_allow_list: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct Credentials {
     #[serde(rename = "FederationRedirectUrl")]
     federation_redirect_url: Option<String>,
@@ -308,6 +314,10 @@ struct Credentials {
     has_password: bool,
     #[serde(rename = "RemoteNgcParams")]
     remote_ngc_params: Option<RemoteNgcParams>,
+    #[serde(rename = "FidoParams")]
+    fido_params: Option<FidoParams>,
+    #[serde(rename = "PrefCredential")]
+    pref_credential: u8,
 }
 
 #[derive(Deserialize)]
@@ -1389,7 +1399,7 @@ impl AuthInit {
 
     /// Whether passwordless authentication was negotiated
     pub fn passwordless(&self) -> bool {
-        self.cred_type.credentials.remote_ngc_params.is_some()
+        self.cred_type.credentials.remote_ngc_params.is_some() || self.cred_type.credentials.fido_params.is_some()
     }
 }
 
@@ -2178,7 +2188,7 @@ impl PublicClientApplication {
             };
         }
         let request_id = Uuid::new_v4().to_string();
-        let (auth_config, cred_type) = if let Some(auth_init) = auth_init {
+        let (mut auth_config, cred_type) = if let Some(auth_init) = auth_init {
             (auth_init.auth_config, auth_init.cred_type)
         } else {
             let auth_config = match self
@@ -2211,22 +2221,53 @@ impl PublicClientApplication {
             Some(sft) => sft.clone(),
             None => return Err(MsalError::GeneralFailure("sFt is missing".to_string())),
         };
-        let remote_ngc_params =
+        // If MS Authenticator is the preferred passwordless credential
+        if cred_type.credentials.pref_credential == 7 {
             if let Some(remote_ngc_params) = cred_type.credentials.remote_ngc_params {
-                self.get_one_time_code(&auth_config, &remote_ngc_params, &request_id)
+                // Ensure the one time code didn't fail, if it did, we need to continue
+                if let Ok(remote_ngc_params) = self
+                    .get_one_time_code(&auth_config, &remote_ngc_params, &request_id)
                     .await
-            } else {
-                Err(MsalError::GeneralFailure(
-                    "No remote NGC params".to_string(),
-                ))
-            };
-        // Ensure the one time code didn't fail, if it did, we need to continue
-        if let Ok(remote_ngc_params) = remote_ngc_params {
-            // Passwordless is enabled, we can drop out here
-            let msg = format!(
-                "Open your Authenticator app, and enter the number '{}' to sign in.",
-                remote_ngc_params.entropy
-            );
+                {
+                    // Passwordless is enabled, we can drop out here
+                    let msg = format!(
+                        "Open your Authenticator app, and enter the number '{}' to sign in.",
+                        remote_ngc_params.entropy
+                    );
+                    let url_post = match &auth_config.url_post {
+                        Some(url_post) => url_post.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure(
+                                "urlBeginAuth is missing".to_string(),
+                            ))
+                        }
+                    };
+                    return Ok(MFAAuthContinue {
+                        mfa_method: "PhoneAppNotification".to_string(),
+                        msg,
+                        entropy: Some(remote_ngc_params.entropy),
+                        max_poll_attempts: auth_config.max_poll_attempts,
+                        polling_interval: Some(5000),
+                        session_id: remote_ngc_params.session_identifier,
+                        flow_token: sft,
+                        ctx: sctx,
+                        canary: auth_config.canary,
+                        url_end_auth: None,
+                        url_post,
+                        resource: resource.map(|s| s.to_string()),
+                        dag: None,
+                        fido_challenge: None,
+                        fido_allow_list: None,
+                        cross_domain_canary: None,
+                        url_session_state: auth_config.url_session_state,
+                    });
+                }
+            }
+        }
+
+        // Passwordless fido auth; cred_type.credentials.pref_credential == 2
+        if let Some(fido_params) = cred_type.credentials.fido_params {
+            // Passwordless fido is enabled, we can drop out here
             let url_post = match &auth_config.url_post {
                 Some(url_post) => url_post.clone(),
                 None => {
@@ -2235,26 +2276,31 @@ impl PublicClientApplication {
                     ))
                 }
             };
+            auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
+            let fido_auth_config = self
+                .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                .await?;
             return Ok(MFAAuthContinue {
-                mfa_method: "PhoneAppNotification".to_string(),
-                msg,
-                entropy: Some(remote_ngc_params.entropy),
+                mfa_method: "FidoKey".to_string(),
+                msg: "".to_string(),
+                entropy: None,
                 max_poll_attempts: auth_config.max_poll_attempts,
                 polling_interval: Some(5000),
-                session_id: remote_ngc_params.session_identifier,
+                session_id: fido_auth_config.session_id,
                 flow_token: sft,
                 ctx: sctx,
                 canary: auth_config.canary,
-                url_end_auth: None,
+                url_end_auth: auth_config.url_end_auth,
                 url_post,
                 resource: resource.map(|s| s.to_string()),
                 dag: None,
-                fido_challenge: None,
-                fido_allow_list: None,
-                cross_domain_canary: None,
+                fido_challenge: fido_auth_config.fido_challenge,
+                fido_allow_list: Some(fido_params.fido_allow_list),
+                cross_domain_canary: fido_auth_config.cross_domain_canary,
                 url_session_state: auth_config.url_session_state,
             });
         }
+
         if cred_type.credentials.federation_redirect_url.is_some() {
             info!("Federated identities are not supported.");
             dag_fallback!();
