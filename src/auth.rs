@@ -306,6 +306,7 @@ struct FidoParams {
     fido_allow_list: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Credentials {
     #[serde(rename = "FederationRedirectUrl")]
@@ -318,6 +319,12 @@ struct Credentials {
     fido_params: Option<FidoParams>,
     #[serde(rename = "PrefCredential")]
     pref_credential: u8,
+    #[serde(rename = "HasAccessPass")]
+    has_access_pass: Option<bool>,
+    #[serde(rename = "HasFido")]
+    has_fido: Option<bool>,
+    #[serde(rename = "HasRemoteNGC")]
+    has_remote_ngc: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1399,7 +1406,20 @@ impl AuthInit {
 
     /// Whether passwordless authentication was negotiated
     pub fn passwordless(&self) -> bool {
-        self.cred_type.credentials.remote_ngc_params.is_some() || self.cred_type.credentials.fido_params.is_some()
+        match self.cred_type.credentials.pref_credential {
+            13 => self.cred_type.credentials.has_access_pass.unwrap_or(false),
+            7 => {
+                self.cred_type.credentials.has_remote_ngc.unwrap_or(false)
+                    && self.cred_type.credentials.remote_ngc_params.is_some()
+            }
+            2 => {
+                self.cred_type.credentials.has_fido.unwrap_or(false)
+                    && self.cred_type.credentials.fido_params.is_some()
+            }
+            1 => false,
+            // Other passwordless MFA types are currently unsupported
+            _ => false,
+        }
     }
 }
 
@@ -2221,19 +2241,12 @@ impl PublicClientApplication {
             Some(sft) => sft.clone(),
             None => return Err(MsalError::GeneralFailure("sFt is missing".to_string())),
         };
-        // If MS Authenticator is the preferred passwordless credential
-        if cred_type.credentials.pref_credential == 7 {
-            if let Some(remote_ngc_params) = cred_type.credentials.remote_ngc_params {
-                // Ensure the one time code didn't fail, if it did, we need to continue
-                if let Ok(remote_ngc_params) = self
-                    .get_one_time_code(&auth_config, &remote_ngc_params, &request_id)
-                    .await
-                {
-                    // Passwordless is enabled, we can drop out here
-                    let msg = format!(
-                        "Open your Authenticator app, and enter the number '{}' to sign in.",
-                        remote_ngc_params.entropy
-                    );
+
+        match cred_type.credentials.pref_credential {
+            13 => {
+                if cred_type.credentials.has_access_pass.unwrap_or(false) {
+                    // Passwordless TAP is enabled, we can drop out here
+                    let msg = "Enter Temporary Access Pass: ".to_string();
                     let url_post = match &auth_config.url_post {
                         Some(url_post) => url_post.clone(),
                         None => {
@@ -2243,12 +2256,12 @@ impl PublicClientApplication {
                         }
                     };
                     return Ok(MFAAuthContinue {
-                        mfa_method: "PhoneAppNotification".to_string(),
+                        mfa_method: "AccessPass".to_string(),
                         msg,
-                        entropy: Some(remote_ngc_params.entropy),
-                        max_poll_attempts: auth_config.max_poll_attempts,
-                        polling_interval: Some(5000),
-                        session_id: remote_ngc_params.session_identifier,
+                        entropy: None,
+                        max_poll_attempts: None,
+                        polling_interval: None,
+                        session_id: auth_config.session_id,
                         flow_token: sft,
                         ctx: sctx,
                         canary: auth_config.canary,
@@ -2263,42 +2276,85 @@ impl PublicClientApplication {
                     });
                 }
             }
-        }
-
-        // Passwordless fido auth; cred_type.credentials.pref_credential == 2
-        if let Some(fido_params) = cred_type.credentials.fido_params {
-            // Passwordless fido is enabled, we can drop out here
-            let url_post = match &auth_config.url_post {
-                Some(url_post) => url_post.clone(),
-                None => {
-                    return Err(MsalError::GeneralFailure(
-                        "urlBeginAuth is missing".to_string(),
-                    ))
+            7 => {
+                if let Some(remote_ngc_params) = cred_type.credentials.remote_ngc_params {
+                    // Ensure the one time code didn't fail, if it did, we need to continue
+                    if let Ok(remote_ngc_params) = self
+                        .get_one_time_code(&auth_config, &remote_ngc_params, &request_id)
+                        .await
+                    {
+                        // Passwordless MS Authenticator is enabled, we can drop out here
+                        let msg = format!(
+                            "Open your Authenticator app, and enter the number '{}' to sign in.",
+                            remote_ngc_params.entropy
+                        );
+                        let url_post = match &auth_config.url_post {
+                            Some(url_post) => url_post.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "urlBeginAuth is missing".to_string(),
+                                ))
+                            }
+                        };
+                        return Ok(MFAAuthContinue {
+                            mfa_method: "PhoneAppNotification".to_string(),
+                            msg,
+                            entropy: Some(remote_ngc_params.entropy),
+                            max_poll_attempts: auth_config.max_poll_attempts,
+                            polling_interval: Some(5000),
+                            session_id: remote_ngc_params.session_identifier,
+                            flow_token: sft,
+                            ctx: sctx,
+                            canary: auth_config.canary,
+                            url_end_auth: None,
+                            url_post,
+                            resource: resource.map(|s| s.to_string()),
+                            dag: None,
+                            fido_challenge: None,
+                            fido_allow_list: None,
+                            cross_domain_canary: None,
+                            url_session_state: auth_config.url_session_state,
+                        });
+                    }
                 }
-            };
-            auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
-            let fido_auth_config = self
-                .handle_auth_config_fido_get(username, &auth_config, &request_id)
-                .await?;
-            return Ok(MFAAuthContinue {
-                mfa_method: "FidoKey".to_string(),
-                msg: "".to_string(),
-                entropy: None,
-                max_poll_attempts: auth_config.max_poll_attempts,
-                polling_interval: Some(5000),
-                session_id: fido_auth_config.session_id,
-                flow_token: sft,
-                ctx: sctx,
-                canary: auth_config.canary,
-                url_end_auth: auth_config.url_end_auth,
-                url_post,
-                resource: resource.map(|s| s.to_string()),
-                dag: None,
-                fido_challenge: fido_auth_config.fido_challenge,
-                fido_allow_list: Some(fido_params.fido_allow_list),
-                cross_domain_canary: fido_auth_config.cross_domain_canary,
-                url_session_state: auth_config.url_session_state,
-            });
+            }
+            2 => {
+                if let Some(fido_params) = cred_type.credentials.fido_params {
+                    // Passwordless fido is enabled, we can drop out here
+                    let url_post = match &auth_config.url_post {
+                        Some(url_post) => url_post.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure(
+                                "urlBeginAuth is missing".to_string(),
+                            ))
+                        }
+                    };
+                    auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
+                    let fido_auth_config = self
+                        .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                        .await?;
+                    return Ok(MFAAuthContinue {
+                        mfa_method: "FidoKey".to_string(),
+                        msg: "".to_string(),
+                        entropy: None,
+                        max_poll_attempts: auth_config.max_poll_attempts,
+                        polling_interval: Some(5000),
+                        session_id: fido_auth_config.session_id,
+                        flow_token: sft,
+                        ctx: sctx,
+                        canary: auth_config.canary,
+                        url_end_auth: auth_config.url_end_auth,
+                        url_post,
+                        resource: resource.map(|s| s.to_string()),
+                        dag: None,
+                        fido_challenge: fido_auth_config.fido_challenge,
+                        fido_allow_list: Some(fido_params.fido_allow_list),
+                        cross_domain_canary: fido_auth_config.cross_domain_canary,
+                        url_session_state: auth_config.url_session_state,
+                    });
+                }
+            }
+            _ => {}
         }
 
         if cred_type.credentials.federation_redirect_url.is_some() {
@@ -2483,6 +2539,8 @@ impl PublicClientApplication {
                         auth_config.cross_domain_canary =
                             fido_auth_config.cross_domain_canary.clone();
                         (sft, sctx, "".to_string())
+                    } else if default_auth_method.auth_method_id == "AccessPass" {
+                        (sft, sctx, "Enter Temporary Access Pass: ".to_string())
                     } else {
                         let auth_response = match self
                             .mfa_begin_auth_internal(
@@ -3059,6 +3117,38 @@ impl PublicClientApplication {
         }
     }
 
+    async fn exchange_accesspass_for_auth_code_internal(
+        &self,
+        username: &str,
+        accesspass: &str,
+        flow: &mut MFAAuthContinue,
+    ) -> Result<String, MsalError> {
+        let mut params = vec![
+            ("login", username),
+            ("loginfmt", username),
+            ("accesspass", accesspass),
+            ("canary", &flow.canary),
+            ("hpgrequestid", &flow.session_id),
+            ("flowToken", &flow.flow_token),
+        ];
+        if flow.url_post.contains("ProcessAuth") {
+            params.push(("request", &flow.ctx));
+        } else {
+            params.push(("ctx", &flow.ctx));
+        }
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        self.auth_code_intercept_internal(
+                &flow.url_post,
+                payload,
+            )
+            .await
+    }
+
     async fn exchange_fido_assertion_for_auth_code_internal(
         &self,
         assertion: &str,
@@ -3218,6 +3308,16 @@ impl PublicClientApplication {
                 if flow.mfa_method == "FidoKey" {
                     let auth_code = self
                         .exchange_fido_assertion_for_auth_code_internal(auth_data, flow)
+                        .await?;
+                    self.exchange_authorization_code_for_access_token_internal(
+                        auth_code,
+                        flow.resource.as_deref(),
+                        None,
+                    )
+                    .await
+                } else if flow.mfa_method == "AccessPass" {
+                    let auth_code = self
+                        .exchange_accesspass_for_auth_code_internal(username, auth_data, flow)
                         .await?;
                     self.exchange_authorization_code_for_access_token_internal(
                         auth_code,
