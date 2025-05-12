@@ -57,3 +57,5 @@ pub mod aadsts_err_gen;
 
 #[cfg(feature = "broker")]
 mod krb5;
+
+pub mod intune;

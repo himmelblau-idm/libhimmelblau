@@ -1,7 +1,7 @@
 [package]
 name = "libhimmelblau"
 description = "Samba Library for Azure Entra ID Authentication"
-version = "0.6.17"
+version = "0.6.18"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
@@ -55,6 +55,7 @@ himmelblau_kerberos_ccache = "0.4.0"
 chrono = "0.4.38"
 percent-encoding = "2.3.1"
 browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], optional = true }
+serde_bytes = "0.11.17"
 
 [build-dependencies]
 cbindgen = "0.26.0"

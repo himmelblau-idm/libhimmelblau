@@ -16,6 +16,9 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
+use std::fs;
+use std::io::Read;
+
 use crate::error::MsalError;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -249,14 +252,26 @@ struct NonceResp {
     value: String,
 }
 
+fn get_manufacturer() -> Option<String> {
+    let path = "/sys/class/dmi/id/sys_vendor";
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut manufacturer = String::new();
+    file.read_to_string(&mut manufacturer).ok()?;
+
+    Some(manufacturer.trim().to_string())
+}
+
 #[cfg(feature = "broker")]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EnrollAttrs {
-    device_display_name: String,
-    device_type: String,
+    pub(crate) device_display_name: String,
+    pub(crate) device_type: String,
     join_type: u32,
-    os_version: String,
+    pub(crate) os_version: String,
     pub(crate) target_domain: String,
+    pub(crate) os_distribution: String,
+    pub(crate) manufacturer: String,
 }
 
 #[cfg(feature = "broker")]
@@ -292,6 +307,10 @@ impl EnrollAttrs {
         join_type: Option<u32>,
         os_version: Option<String>,
     ) -> Result<Self, MsalError> {
+        let os_release =
+            OsRelease::new().map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+        let os_distribution = os_release.name;
+
         let device_display_name_int = match device_display_name {
             Some(device_display_name) => device_display_name,
             None => match hostname::get()
@@ -314,8 +333,6 @@ impl EnrollAttrs {
         let os_version_int = match os_version {
             Some(os_version) => os_version,
             None => {
-                let os_release =
-                    OsRelease::new().map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
                 format!("{} {}", os_release.pretty_name, os_release.version_id)
             }
         };
@@ -325,6 +342,8 @@ impl EnrollAttrs {
             join_type: join_type_int,
             os_version: os_version_int,
             target_domain,
+            os_distribution,
+            manufacturer: get_manufacturer().unwrap_or_default(),
         })
     }
 }

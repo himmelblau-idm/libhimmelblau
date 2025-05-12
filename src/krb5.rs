@@ -12,7 +12,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 
 pub(crate) struct IntegerAsn1<'a>(pub(crate) &'a IntegerAsn1In);
-impl<'a> TryFrom<IntegerAsn1<'a>> for u16 {
+impl TryFrom<IntegerAsn1<'_>> for u16 {
     type Error = MsalError;
 
     fn try_from(i: IntegerAsn1) -> Result<Self, Self::Error> {
@@ -32,7 +32,7 @@ impl<'a> TryFrom<IntegerAsn1<'a>> for u16 {
         }
     }
 }
-impl<'a> TryFrom<IntegerAsn1<'a>> for u32 {
+impl TryFrom<IntegerAsn1<'_>> for u32 {
     type Error = MsalError;
 
     fn try_from(i: IntegerAsn1) -> Result<Self, Self::Error> {
