@@ -22,7 +22,11 @@ use crate::EnrollAttrs;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use kanidm_hsm_crypto::{BoxedDynTpm, KeyAlgorithm, LoadableIdentityKey, MachineKey, Tpm};
+use crypto_glue::traits::EncodeDer;
+use kanidm_hsm_crypto::{
+    provider::{BoxedDynTpm, TpmMsExtensions},
+    structures::{LoadableMsDeviceEnrolmentKey, StorageKey as MachineKey},
+};
 use openssl::x509::X509;
 use reqwest::header;
 use reqwest::redirect::Policy;
@@ -222,7 +226,7 @@ impl IntuneForLinux {
         device_id: &str,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
-    ) -> Result<(LoadableIdentityKey, String), MsalError> {
+    ) -> Result<(LoadableMsDeviceEnrolmentKey, String), MsalError> {
         let enrollment_url = Url::parse_with_params(
             &format!(
                 "{}/enroll",
@@ -240,21 +244,15 @@ impl IntuneForLinux {
             MsalError::GeneralFailure("Failed to Intune enroll: missing access_token".to_string())
         })?;
 
-        // Create the Intune cert key
-        let loadable_cert_key = tpm
-            .identity_key_create(machine_key, None, KeyAlgorithm::Rsa2048)
+        // Create the CSR
+        let (in_progess_enrolment, csr) = tpm
+            .ms_device_enrolment_begin(machine_key, device_id)
             .map_err(|e| MsalError::TPMFail(format!("Failed creating certificate key: {:?}", e)))?;
 
-        // Create the CSR
-        let csr_der = match tpm.identity_key_certificate_request(
-            machine_key,
-            None,
-            &loadable_cert_key,
-            device_id,
-        ) {
-            Ok(csr_der) => csr_der,
-            Err(e) => return Err(MsalError::TPMFail(format!("Failed creating CSR: {:?}", e))),
-        };
+        // We need to make the csr into der here, or we can can just yield the der from ms_device_enrolment_begining.
+        let csr_der = csr
+            .to_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed creating CSR: {:?}", e)))?;
 
         let payload = json!({
             "CertificateSigningRequest": STANDARD.encode(csr_der),
@@ -282,22 +280,17 @@ impl IntuneForLinux {
             );
             let cert = X509::from_pem(cert_pem.as_bytes())
                 .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?;
-            let new_loadable_cert_key = match tpm.identity_key_associate_certificate(
-                machine_key,
-                None,
-                &loadable_cert_key,
-                &cert
-                    .to_der()
-                    .map_err(|e| MsalError::TPMFail(format!("{}", e)))?,
-            ) {
-                Ok(loadable_cert_key) => loadable_cert_key,
-                Err(e) => {
-                    return Err(MsalError::TPMFail(format!(
-                        "Failed creating loadable identity key: {:?}",
-                        e
-                    )))
-                }
-            };
+            let cert_der = cert
+                .to_der()
+                .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?;
+            // To help prevent mismatches between the tpm crypto lib and openssl, we
+            // want the certificate *der* here. This way you don't have to worry about it
+            // as much when you load, and it saves you having to do the translation.
+            let new_loadable_cert_key = tpm
+                .ms_device_enrolment_finalise(machine_key, in_progess_enrolment, &cert_der)
+                .map_err(|err| {
+                    MsalError::TPMFail(format!("Failed creating loadable identity key: {:?}", err))
+                })?;
             Ok((new_loadable_cert_key, json_resp.device_id))
         } else {
             Err(MsalError::GeneralFailure(

@@ -20,6 +20,8 @@ use crate::aadsts_err_gen::AADSTSError;
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use crypto_glue::x509::Certificate;
+use kanidm_hsm_crypto::structures::RS256Key;
 use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
 #[cfg(feature = "proxyable")]
@@ -48,28 +50,25 @@ use browser_window::{application::*, browser::*};
 use std::sync::mpsc::channel;
 
 #[cfg(feature = "broker")]
-use compact_jwt::compact::JweCompact;
-#[cfg(feature = "broker")]
-use compact_jwt::crypto::JwsTpmSigner;
-#[cfg(feature = "broker")]
-use compact_jwt::crypto::MsOapxbcSessionKey;
-#[cfg(feature = "broker")]
-use compact_jwt::jwe::Jwe;
-#[cfg(feature = "broker")]
-use compact_jwt::jws::JwsBuilder;
-#[cfg(feature = "broker")]
-use compact_jwt::traits::JwsMutSigner;
-#[cfg(feature = "broker")]
-use compact_jwt::traits::JwsSignable;
-#[cfg(feature = "broker")]
-use compact_jwt::Jws;
+use compact_jwt::{
+    compact::JweCompact,
+    crypto::{JwsTpmRs256Signer, MsOapxbcSessionKey},
+    jwe::Jwe,
+    jws::{Jws, JwsBuilder},
+    traits::{JwsMutSigner, JwsSignable},
+};
+
 #[cfg(feature = "broker")]
 use kanidm_hsm_crypto::{
-    BoxedDynTpm, IdentityKey, KeyAlgorithm, LoadableIdentityKey, MachineKey, PinValue, SealedData,
-    Tpm,
+    glue::traits::EncodeDer,
+    provider::{BoxedDynTpm, Tpm, TpmMsExtensions},
+    structures::{
+        LoadableMsDeviceEnrolmentKey, LoadableMsHelloKey, LoadableMsOapxbcRsaKey, MsOapxbcRsaKey,
+        SealedData, StorageKey,
+    },
+    PinValue,
 };
-#[cfg(feature = "broker")]
-use kanidm_hsm_crypto::{LoadableMsOapxbcRsaKey, MsOapxbcRsaKey};
+
 #[cfg(feature = "broker")]
 use openssl::hash::{hash, MessageDigest};
 #[cfg(feature = "broker")]
@@ -981,6 +980,7 @@ impl TGT {
         &self,
         tpm: &mut BoxedDynTpm,
         transport_key: &MsOapxbcRsaKey,
+        storage_key: &StorageKey,
         session_key: &SessionKey,
     ) -> Result<AesKey, MsalError> {
         if self.key_type == 0 {
@@ -999,7 +999,7 @@ impl TGT {
                 let jwe = JweCompact::from_str(client_key)
                     .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
                 let client_key = session_key
-                    .decipher_tgt_client_key(tpm, transport_key, &jwe)
+                    .decipher_tgt_client_key(tpm, transport_key, storage_key, &jwe)
                     .map_err(|e| {
                         MsalError::CryptoFail(format!(
                             "Failed to unwrap the tgt session key: {:?}",
@@ -1107,16 +1107,24 @@ impl SessionKey {
         &self,
         tpm: &mut BoxedDynTpm,
         transport_key: &MsOapxbcRsaKey,
+        storage_key: &StorageKey,
         jwe: &JweCompact,
     ) -> Result<Jwe, MsalError> {
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
         let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
             tpm,
+            storage_key,
             transport_key,
             &self.session_key_jwe,
         )
         .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
         session_key
-            .decipher_prt_v2(tpm, transport_key, jwe)
+            .decipher_prt_v2(tpm, storage_key, jwe)
             .map_err(|e| MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e)))
     }
 
@@ -1124,17 +1132,25 @@ impl SessionKey {
         &self,
         tpm: &mut BoxedDynTpm,
         transport_key: &MsOapxbcRsaKey,
+        storage_key: &StorageKey,
         jwe: &JweCompact,
     ) -> Result<Zeroizing<Vec<u8>>, MsalError> {
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
         let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
             tpm,
+            prt_storage_key,
             transport_key,
             &self.session_key_jwe,
         )
         .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
-        match session_key.decipher_prt_v2(tpm, transport_key, jwe) {
+        match session_key.decipher_prt_v2(tpm, prt_storage_key, jwe) {
             Ok(decrypted) => Ok(Zeroizing::new(decrypted.payload().to_vec())),
-            Err(JwtError::OpenSSLError) => match session_key.decipher(tpm, transport_key, jwe) {
+            Err(JwtError::OpenSSLError) => match session_key.decipher(tpm, prt_storage_key, jwe) {
                 Ok(decrypted) => Ok(Zeroizing::new(decrypted.payload().to_vec())),
                 Err(e) => Err(MsalError::CryptoFail(format!(
                     "Failed to decipher Jwe: {}",
@@ -1152,16 +1168,25 @@ impl SessionKey {
         &self,
         tpm: &mut BoxedDynTpm,
         transport_key: &MsOapxbcRsaKey,
+        storage_key: &StorageKey,
         jws: &V,
     ) -> Result<V::Signed, MsalError> {
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
         let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
             tpm,
+            storage_key,
             transport_key,
             &self.session_key_jwe,
         )
         .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
+
         session_key
-            .sign(tpm, transport_key, jws)
+            .sign(tpm, storage_key, jws)
             .map_err(|e| MsalError::CryptoFail(format!("Failed signing jwk: {}", e)))
     }
 }
@@ -3646,11 +3671,16 @@ impl PublicClientApplication {
     }
 }
 
+struct EnrollmentKeyWrapper {
+    key: RS256Key,
+    cert: Certificate,
+}
+
 #[cfg(feature = "broker")]
 pub struct BrokerClientApplication {
     app: PublicClientApplication,
     transport_key: Option<LoadableMsOapxbcRsaKey>,
-    cert_key: Option<LoadableIdentityKey>,
+    cert_key: Option<LoadableMsDeviceEnrolmentKey>,
     on_behalf_of_client_id: Option<String>,
 }
 
@@ -3672,7 +3702,7 @@ impl BrokerClientApplication {
     /// * `transport_key` - An optional LoadableMsOapxbcRsaKey transport key
     ///   from enrolling the device.
     ///
-    /// * `cert_key` - An optional LoadableIdentityKey which was used to create
+    /// * `cert_key` - An optional LoadableMsDeviceEnrolmentKey which was used to create
     ///   the enrollment CSR.
     ///
     /// NOTE: If `transport_key` and `cert_key` are not provided from a previous
@@ -3681,7 +3711,7 @@ impl BrokerClientApplication {
         authority: Option<&str>,
         client_id: Option<&str>,
         transport_key: Option<LoadableMsOapxbcRsaKey>,
-        cert_key: Option<LoadableIdentityKey>,
+        cert_key: Option<LoadableMsDeviceEnrolmentKey>,
     ) -> Result<Self, MsalError> {
         Ok(BrokerClientApplication {
             app: PublicClientApplication::new(BROKER_APP_ID, authority)?,
@@ -3715,18 +3745,15 @@ impl BrokerClientApplication {
     fn transport_key(
         &self,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<MsOapxbcRsaKey, MsalError> {
-        match &self.transport_key {
-            Some(transport_key) => {
-                let transport_key = tpm.msoapxbc_rsa_key_load(machine_key, transport_key)
-            .map_err(|e| {
-                MsalError::TPMFail(format!("Failed to load IdentityKey: {:?}", e))
-            })?;
-                Ok(transport_key)
-            },
-            None => Err(MsalError::ConfigError("The transport key was not found. Please provide the transport key during initialize of the BrokerClientApplication, or enroll the device.".to_string())),
-        }
+        let transport_key = &self.transport_key.as_ref()
+            .ok_or_else(||
+                MsalError::ConfigError("The transport key was not found. Please provide the transport key during initialize of the BrokerClientApplication, or enroll the device.".to_string())
+            )?;
+
+        tpm.msoapxbc_rsa_key_load(storage_key, transport_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed to load Msoapxbc: {:?}", e)))
     }
 
     /// Set the enrollment transport key
@@ -3742,27 +3769,26 @@ impl BrokerClientApplication {
     fn cert_key(
         &self,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
-    ) -> Result<IdentityKey, MsalError> {
-        match &self.cert_key {
-            Some(cert_key) => {
-                let cert_key = tpm.identity_key_load(machine_key, None, cert_key)
-            .map_err(|e| {
-                MsalError::TPMFail(format!("Failed to load IdentityKey: {:?}", e))
-            })?;
-                Ok(cert_key)
-            },
-            None => Err(MsalError::ConfigError("The certificate key was not found. Please provide the certificate key during initialize of the BrokerClientApplication, or enroll the device.".to_string())),
-        }
+        storage_key: &StorageKey,
+    ) -> Result<EnrollmentKeyWrapper, MsalError> {
+        let cert_key = self.cert_key.clone()
+            .ok_or_else(||
+                MsalError::ConfigError("The certificate key was not found. Please provide the certificate key during initialize of the BrokerClientApplication, or enroll the device.".to_string())
+            )?;
+
+        let (key, cert) = tpm
+            .ms_device_enrolment_key_load(storage_key, cert_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed to load IdentityKey: {:?}", e)))?;
+        Ok(EnrollmentKeyWrapper { key, cert })
     }
 
     /// Set the enrollment certificate key
     ///
     /// # Arguments
     ///
-    /// * `cert_key` - An optional LoadableIdentityKey which was used to create
+    /// * `cert_key` - An optional LoadableMsDeviceEnrolmentKey which was used to create
     ///   the enrollment CSR.
-    pub fn set_cert_key(&mut self, cert_key: Option<LoadableIdentityKey>) {
+    pub fn set_cert_key(&mut self, cert_key: Option<LoadableMsDeviceEnrolmentKey>) {
         self.cert_key = cert_key;
     }
 
@@ -3778,11 +3804,11 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     ///
-    /// * Success: A LoadableMsOapxbcRsaKey transport key, a LoadableIdentityKey certificate key,
+    /// * Success: A LoadableMsOapxbcRsaKey transport key, a LoadableMsDeviceEnrolmentKey certificate key,
     ///   and a `device_id`.
     /// * Failure: An MsalError, indicating the failure.
     pub async fn enroll_device(
@@ -3790,34 +3816,30 @@ impl BrokerClientApplication {
         refresh_token: &str,
         attrs: EnrollAttrs,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
-    ) -> Result<(LoadableMsOapxbcRsaKey, LoadableIdentityKey, String), MsalError> {
+        storage_key: &StorageKey,
+    ) -> Result<(LoadableMsOapxbcRsaKey, LoadableMsDeviceEnrolmentKey, String), MsalError> {
         // Acquire an actual enrollment token from the token received.
         let token = self
             .acquire_token_by_refresh_token_for_device_enrollment(refresh_token)
             .await?;
         // Create the transport and cert keys
-        let loadable_cert_key = tpm
-            .identity_key_create(machine_key, None, KeyAlgorithm::Rsa2048)
+        // Create the CSR
+        let (in_progess_enrolment, csr) = tpm
+            .ms_device_enrolment_begin(storage_key, "7E980AD9-B86D-4306-9425-9AC066FB014A")
             .map_err(|e| MsalError::TPMFail(format!("Failed creating certificate key: {:?}", e)))?;
+
+        // We need to make the csr into der here, or we can can just yield the der from ms_device_enrolment_begining.
+        let csr_der = csr.to_der().map_err(|_|
+                // TODO: David, is this the right error here?
+                MsalError::GeneralFailure("Unable to convert X509 Request to DER".into()))?;
+
         let loadable_transport_key = tpm
-            .msoapxbc_rsa_key_create(machine_key)
+            .msoapxbc_rsa_key_create(storage_key)
             .map_err(|e| MsalError::TPMFail(format!("Failed creating transport key: {:?}", e)))?;
         self.transport_key = Some(loadable_transport_key.clone());
 
-        // Create the CSR
-        let csr_der = match tpm.identity_key_certificate_request(
-            machine_key,
-            None,
-            &loadable_cert_key,
-            "7E980AD9-B86D-4306-9425-9AC066FB014A",
-        ) {
-            Ok(csr_der) => csr_der,
-            Err(e) => return Err(MsalError::TPMFail(format!("Failed creating CSR: {:?}", e))),
-        };
-
         // Load the transport key
-        let transport_key = match tpm.msoapxbc_rsa_key_load(machine_key, &loadable_transport_key) {
+        let transport_key = match tpm.msoapxbc_rsa_key_load(storage_key, &loadable_transport_key) {
             Ok(transport_key) => transport_key,
             Err(e) => {
                 return Err(MsalError::TPMFail(format!(
@@ -3826,15 +3848,13 @@ impl BrokerClientApplication {
                 )))
             }
         };
-        let transport_key_der = match tpm.msoapxbc_rsa_public_as_der(&transport_key) {
-            Ok(transport_key_pem) => transport_key_pem,
-            Err(e) => {
-                return Err(MsalError::TPMFail(format!(
-                    "Failed getting transport key as der: {:?}",
-                    e
-                )))
-            }
-        };
+
+        let transport_key_der = tpm
+            .msoapxbc_rsa_public_as_der(&transport_key)
+            .map_err(|err| {
+                MsalError::TPMFail(format!("Failed getting transport key as der: {:?}", err))
+            })?;
+
         let transport_key_rsa = Rsa::public_key_from_der(&transport_key_der)
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
@@ -3850,22 +3870,18 @@ impl BrokerClientApplication {
             }
         };
 
-        let new_loadable_cert_key = match tpm.identity_key_associate_certificate(
-            machine_key,
-            None,
-            &loadable_cert_key,
-            &cert
-                .to_der()
-                .map_err(|e| MsalError::TPMFail(format!("{}", e)))?,
-        ) {
-            Ok(loadable_cert_key) => loadable_cert_key,
-            Err(e) => {
-                return Err(MsalError::TPMFail(format!(
-                    "Failed creating loadable identity key: {:?}",
-                    e
-                )))
-            }
-        };
+        let cert_der = cert.to_der().map_err(|_|
+                // TODO: David, is this the right error here?
+                MsalError::GeneralFailure("Unable to convert X509 to DER".into()))?;
+
+        // To help prevent mismatches between the tpm crypto lib and openssl, we
+        // want the certificate *der* here. This way you don't have to worry about it
+        // as much when you load, and it saves you having to do the translation.
+        let new_loadable_cert_key = tpm
+            .ms_device_enrolment_finalise(storage_key, in_progess_enrolment, &cert_der)
+            .map_err(|err| {
+                MsalError::TPMFail(format!("Failed creating loadable identity key: {:?}", err))
+            })?;
 
         self.cert_key = Some(new_loadable_cert_key.clone());
         Ok((
@@ -3907,7 +3923,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: A UserToken containing an access_token.
@@ -3920,7 +3936,7 @@ impl BrokerClientApplication {
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<UserToken, MsalError> {
         let v2_endpoint = !scopes.is_empty();
         if !scopes.is_empty() && request_resource.is_some() {
@@ -3929,9 +3945,16 @@ impl BrokerClientApplication {
             ));
         }
         let prt = self
-            .acquire_user_prt_by_username_password_internal(username, password, tpm, machine_key)
+            .acquire_user_prt_by_username_password_internal(username, password, tpm, storage_key)
             .await?;
-        let transport_key = self.transport_key(tpm, machine_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
         let session_key = prt.session_key()?;
         let mut token = self
             .exchange_prt_for_access_token_internal(
@@ -3939,7 +3962,7 @@ impl BrokerClientApplication {
                 scopes.clone(),
                 v2_endpoint,
                 tpm,
-                machine_key,
+                storage_key,
                 &session_key,
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
@@ -3947,7 +3970,7 @@ impl BrokerClientApplication {
             )
             .await?;
         token.client_info = prt.client_info.clone();
-        token.prt = Some(self.seal_user_prt(&prt, tpm, &transport_key)?);
+        token.prt = Some(self.seal_user_prt(&prt, tpm, &prt_storage_key)?);
         Ok(token)
     }
 
@@ -3968,7 +3991,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: A UserToken, which means migration was successful.
@@ -3980,12 +4003,19 @@ impl BrokerClientApplication {
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<UserToken, MsalError> {
         let prt = self
-            .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, machine_key)
+            .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, storage_key)
             .await?;
-        let transport_key = self.transport_key(tpm, machine_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
         let session_key = prt.session_key()?;
         let v2_endpoint = !scopes.is_empty();
         if !scopes.is_empty() && request_resource.is_some() {
@@ -3999,7 +4029,7 @@ impl BrokerClientApplication {
                 scopes.clone(),
                 v2_endpoint,
                 tpm,
-                machine_key,
+                storage_key,
                 &session_key,
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
@@ -4007,7 +4037,7 @@ impl BrokerClientApplication {
             )
             .await?;
         token.client_info = prt.client_info.clone();
-        token.prt = Some(self.seal_user_prt(&prt, tpm, &transport_key)?);
+        token.prt = Some(self.seal_user_prt(&prt, tpm, &prt_storage_key)?);
         Ok(token)
     }
 
@@ -4240,7 +4270,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
@@ -4250,13 +4280,20 @@ impl BrokerClientApplication {
         username: &str,
         password: &str,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<SealedData, MsalError> {
         let prt = self
-            .acquire_user_prt_by_username_password_internal(username, password, tpm, machine_key)
+            .acquire_user_prt_by_username_password_internal(username, password, tpm, storage_key)
             .await?;
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        self.seal_user_prt(&prt, tpm, &transport_key)
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        self.seal_user_prt(&prt, tpm, &prt_storage_key)
     }
 
     async fn acquire_user_prt_by_username_password_internal(
@@ -4264,14 +4301,21 @@ impl BrokerClientApplication {
         username: &str,
         password: &str,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         debug!("Acquiring User PRT via Username/Password");
 
+        let cert_key = self.cert_key(tpm, storage_key)?;
+        let cert_der = cert_key.cert.to_der().map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to convert certificate to DER: {:?}", e))
+        })?;
+        let cert = X509::from_der(&cert_der).map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to create X509 from DER: {:?}", e))
+        })?;
         let jwt = self
-            .build_jwt_by_username_password(username, password, None)
+            .build_jwt_by_username_password(username, password, Some(&cert))
             .await?;
-        let signed_jwt = self.sign_jwt(&jwt, tpm, machine_key).await?;
+        let signed_jwt = self.sign_jwt(&jwt, tpm, storage_key).await?;
 
         self.acquire_user_prt_jwt(&signed_jwt).await
     }
@@ -4321,7 +4365,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
@@ -4330,25 +4374,41 @@ impl BrokerClientApplication {
         &self,
         refresh_token: &str,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<SealedData, MsalError> {
         let prt = self
-            .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, machine_key)
+            .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, storage_key)
             .await?;
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        self.seal_user_prt(&prt, tpm, &transport_key)
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        self.seal_user_prt(&prt, tpm, &prt_storage_key)
     }
 
     async fn acquire_user_prt_by_refresh_token_internal(
         &self,
         refresh_token: &str,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         debug!("Acquiring User PRT via Refresh Token");
 
-        let jwt = self.build_jwt_by_refresh_token(refresh_token, None).await?;
-        let signed_jwt = self.sign_jwt(&jwt, tpm, machine_key).await?;
+        let cert_key = self.cert_key(tpm, storage_key)?;
+        let cert_der = cert_key.cert.to_der().map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to convert certificate to DER: {:?}", e))
+        })?;
+        let cert = X509::from_der(&cert_der).map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to create X509 from DER: {:?}", e))
+        })?;
+        let jwt = self
+            .build_jwt_by_refresh_token(refresh_token, Some(&cert))
+            .await?;
+        let signed_jwt = self.sign_jwt(&jwt, tpm, storage_key).await?;
 
         self.acquire_user_prt_jwt(&signed_jwt).await
     }
@@ -4357,10 +4417,10 @@ impl BrokerClientApplication {
         &self,
         jwt: &Jws,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
-        let cert_key = self.cert_key(tpm, machine_key)?;
-        let mut jws_tpm_signer = match JwsTpmSigner::new(tpm, &cert_key) {
+        let cert_key = self.cert_key(tpm, storage_key)?;
+        let mut jws_tpm_signer = match JwsTpmRs256Signer::new(tpm, &cert_key.key) {
             Ok(jws_tpm_signer) => jws_tpm_signer,
             Err(e) => {
                 return Err(MsalError::TPMFail(format!(
@@ -4433,11 +4493,18 @@ impl BrokerClientApplication {
         &self,
         jwt: &Jws,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         session_key: &SessionKey,
     ) -> Result<String, MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let signed_jwt = session_key.sign(tpm, &transport_key, jwt)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let signed_jwt = session_key.sign(tpm, &transport_key, &prt_storage_key, jwt)?;
 
         Ok(format!("{}", signed_jwt))
     }
@@ -4460,7 +4527,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: A UserToken containing an access_token.
@@ -4472,7 +4539,7 @@ impl BrokerClientApplication {
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<UserToken, MsalError> {
         let v2_endpoint = !scope.is_empty();
         if !scope.is_empty() && request_resource.is_some() {
@@ -4480,15 +4547,23 @@ impl BrokerClientApplication {
                 "Scopes cannot be specified with a request_resource".to_string(),
             ));
         }
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
         let session_key = prt.session_key()?;
         self.exchange_prt_for_access_token_internal(
             &prt,
             scope,
             v2_endpoint,
             tpm,
-            machine_key,
+            // TODO: Is this the correct storage key to pass here? I think it may not be?
+            storage_key,
             &session_key,
             request_resource,
             #[cfg(feature = "on_behalf_of")]
@@ -4504,7 +4579,7 @@ impl BrokerClientApplication {
         scope: Vec<&str>,
         v2_endpoint: bool,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         session_key: &SessionKey,
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
@@ -4523,7 +4598,7 @@ impl BrokerClientApplication {
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
                 tpm,
-                machine_key,
+                storage_key,
             )
             .await?;
 
@@ -4549,7 +4624,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// * `request_tgt` - Whether to include a request for a TGT.
     ///
@@ -4561,13 +4636,20 @@ impl BrokerClientApplication {
         &self,
         sealed_prt: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         request_tgt: bool,
     ) -> Result<SealedData, MsalError> {
         debug!("Exchanging a PRT for a new PRT");
 
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
         let session_key = prt.session_key()?;
         let nonce = self.request_nonce().await?;
         let jwt = JwsBuilder::from(
@@ -4586,7 +4668,7 @@ impl BrokerClientApplication {
         }
 
         let signed_jwt = self
-            .sign_session_key_jwt(&jwt, tpm, machine_key, &session_key)
+            .sign_session_key_jwt(&jwt, tpm, storage_key, &session_key)
             .await?;
 
         let mut params = vec![
@@ -4630,14 +4712,14 @@ impl BrokerClientApplication {
             let mut new_prt: PrimaryRefreshToken = json_from_str(
                 std::str::from_utf8(
                     session_key
-                        .decipher_prt_v2(tpm, &transport_key, &jwe)?
+                        .decipher_prt_v2(tpm, &transport_key, &prt_storage_key, &jwe)?
                         .payload(),
                 )
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
             )
             .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             prt.clone_session_key(&mut new_prt);
-            self.seal_user_prt(&new_prt, tpm, &transport_key)
+            self.seal_user_prt(&new_prt, tpm, &prt_storage_key)
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
@@ -4657,21 +4739,21 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// * `pin` - The PIN code which will be used to unlock the key.
     ///
     /// # Returns
-    /// * Success: Either the existing LoadableIdentityKey, or a new created
+    /// * Success: Either the existing LoadableMsHelloKey, or a new created
     ///   key if none was provided.
     /// * Failure: An MsalError, indicating the failure.
     pub async fn provision_hello_for_business_key(
         &self,
         token: &UserToken,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         pin: &str,
-    ) -> Result<LoadableIdentityKey, MsalError> {
+    ) -> Result<LoadableMsHelloKey, MsalError> {
         debug!("Provisioning a Hello for Business Key");
 
         if !token.amr_ngcmfa()? {
@@ -4705,26 +4787,29 @@ impl BrokerClientApplication {
                 #[cfg(feature = "on_behalf_of")]
                 None,
                 tpm,
-                machine_key,
+                storage_key,
             )
             .await?;
 
         // Create a new hello key (using the TPM)
-        let loadable_win_hello_key = tpm
-            .identity_key_create(machine_key, Some(&pin), KeyAlgorithm::Rsa2048)
-            .map_err(|e| {
-                MsalError::TPMFail(format!("Failed creating Windows Hello Key: {:?}", e))
-            })?;
-        let win_hello_key = tpm
-            .identity_key_load(machine_key, Some(&pin), &loadable_win_hello_key)
+        let loadable_win_hello_key = tpm.ms_hello_key_create(storage_key, &pin).map_err(|e| {
+            MsalError::TPMFail(format!("Failed creating Windows Hello Key: {:?}", e))
+        })?;
+
+        // TODO!!! This now has the unlocked storage key associated to the user that you can use
+        // to protect PRT's.
+        let (win_hello_key, _win_hello_storage_key) = tpm
+            .ms_hello_key_load(storage_key, &loadable_win_hello_key, &pin)
             .map_err(|e| {
                 MsalError::TPMFail(format!("Failed loading Windows Hello Key: {:?}", e))
             })?;
+
         let win_hello_pub_der = tpm
-            .identity_key_public_as_der(&win_hello_key)
+            .ms_hello_rsa_public_as_der(&win_hello_key)
             .map_err(|e| {
                 MsalError::TPMFail(format!("Failed getting Windows Hello Key as der: {:?}", e))
             })?;
+
         let win_hello_rsa = Rsa::public_key_from_der(&win_hello_pub_der)
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
@@ -4751,7 +4836,7 @@ impl BrokerClientApplication {
     ///
     /// * `username` - Typically a UPN in the form of an email address.
     ///
-    /// * `key` - A LoadableIdentityKey provisioned using
+    /// * `key` - A LoadableMsHelloKey provisioned using
     ///   provision_hello_for_business_key.
     ///
     /// * `scopes` - Scopes requested to access a protected API (a resource).
@@ -4765,7 +4850,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// * `pin` - The PIN code required to unlock the key.
     ///
@@ -4776,12 +4861,12 @@ impl BrokerClientApplication {
     pub async fn acquire_token_by_hello_for_business_key(
         &self,
         username: &str,
-        key: &LoadableIdentityKey,
+        key: &LoadableMsHelloKey,
         scopes: Vec<&str>,
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         pin: &str,
     ) -> Result<UserToken, MsalError> {
         let v2_endpoint = !scopes.is_empty();
@@ -4799,11 +4884,18 @@ impl BrokerClientApplication {
                 username,
                 key,
                 tpm,
-                machine_key,
+                storage_key,
                 &pin,
             )
             .await?;
-        let transport_key = self.transport_key(tpm, machine_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
         let session_key = prt.session_key()?;
         let mut token = self
             .exchange_prt_for_access_token_internal(
@@ -4811,7 +4903,7 @@ impl BrokerClientApplication {
                 scopes.clone(),
                 v2_endpoint,
                 tpm,
-                machine_key,
+                storage_key,
                 &session_key,
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
@@ -4819,25 +4911,26 @@ impl BrokerClientApplication {
             )
             .await?;
         token.client_info = prt.client_info.clone();
-        token.prt = Some(self.seal_user_prt(&prt, tpm, &transport_key)?);
+        // TODO: You should change this to the hello key's related storage key.
+        token.prt = Some(self.seal_user_prt(&prt, tpm, &prt_storage_key)?);
         Ok(token)
     }
 
     async fn build_jwt_by_hello_for_business_key(
         &self,
         username: &str,
-        loadable_key: &LoadableIdentityKey,
+        loadable_key: &LoadableMsHelloKey,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         pin: &PinValue,
     ) -> Result<Jws, MsalError> {
         debug!("Building a Hello for Business JWT");
 
         let mut nonce = self.request_nonce().await?;
-        let key = tpm
-            .identity_key_load(machine_key, Some(pin), loadable_key)
+        let (key, _win_hello_storage_key) = tpm
+            .ms_hello_key_load(storage_key, loadable_key, pin)
             .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
-        let win_hello_pub_der = tpm.identity_key_public_as_der(&key).map_err(|e| {
+        let win_hello_pub_der = tpm.ms_hello_rsa_public_as_der(&key).map_err(|e| {
             MsalError::TPMFail(format!("Failed getting Windows Hello Key as der: {:?}", e))
         })?;
         let win_hello_rsa = Rsa::public_key_from_der(&win_hello_pub_der)
@@ -4875,7 +4968,7 @@ impl BrokerClientApplication {
             }
         }
 
-        let mut jws_tpm_signer = match JwsTpmSigner::new(tpm, &key) {
+        let mut jws_tpm_signer = match JwsTpmRs256Signer::new(tpm, &key) {
             Ok(jws_tpm_signer) => jws_tpm_signer,
             Err(e) => {
                 return Err(MsalError::TPMFail(format!(
@@ -4892,6 +4985,10 @@ impl BrokerClientApplication {
 
         nonce = self.request_nonce().await?;
 
+        let cert_key = self.cert_key(tpm, storage_key)?;
+        let cert_der = cert_key.cert.to_der().map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to convert certificate to DER: {:?}", e))
+        })?;
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&HelloForBusinessPayload::new(username, &assertion, &nonce))
                 .map_err(|e| {
@@ -4902,6 +4999,7 @@ impl BrokerClientApplication {
                 })?,
         )
         .set_typ(Some("JWT"))
+        .set_x5c(Some(vec![cert_der]))
         .build();
 
         if let Ok(mut jwt_debug) = jwt.from_json::<Value>() {
@@ -4917,17 +5015,17 @@ impl BrokerClientApplication {
     async fn acquire_user_prt_by_hello_for_business_key_internal(
         &self,
         username: &str,
-        key: &LoadableIdentityKey,
+        key: &LoadableMsHelloKey,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         pin: &PinValue,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         debug!("Acquiring a User PRT via a Hello for Business Key");
 
         let jwt = self
-            .build_jwt_by_hello_for_business_key(username, key, tpm, machine_key, pin)
+            .build_jwt_by_hello_for_business_key(username, key, tpm, storage_key, pin)
             .await?;
-        let signed_jwt = self.sign_jwt(&jwt, tpm, machine_key).await?;
+        let signed_jwt = self.sign_jwt(&jwt, tpm, storage_key).await?;
 
         self.acquire_user_prt_jwt(&signed_jwt).await
     }
@@ -4938,12 +5036,12 @@ impl BrokerClientApplication {
     ///
     /// * `username` - Typically a UPN in the form of an email address.
     ///
-    /// * `key` - A LoadableIdentityKey provisioned using
+    /// * `key` - A LoadableMsHelloKey provisioned using
     ///   provision_hello_for_business_key.
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// * `pin` - The PIN code required to unlock the key.
     ///
@@ -4953,9 +5051,9 @@ impl BrokerClientApplication {
     pub async fn acquire_user_prt_by_hello_for_business_key(
         &self,
         username: &str,
-        key: &LoadableIdentityKey,
+        key: &LoadableMsHelloKey,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
         pin: &str,
     ) -> Result<SealedData, MsalError> {
         let pin = PinValue::new(pin)
@@ -4966,12 +5064,19 @@ impl BrokerClientApplication {
                 username,
                 key,
                 tpm,
-                machine_key,
+                storage_key,
                 &pin,
             )
             .await?;
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        self.seal_user_prt(&prt, tpm, &transport_key)
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        self.seal_user_prt(&prt, tpm, &prt_storage_key)
     }
 
     async fn exchange_prt_for_auth_code_internal(
@@ -5150,7 +5255,7 @@ impl BrokerClientApplication {
     /// * `tpm` - The TPM object used to interface with the hardware for
     ///   cryptographic operations.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with the current
+    /// * `storage_key` - The TPM MachineKey associated with the current
     ///   device/application.
     ///
     /// # Returns
@@ -5161,12 +5266,19 @@ impl BrokerClientApplication {
         &self,
         prt: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
         debug!("Creating a prt sso cookie");
 
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(prt, tpm, &prt_storage_key)?;
         let session_key = prt.session_key()?;
 
         let nonce = self.request_nonce().await?;
@@ -5179,7 +5291,7 @@ impl BrokerClientApplication {
         .set_typ(Some("JWT"))
         .build();
 
-        self.sign_session_key_jwt(&jwt, tpm, machine_key, &session_key)
+        self.sign_session_key_jwt(&jwt, tpm, storage_key, &session_key)
             .await
     }
 
@@ -5194,7 +5306,7 @@ impl BrokerClientApplication {
         session_key: &SessionKey,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
         debug!("Exchanging a PRT for an Authorization Code");
 
@@ -5208,7 +5320,7 @@ impl BrokerClientApplication {
         .set_typ(Some("JWT"))
         .build();
         let signed_prt_payload = self
-            .sign_session_key_jwt(&jwt, tpm, machine_key, session_key)
+            .sign_session_key_jwt(&jwt, tpm, storage_key, session_key)
             .await?;
         if let Ok(mut payload) = jwt.from_json::<Value>() {
             payload["refresh_token"] = "**********".into();
@@ -5217,14 +5329,19 @@ impl BrokerClientApplication {
             }
         }
 
+        let cert_key = self.cert_key(tpm, storage_key)?;
+        let cert_der = cert_key.cert.to_der().map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to convert certificate to DER: {:?}", e))
+        })?;
         let jwt = JwsBuilder::from(
             serde_json::to_vec(&DeviceCredentialPayload::new(&nonce)?).map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e))
             })?,
         )
         .set_typ(Some("JWT"))
+        .set_x5c(Some(vec![cert_der]))
         .build();
-        let signed_device_payload = self.sign_jwt(&jwt, tpm, machine_key).await?;
+        let signed_device_payload = self.sign_jwt(&jwt, tpm, storage_key).await?;
         if let Ok(payload) = jwt.from_json::<Value>() {
             if let Ok(pretty) = to_string_pretty(&payload) {
                 debug!("Device Credential Payload: {}", pretty);
@@ -5380,7 +5497,7 @@ impl BrokerClientApplication {
     /// * `tpm` - The TPM object used to interface with the hardware for
     ///   cryptographic operations.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with the current
+    /// * `storage_key` - The TPM MachineKey associated with the current
     ///   device/application.
     ///
     /// # Returns
@@ -5391,10 +5508,17 @@ impl BrokerClientApplication {
         &self,
         sealed_data: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_data, tpm, &prt_storage_key)?;
         Ok(prt.name())
     }
 
@@ -5408,7 +5532,7 @@ impl BrokerClientApplication {
     /// * `tpm` - The TPM object used to interface with the hardware for
     ///   cryptographic operations.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with the current
+    /// * `storage_key` - The TPM MachineKey associated with the current
     ///   device/application.
     ///
     /// # Returns
@@ -5419,10 +5543,17 @@ impl BrokerClientApplication {
         &self,
         sealed_data: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_data, tpm, &prt_storage_key)?;
         prt.spn()
     }
 
@@ -5436,7 +5567,7 @@ impl BrokerClientApplication {
     /// * `tpm` - The TPM object used to interface with the hardware for
     ///   cryptographic operations.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with the current
+    /// * `storage_key` - The TPM MachineKey associated with the current
     ///   device/application.
     ///
     /// # Returns
@@ -5447,10 +5578,17 @@ impl BrokerClientApplication {
         &self,
         sealed_data: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<Uuid, MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_data, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_data, tpm, &prt_storage_key)?;
         prt.uuid()
     }
 
@@ -5465,7 +5603,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Failure: An MsalError, indicating the failure.
@@ -5474,17 +5612,24 @@ impl BrokerClientApplication {
         sealed_prt: &SealedData,
         filename: &str,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<(), MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
         if let Some(error) = &prt.tgt_cloud.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
-        let client_key = prt
-            .tgt_cloud
-            .client_key(tpm, &transport_key, &session_key)?;
+        let client_key =
+            prt.tgt_cloud
+                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
         let message = prt.tgt_cloud.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         ccache.save_keytab_file(filename)
@@ -5501,7 +5646,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Failure: An MsalError, indicating the failure.
@@ -5510,15 +5655,24 @@ impl BrokerClientApplication {
         sealed_prt: &SealedData,
         filename: &str,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<(), MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
         if let Some(error) = &prt.tgt_ad.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
-        let client_key = prt.tgt_ad.client_key(tpm, &transport_key, &session_key)?;
+        let client_key =
+            prt.tgt_ad
+                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
         let message = prt.tgt_ad.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         ccache.save_keytab_file(filename)
@@ -5533,7 +5687,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: Byte representation of a Kerberos CCache
@@ -5542,17 +5696,24 @@ impl BrokerClientApplication {
         &self,
         sealed_prt: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<Vec<u8>, MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
         if let Some(error) = &prt.tgt_cloud.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
-        let client_key = prt
-            .tgt_cloud
-            .client_key(tpm, &transport_key, &session_key)?;
+        let client_key =
+            prt.tgt_cloud
+                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
         let message = prt.tgt_cloud.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         Ok(ccache.to_bytes())
@@ -5567,7 +5728,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: Byte representation of a Kerberos CCache
@@ -5576,15 +5737,24 @@ impl BrokerClientApplication {
         &self,
         sealed_prt: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<Vec<u8>, MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
         if let Some(error) = &prt.tgt_ad.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
-        let client_key = prt.tgt_ad.client_key(tpm, &transport_key, &session_key)?;
+        let client_key =
+            prt.tgt_ad
+                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
         let message = prt.tgt_ad.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         Ok(ccache.to_bytes())
@@ -5599,7 +5769,7 @@ impl BrokerClientApplication {
     ///
     /// * `tpm` - The tpm object.
     ///
-    /// * `machine_key` - The TPM MachineKey associated with this application.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
     ///
     /// # Returns
     /// * Success: The Kerberos top level names
@@ -5608,10 +5778,17 @@ impl BrokerClientApplication {
         &self,
         sealed_prt: &SealedData,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
-        let transport_key = self.transport_key(tpm, machine_key)?;
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &transport_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        // NOTE: This dance is to make sure that transport_storage_key lives long enough.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
         let kerberos_top_level_names =
             prt.kerberos_top_level_names
                 .clone()
@@ -5625,11 +5802,12 @@ impl BrokerClientApplication {
         &self,
         prt: &PrimaryRefreshToken,
         tpm: &mut BoxedDynTpm,
-        key: &MsOapxbcRsaKey,
+        storage_key: &StorageKey,
     ) -> Result<SealedData, MsalError> {
         let prt_data = json_to_vec(prt)
+            .map(Zeroizing::new)
             .map_err(|e| MsalError::InvalidJson(format!("Failed serializing PRT {:?}", e)))?;
-        tpm.msoapxbc_rsa_seal_data(key, &prt_data)
+        tpm.seal_data(storage_key, prt_data)
             .map_err(|e| MsalError::TPMFail(format!("Failed sealing PRT {:?}", e)))
     }
 
@@ -5637,10 +5815,10 @@ impl BrokerClientApplication {
         &self,
         sealed_data: &SealedData,
         tpm: &mut BoxedDynTpm,
-        key: &MsOapxbcRsaKey,
+        storage_key: &StorageKey,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         let prt_data = tpm
-            .msoapxbc_rsa_unseal_data(key, sealed_data)
+            .unseal_data(storage_key, sealed_data)
             .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
         json_from_slice(&prt_data)
             .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))
@@ -5671,7 +5849,7 @@ impl BrokerClientApplication {
         &self,
         username: &str,
         tpm: &mut BoxedDynTpm,
-        machine_key: &MachineKey,
+        machine_key: &StorageKey,
     ) -> Result<SidToName, MsalError> {
         let nonce = self.request_nonce().await?;
 
