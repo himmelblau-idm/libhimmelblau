@@ -107,12 +107,19 @@ struct DirectoryObjects {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Objects {
+    value: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UserObject {
     #[serde(rename = "displayName")]
     pub displayname: String,
     #[serde(rename = "userPrincipalName")]
     pub upn: String,
     pub id: String,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +127,7 @@ pub struct GroupObject {
     #[serde(rename = "displayName")]
     pub displayname: String,
     pub id: String,
+    pub gid: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +313,106 @@ impl Graph {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(json_resp)
+        } else {
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+        }
+    }
+
+    pub async fn request_all_users_with_extension_attributes(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<UserObject>, MsalError> {
+        let url = Url::parse(&format!("{}/beta/users", self.graph_url().await?))
+            .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+
+        if resp.status().is_success() {
+            let json_resp: Objects = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+
+            let mut res: Vec<UserObject> = vec![];
+            for user in &json_resp.value {
+                let mut userobj: UserObject = serde_json::from_value(user.clone())
+                    .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+
+                if let Value::Object(obj) = &user {
+                    for (key, value) in obj.iter() {
+                        if key.starts_with("extension_") {
+                            if key.ends_with("uidNumber") {
+                                if let Value::Number(num) = value {
+                                    userobj.uid = num.as_u64().map(|uid| uid as u32);
+                                }
+                            } else if key.ends_with("gidNumber") {
+                                if let Value::Number(num) = value {
+                                    userobj.gid = num.as_u64().map(|gid| gid as u32);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if userobj.uid.is_some() || userobj.gid.is_some() {
+                    res.push(userobj);
+                }
+            }
+
+            Ok(res)
+        } else {
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+        }
+    }
+
+    pub async fn request_all_groups_with_extension_attributes(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<GroupObject>, MsalError> {
+        let url = Url::parse(&format!("{}/beta/groups", self.graph_url().await?))
+            .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+
+        if resp.status().is_success() {
+            let json_resp: Objects = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+
+            let mut res: Vec<GroupObject> = vec![];
+            for user in &json_resp.value {
+                let mut groupobj: GroupObject = serde_json::from_value(user.clone())
+                    .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+
+                if let Value::Object(obj) = &user {
+                    for (key, value) in obj.iter() {
+                        if key.starts_with("extension_") && key.ends_with("gidNumber") {
+                            if let Value::Number(num) = value {
+                                groupobj.gid = num.as_u64().map(|gid| gid as u32);
+                            }
+                        }
+                    }
+                }
+
+                if groupobj.gid.is_some() {
+                    res.push(groupobj);
+                }
+            }
+
+            Ok(res)
         } else {
             Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
