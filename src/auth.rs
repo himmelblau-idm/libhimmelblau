@@ -1407,31 +1407,14 @@ impl AuthInit {
 
     /// Whether passwordless authentication was negotiated
     pub fn passwordless(&self) -> bool {
-        // The following behavior is intentional. If the user prefers
-        // passwordless auth types 13, 7, or 2, but those options don't appear
-        // to be available, this is often because the last passwordless attempt
-        // for these failed. The only way to re-enable them is to perform an
-        // MFA w/ password.
-        match self.cred_type.credentials.pref_credential {
-            13 => self.cred_type.credentials.has_access_pass.unwrap_or(false),
-            7 => {
-                self.cred_type.credentials.has_remote_ngc.unwrap_or(false)
-                    && self.cred_type.credentials.remote_ngc_params.is_some()
-            }
-            2 => {
-                self.cred_type.credentials.has_fido.unwrap_or(false)
-                    && self.cred_type.credentials.fido_params.is_some()
-            }
-            _ => {
-                // This means the user prefers some other method, but we might
-                // be able to perform a supported passwordless auth anyway.
-                self.cred_type.credentials.has_access_pass.unwrap_or(false)
-                    || (self.cred_type.credentials.has_remote_ngc.unwrap_or(false)
-                        && self.cred_type.credentials.remote_ngc_params.is_some())
-                    || (self.cred_type.credentials.has_fido.unwrap_or(false)
-                        && self.cred_type.credentials.fido_params.is_some())
-            }
-        }
+        // Just list whether any passwordless type is possible to negotiate. If
+        // we attempt to pick the preferred method, that method might not even
+        // be enabled or possible (facepalm MS).
+        self.cred_type.credentials.has_access_pass.unwrap_or(false)
+            || (self.cred_type.credentials.has_remote_ngc.unwrap_or(false)
+                && self.cred_type.credentials.remote_ngc_params.is_some())
+            || (self.cred_type.credentials.has_fido.unwrap_or(false)
+                && self.cred_type.credentials.fido_params.is_some())
     }
 }
 
