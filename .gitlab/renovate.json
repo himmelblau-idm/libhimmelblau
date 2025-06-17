@@ -1,0 +1,9 @@
+{
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "enabled": true
+    }
+  ]
+}
