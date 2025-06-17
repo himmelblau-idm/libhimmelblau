@@ -1158,6 +1158,7 @@ impl SessionKey {
 pub enum AuthOption {
     Fido,
     Passwordless,
+    PasswordlessFido,
     NoDAGFallback,
 }
 
@@ -2326,39 +2327,41 @@ impl PublicClientApplication {
 
         macro_rules! passwordless_fido {
             () => {
-                if let Some(fido_params) = cred_type.credentials.fido_params {
-                    // Passwordless fido is enabled, we can drop out here
-                    let url_post = match &auth_config.url_post {
-                        Some(url_post) => url_post.clone(),
-                        None => {
-                            return Err(MsalError::GeneralFailure(
-                                "urlBeginAuth is missing".to_string(),
-                            ))
-                        }
-                    };
-                    auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
-                    let fido_auth_config = self
-                        .handle_auth_config_fido_get(username, &auth_config, &request_id)
-                        .await?;
-                    return Ok(MFAAuthContinue {
-                        mfa_method: "FidoKey".to_string(),
-                        msg: "".to_string(),
-                        entropy: None,
-                        max_poll_attempts: auth_config.max_poll_attempts,
-                        polling_interval: Some(5000),
-                        session_id: fido_auth_config.session_id,
-                        flow_token: sft,
-                        ctx: sctx,
-                        canary: auth_config.canary,
-                        url_end_auth: auth_config.url_end_auth,
-                        url_post,
-                        resource: resource.map(|s| s.to_string()),
-                        dag: None,
-                        fido_challenge: fido_auth_config.fido_challenge,
-                        fido_allow_list: Some(fido_params.fido_allow_list),
-                        cross_domain_canary: fido_auth_config.cross_domain_canary,
-                        url_session_state: auth_config.url_session_state,
-                    });
+                if options.contains(&AuthOption::PasswordlessFido) {
+                    if let Some(fido_params) = cred_type.credentials.fido_params {
+                        // Passwordless fido is enabled, we can drop out here
+                        let url_post = match &auth_config.url_post {
+                            Some(url_post) => url_post.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "urlBeginAuth is missing".to_string(),
+                                ))
+                            }
+                        };
+                        auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
+                        let fido_auth_config = self
+                            .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                            .await?;
+                        return Ok(MFAAuthContinue {
+                            mfa_method: "FidoKey".to_string(),
+                            msg: "".to_string(),
+                            entropy: None,
+                            max_poll_attempts: auth_config.max_poll_attempts,
+                            polling_interval: Some(5000),
+                            session_id: fido_auth_config.session_id,
+                            flow_token: sft,
+                            ctx: sctx,
+                            canary: auth_config.canary,
+                            url_end_auth: auth_config.url_end_auth,
+                            url_post,
+                            resource: resource.map(|s| s.to_string()),
+                            dag: None,
+                            fido_challenge: fido_auth_config.fido_challenge,
+                            fido_allow_list: Some(fido_params.fido_allow_list),
+                            cross_domain_canary: fido_auth_config.cross_domain_canary,
+                            url_session_state: auth_config.url_session_state,
+                        });
+                    }
                 }
             };
         }
