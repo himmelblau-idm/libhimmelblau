@@ -58,7 +58,7 @@ browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], o
 serde_bytes = "0.11.17"
 
 [build-dependencies]
-cbindgen = "0.26.0"
+cbindgen = "0.29.0"
 
 [package.metadata.capi.library]
 version_suffix_components = 1
