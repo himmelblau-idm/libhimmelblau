@@ -56,6 +56,7 @@ chrono = "0.4.38"
 percent-encoding = "2.3.1"
 browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], optional = true }
 serde_bytes = "0.11.17"
+serde_urlencoded = "0.7.1"
 
 [build-dependencies]
 cbindgen = "0.29.0"
