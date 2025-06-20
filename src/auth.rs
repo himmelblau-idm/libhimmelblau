@@ -24,7 +24,7 @@ use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
 #[cfg(feature = "proxyable")]
 use reqwest::Proxy;
-use reqwest::{header, Client, Response, Url};
+use reqwest::{header, Body, Client, Response, Url};
 use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -123,6 +123,18 @@ const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 #[cfg(feature = "broker")]
 const AZURE_PORTAL_APP_ID: &str = "c44b4083-3bb0-49c1-b47d-974e53cbdf3c";
 const HIMMELBLAU_REDIRECT_URI: &str = "himmelblau://Himmelblau.EntraId.BrokerPlugin";
+
+#[derive(Debug, Deserialize)]
+pub struct SidToName {
+    pub upn: String,
+    pub email: Option<String>,
+    pub name: String,
+    pub family_name: Option<String>,
+    pub sid: String,
+    pub onprem_sam_account_name: Option<String>,
+    pub domain_netbios_name: Option<String>,
+    pub domain_dns_name: Option<String>,
+}
 
 /* FIDO Authentication requires specifying a user agent which
  * MS endorses as appropriate for FIDO */
@@ -5653,5 +5665,66 @@ impl BrokerClientApplication {
         self.app
             .acquire_token_interactive(username, Some(resource))
             .await
+    }
+
+    pub async fn resolve_nametosid(
+        &self,
+        username: &str,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+    ) -> Result<SidToName, MsalError> {
+        let nonce = self.request_nonce().await?;
+
+        let os_release = match OsRelease::new() {
+            Ok(os_release) => Some(format!(
+                "{} {}",
+                os_release.pretty_name, os_release.version_id
+            )),
+            Err(_) => None,
+        };
+
+        let jwt_body = json!({
+            "win_ver": os_release,
+            "version": "1.0",
+            "nonce": nonce,
+            "username": username,
+        });
+
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&jwt_body)
+                .map_err(|e| MsalError::InvalidJson(format!("Failed to serialize JWT: {}", e)))?,
+        )
+        .set_typ(Some("JWT"))
+        .build();
+
+        let signed_jwt = self.sign_jwt(&jwt, tpm, machine_key).await?;
+
+        let form_body = serde_urlencoded::to_string([
+            ("windows_api_version", "2.2"),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("signedRequest", &signed_jwt),
+        ])
+        .map_err(|e| MsalError::InvalidJson(format!("Failed to encode form: {}", e)))?;
+
+        let url = format!("{}/sidtoname", self.authority()?);
+
+        let resp = self
+            .client()
+            .get(url)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("Request error: {:?}", e)))?;
+
+        if resp.status().is_success() {
+            let json_resp: SidToName = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            Ok(json_resp)
+        } else {
+            Err(MsalError::RequestFailed(format!("{}", resp.status())))
+        }
     }
 }
