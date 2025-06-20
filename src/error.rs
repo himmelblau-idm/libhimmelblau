@@ -83,6 +83,8 @@ pub enum MsalError {
     PasswordRequired,
     /// An error was encountered because MS Authenticator registration was requested
     SkipMfaRegistration(String, Option<String>, String),
+    /// ConvergedConsent
+    ConsentRequested(String),
 }
 
 impl fmt::Display for MsalError {
@@ -114,6 +116,7 @@ impl fmt::Display for MsalError {
             | MsalError::MFAPollContinue
             | MsalError::PasswordRequired
             | MsalError::SkipMfaRegistration(..) => write!(f, "Unexpected error"),
+            MsalError::ConsentRequested(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -146,6 +149,7 @@ pub enum MSAL_ERROR {
     CHANGE_PASSWORD,
     PASSWORD_REQUIRED,
     SKIP_MFA_REGISTRATION,
+    CONSENT_REQUESTED,
 }
 
 impl From<MsalError> for MSAL_ERROR {
@@ -173,6 +177,7 @@ impl From<MsalError> for MSAL_ERROR {
             MsalError::ChangePassword => MSAL_ERROR::CHANGE_PASSWORD,
             MsalError::PasswordRequired => MSAL_ERROR::PASSWORD_REQUIRED,
             MsalError::SkipMfaRegistration(_, _, _) => MSAL_ERROR::SKIP_MFA_REGISTRATION,
+            MsalError::ConsentRequested(_) => MSAL_ERROR::CONSENT_REQUESTED,
         }
     }
 }

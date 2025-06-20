@@ -1695,6 +1695,14 @@ impl PublicClientApplication {
                             }
                         }
                     }
+                    if let Some(ref pgid) = auth_config.pgid {
+                        if pgid == "ConvergedConsent" {
+                            return Err(MsalError::ConsentRequested(
+                                "The client application requires additional consent to proceed."
+                                    .to_string(),
+                            ));
+                        }
+                    }
                     return Ok(auth_config);
                 }
             }
@@ -5069,6 +5077,7 @@ impl BrokerClientApplication {
                 #[cfg(feature = "changepassword")]
                 Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
                 Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                Err(MsalError::ConsentRequested(e)) => return Err(MsalError::ConsentRequested(e)),
                 _ => {}
             }
 
@@ -5101,6 +5110,7 @@ impl BrokerClientApplication {
                 #[cfg(feature = "changepassword")]
                 Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
                 Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                Err(MsalError::ConsentRequested(e)) => return Err(MsalError::ConsentRequested(e)),
                 _ => {}
             }
 
