@@ -47,7 +47,7 @@ tokio = { version = "1.37.0", features = ["full"] }
 tracing-subscriber = "0.3.18"
 pyo3 = { version = "0.25.1", features = ["extension-module"], optional = true }
 paste = "1.0.15"
-picky-krb = "0.10.0"
+picky-krb = "0.11.0"
 picky-asn1-der = "0.5.2"
 picky-asn1 = "0.10.1"
 himmelblau_kerberos_crypto = "0.4.0"
