@@ -1113,7 +1113,7 @@ impl SessionKey {
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
         // to the provided key.
-        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(transport_key);
         let storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
         let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
@@ -1138,7 +1138,7 @@ impl SessionKey {
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
         // to the provided key.
-        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
         let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
@@ -1174,7 +1174,7 @@ impl SessionKey {
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
         // to the provided key.
-        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(transport_key);
         let storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
         let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
@@ -3970,7 +3970,7 @@ impl BrokerClientApplication {
             )
             .await?;
         token.client_info = prt.client_info.clone();
-        token.prt = Some(self.seal_user_prt(&prt, tpm, &prt_storage_key)?);
+        token.prt = Some(self.seal_user_prt(&prt, tpm, prt_storage_key)?);
         Ok(token)
     }
 
@@ -4037,7 +4037,7 @@ impl BrokerClientApplication {
             )
             .await?;
         token.client_info = prt.client_info.clone();
-        token.prt = Some(self.seal_user_prt(&prt, tpm, &prt_storage_key)?);
+        token.prt = Some(self.seal_user_prt(&prt, tpm, prt_storage_key)?);
         Ok(token)
     }
 
@@ -4293,7 +4293,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        self.seal_user_prt(&prt, tpm, &prt_storage_key)
+        self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
     async fn acquire_user_prt_by_username_password_internal(
@@ -4387,7 +4387,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        self.seal_user_prt(&prt, tpm, &prt_storage_key)
+        self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
     async fn acquire_user_prt_by_refresh_token_internal(
@@ -4504,7 +4504,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let signed_jwt = session_key.sign(tpm, &transport_key, &prt_storage_key, jwt)?;
+        let signed_jwt = session_key.sign(tpm, &transport_key, prt_storage_key, jwt)?;
 
         Ok(format!("{}", signed_jwt))
     }
@@ -4555,7 +4555,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
         self.exchange_prt_for_access_token_internal(
             &prt,
@@ -4649,7 +4649,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
         let nonce = self.request_nonce().await?;
         let jwt = JwsBuilder::from(
@@ -4712,14 +4712,14 @@ impl BrokerClientApplication {
             let mut new_prt: PrimaryRefreshToken = json_from_str(
                 std::str::from_utf8(
                     session_key
-                        .decipher_prt_v2(tpm, &transport_key, &prt_storage_key, &jwe)?
+                        .decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?
                         .payload(),
                 )
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
             )
             .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             prt.clone_session_key(&mut new_prt);
-            self.seal_user_prt(&new_prt, tpm, &prt_storage_key)
+            self.seal_user_prt(&new_prt, tpm, prt_storage_key)
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
@@ -4912,7 +4912,7 @@ impl BrokerClientApplication {
             .await?;
         token.client_info = prt.client_info.clone();
         // TODO: You should change this to the hello key's related storage key.
-        token.prt = Some(self.seal_user_prt(&prt, tpm, &prt_storage_key)?);
+        token.prt = Some(self.seal_user_prt(&prt, tpm, prt_storage_key)?);
         Ok(token)
     }
 
@@ -5076,7 +5076,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        self.seal_user_prt(&prt, tpm, &prt_storage_key)
+        self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
     async fn exchange_prt_for_auth_code_internal(
@@ -5278,7 +5278,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
 
         let nonce = self.request_nonce().await?;
@@ -5518,7 +5518,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_data, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_data, tpm, prt_storage_key)?;
         Ok(prt.name())
     }
 
@@ -5553,7 +5553,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_data, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_data, tpm, prt_storage_key)?;
         prt.spn()
     }
 
@@ -5588,7 +5588,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_data, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_data, tpm, prt_storage_key)?;
         prt.uuid()
     }
 
@@ -5622,14 +5622,14 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         if let Some(error) = &prt.tgt_cloud.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
         let client_key =
             prt.tgt_cloud
-                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
+                .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_cloud.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         ccache.save_keytab_file(filename)
@@ -5665,14 +5665,14 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         if let Some(error) = &prt.tgt_ad.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
         let client_key =
             prt.tgt_ad
-                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
+                .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_ad.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         ccache.save_keytab_file(filename)
@@ -5706,14 +5706,14 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         if let Some(error) = &prt.tgt_cloud.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
         let client_key =
             prt.tgt_cloud
-                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
+                .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_cloud.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         Ok(ccache.to_bytes())
@@ -5747,14 +5747,14 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         if let Some(error) = &prt.tgt_ad.error {
             return Err(MsalError::Missing(error.to_string()));
         }
         let session_key = prt.session_key()?;
         let client_key =
             prt.tgt_ad
-                .client_key(tpm, &transport_key, &prt_storage_key, &session_key)?;
+                .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_ad.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
         Ok(ccache.to_bytes())
@@ -5788,7 +5788,7 @@ impl BrokerClientApplication {
         let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let prt = self.unseal_user_prt(sealed_prt, tpm, &prt_storage_key)?;
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         let kerberos_top_level_names =
             prt.kerberos_top_level_names
                 .clone()
@@ -5822,6 +5822,114 @@ impl BrokerClientApplication {
             .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
         json_from_slice(&prt_data)
             .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))
+    }
+
+    /// Seal a user Primary Refresh Token (PRT) with a Linux Hello key, bound to the user PIN
+    ///
+    /// This function first decrypts the provided PRT, which is normally encrypted
+    /// using the host credentials, and then re-encrypts (seals) it using the user’s
+    /// Hello PIN. This allows safely persisting the PRT to disk such that it is only
+    /// decryptable by the same user on the same host, requiring both the physical TPM
+    /// and the user’s Hello PIN for access. This mitigates the risk of PRT exfiltration
+    /// by ensuring that an attacker would need both the PIN and the hardware TPM.
+    ///
+    /// This is particularly useful to support scenarios such as offline authentication
+    /// where the network is unavailable. It allows a user to authenticate and retrieve
+    /// Single Sign-On (SSO) credentials immediately when the network becomes available,
+    /// without re-entering full credentials, even if their Hello PIN was entered before
+    /// network connectivity was established.
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The existing sealed PRT, encrypted using the host credentials.
+    /// * `hello_key` - The user's loadable Linux Hello key.
+    /// * `pin` - The Hello PIN provided by the user.
+    /// * `tpm` - The TPM object used for cryptographic operations.
+    /// * `storage_key` - The TPM MachineKey used to load the Hello key and perform sealing.
+    ///
+    /// # Returns
+    /// * Success: A new `SealedData` containing the PRT encrypted (sealed) using the user’s Hello PIN.
+    /// * Failure: An `MsalError` indicating why the operation failed.
+    pub fn seal_user_prt_with_hello_key(
+        &self,
+        prt: &SealedData,
+        hello_key: &LoadableMsHelloKey,
+        pin: &str,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<SealedData, MsalError> {
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(prt, tpm, prt_storage_key)?;
+        let prt_data = json_to_vec(&prt)
+            .map(Zeroizing::new)
+            .map_err(|e| MsalError::InvalidJson(format!("Failed serializing PRT {:?}", e)))?;
+        let pin = PinValue::new(pin)
+            .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
+        let (_key, win_hello_storage_key) = tpm
+            .ms_hello_key_load(storage_key, hello_key, &pin)
+            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
+        tpm.seal_data(&win_hello_storage_key, prt_data)
+            .map_err(|e| MsalError::TPMFail(format!("Failed sealing PRT {:?}", e)))
+    }
+
+    /// Unseal a user Primary Refresh Token (PRT) that is protected with the user Hello PIN
+    ///
+    /// This function decrypts (unseals) a PRT that was previously encrypted using
+    /// the user’s Hello PIN. It loads the Hello key into the TPM using the provided
+    /// PIN, then decrypts the sealed PRT data. After obtaining the decrypted PRT,
+    /// it immediately re-encrypts it using the standard host credentials, so it can
+    /// be used in memory for SSO or other operations while still maintaining security
+    /// if kept transient.
+    ///
+    /// This mechanism ensures that even when a PRT is persisted on disk for offline
+    /// scenarios, it remains protected by both the hardware TPM and the user’s Hello PIN.
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_data` - The PRT sealed (encrypted) using the user’s Hello PIN and TPM.
+    /// * `hello_key` - The user's loadable Linux Hello key.
+    /// * `pin` - The Hello PIN provided by the user.
+    /// * `tpm` - The TPM object used for cryptographic operations.
+    /// * `storage_key` - The TPM MachineKey used to load the Hello key and perform unsealing.
+    ///
+    /// # Returns
+    /// * Success: A new `SealedData` containing the PRT re-sealed using host credentials for in-memory use.
+    /// * Failure: An `MsalError` indicating why the operation failed.
+    pub fn unseal_user_prt_with_hello_key(
+        &self,
+        sealed_data: &SealedData,
+        hello_key: &LoadableMsHelloKey,
+        pin: &str,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<SealedData, MsalError> {
+        let pin = PinValue::new(pin)
+            .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
+        let (_key, win_hello_storage_key) = tpm
+            .ms_hello_key_load(storage_key, hello_key, &pin)
+            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
+        let prt_data = tpm
+            .unseal_data(&win_hello_storage_key, sealed_data)
+            .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
+        let prt = json_from_slice(&prt_data)
+            .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))?;
+
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
     /// Obtain token interactively for device enrollment.
