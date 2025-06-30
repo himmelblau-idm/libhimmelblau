@@ -29,14 +29,17 @@
 #![deny(clippy::trivially_copy_pass_by_ref)]
 #![doc = include_str!("../README.md")]
 #[cfg(feature = "broker")]
-use kanidm_hsm_crypto::soft::SoftTpm;
+use kanidm_hsm_crypto::provider::SoftTpm;
 #[cfg(all(feature = "tpm", feature = "broker"))]
-use kanidm_hsm_crypto::tpm::TpmTss;
+use kanidm_hsm_crypto::provider::TssTpm;
 #[cfg(feature = "broker")]
 use kanidm_hsm_crypto::{
-    AuthValue, BoxedDynTpm as BoxedDynTpmIn, LoadableIdentityKey as LoadableIdentityKeyIn,
-    LoadableMachineKey as LoadableMachineKeyIn, LoadableMsOapxbcRsaKey as LoadableMsOapxbcRsaKeyIn,
-    MachineKey as MachineKeyIn, SealedData as SealedDataIn, Tpm,
+    provider::BoxedDynTpm as BoxedDynTpmIn, provider::Tpm,
+    structures::LoadableMsDeviceEnrolmentKey as LoadableMsDeviceEnrolmentKeyIn,
+    structures::LoadableMsHelloKey as LoadableMsHelloKeyIn,
+    structures::LoadableRS256Key as LoadableMsOapxbcRsaKeyIn,
+    structures::LoadableStorageKey as LoadableMachineKeyIn, structures::SealedData as SealedDataIn,
+    structures::StorageKey as MachineKeyIn, AuthValue,
 };
 use paste::paste;
 use std::ffi::CString;
@@ -59,7 +62,9 @@ use crate::EnrollAttrs;
 #[cfg(feature = "broker")]
 pub struct BoxedDynTpm(BoxedDynTpmIn);
 #[cfg(feature = "broker")]
-pub struct LoadableIdentityKey(LoadableIdentityKeyIn);
+pub struct LoadableMsDeviceEnrolmentKey(LoadableMsDeviceEnrolmentKeyIn);
+#[cfg(feature = "broker")]
+pub struct LoadableMsHelloKey(LoadableMsHelloKeyIn);
 #[cfg(feature = "broker")]
 pub struct LoadableMsOapxbcRsaKey(LoadableMsOapxbcRsaKeyIn);
 #[cfg(feature = "broker")]
@@ -120,7 +125,8 @@ macro_rules! serialize_and_deserialize_funcs {
 }
 serialize_and_deserialize_funcs!(LoadableMachineKey);
 serialize_and_deserialize_funcs!(LoadableMsOapxbcRsaKey);
-serialize_and_deserialize_funcs!(LoadableIdentityKey);
+serialize_and_deserialize_funcs!(LoadableMsDeviceEnrolmentKey);
+serialize_and_deserialize_funcs!(LoadableMsHelloKey);
 serialize_and_deserialize_funcs!(SealedData);
 
 /// # Safety
@@ -199,7 +205,7 @@ pub unsafe extern "C" fn tpm_init(
 
     let tpm = BoxedDynTpm(match wrap_c_char(tcti_name) {
         #[cfg(feature = "tpm")]
-        Some(tcti_name) => match TpmTss::new(&tcti_name) {
+        Some(tcti_name) => match TssTpm::new(&tcti_name) {
             Ok(tpm_tss) => BoxedDynTpmIn::new(tpm_tss),
             Err(e) => {
                 error!("{:?}", e);
@@ -272,7 +278,7 @@ pub unsafe extern "C" fn tpm_machine_key_create(
         }
     };
 
-    let loadable_machine_key = match tpm.machine_key_create(&auth_value) {
+    let loadable_machine_key = match tpm.root_storage_key_create(&auth_value) {
         Ok(loadable_machine_key) => loadable_machine_key,
         Err(e) => {
             error!("{:?}", e);
@@ -317,7 +323,7 @@ pub unsafe extern "C" fn tpm_machine_key_load(
     };
     let exported_key = &mut unsafe { &mut *exported_key }.0;
 
-    let machine_key = match tpm.machine_key_load(&auth_value, exported_key) {
+    let machine_key = match tpm.root_storage_key_load(&auth_value, exported_key) {
         Ok(machine_key) => machine_key,
         Err(e) => {
             error!("{:?}", e);
@@ -348,7 +354,7 @@ pub unsafe extern "C" fn tpm_machine_key_load(
 /// * `transport_key` - An optional LoadableMsOapxbcRsaKey transport key
 ///   from enrolling the device.
 ///
-/// * `cert_key` - An optional LoadableIdentityKey which was used to create
+/// * `cert_key` - An optional LoadableMsDeviceEnrolmentKey which was used to create
 ///   the enrollment CSR.
 ///
 /// * `out` - An output parameter which will contain the initialized
@@ -362,7 +368,7 @@ pub unsafe extern "C" fn tpm_machine_key_load(
 /// The calling function must ensure that the `authority` is either a valid c
 /// string, or NULL. It must also ensure that `transport_key` is a valid c
 /// LoadableMsOapxbcRsaKey pointer or NULL, that `cert_key` is a valid c
-/// LoadableIdentityKey pointer or NULL, and that `out` is a valid c
+/// LoadableMsDeviceEnrolmentKey pointer or NULL, and that `out` is a valid c
 /// BrokerClientApplication double pointer.
 #[cfg(feature = "broker")]
 #[no_mangle]
@@ -370,7 +376,7 @@ pub unsafe extern "C" fn broker_init(
     authority: *const c_char,
     client_id: *const c_char,
     transport_key: *mut LoadableMsOapxbcRsaKey,
-    cert_key: *mut LoadableIdentityKey,
+    cert_key: *mut LoadableMsDeviceEnrolmentKey,
     out: *mut *mut BrokerClientApplication,
 ) -> MSAL_ERROR {
     if out.is_null() {
@@ -494,7 +500,7 @@ pub unsafe extern "C" fn enroll_attrs_init(
 /// * `out_transport_key` - A LoadableMsOapxbcRsaKey transport key output
 ///   parameter.
 ///
-/// * `out_cert_key` - A LoadableIdentityKey certificate key output parameter.
+/// * `out_cert_key` - A LoadableMsDeviceEnrolmentKey certificate key output parameter.
 ///
 /// * `out_device_id` - An output parameter which is the device id of the
 ///   enrolled device.
@@ -512,7 +518,7 @@ pub unsafe extern "C" fn broker_enroll_device(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out_transport_key: *mut *mut LoadableMsOapxbcRsaKey,
-    out_cert_key: *mut *mut LoadableIdentityKey,
+    out_cert_key: *mut *mut LoadableMsDeviceEnrolmentKey,
     out_device_id: *mut *mut c_char,
 ) -> MSAL_ERROR {
     // Ensure our input parameters are not NULL
@@ -557,7 +563,7 @@ pub unsafe extern "C" fn broker_enroll_device(
     };
     unsafe {
         *out_transport_key = Box::into_raw(Box::new(LoadableMsOapxbcRsaKey(transport_key)));
-        *out_cert_key = Box::into_raw(Box::new(LoadableIdentityKey(cert_key)));
+        *out_cert_key = Box::into_raw(Box::new(LoadableMsDeviceEnrolmentKey(cert_key)));
         *out_device_id = c_device_id.into_raw();
     }
     MSAL_ERROR::SUCCESS
@@ -1439,7 +1445,7 @@ pub unsafe extern "C" fn broker_exchange_prt_for_prt(
 ///
 /// * `pin` - The PIN code which will be used to unlock the key.
 ///
-/// * `out` - Either the existing LoadableIdentityKey, or a new created
+/// * `out` - Either the existing LoadableMsHelloKey, or a new created
 ///   key if none was provided.
 ///
 /// # Safety
@@ -1454,7 +1460,7 @@ pub unsafe extern "C" fn broker_provision_hello_for_business_key(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     pin: *const c_char,
-    out: *mut *mut LoadableIdentityKey,
+    out: *mut *mut LoadableMsHelloKey,
 ) -> MSAL_ERROR {
     if client.is_null() || token.is_null() || tpm.is_null() || machine_key.is_null() {
         error!("Invalid input parameters!");
@@ -1489,7 +1495,7 @@ pub unsafe extern "C" fn broker_provision_hello_for_business_key(
         Err(e) => return e,
     };
     unsafe {
-        *out = Box::into_raw(Box::new(LoadableIdentityKey(resp)));
+        *out = Box::into_raw(Box::new(LoadableMsHelloKey(resp)));
     }
     MSAL_ERROR::SUCCESS
 }
@@ -1503,7 +1509,7 @@ pub unsafe extern "C" fn broker_provision_hello_for_business_key(
 ///
 /// * `username` - Typically a UPN in the form of an email address.
 ///
-/// * `key` - A LoadableIdentityKey provisioned using
+/// * `key` - A LoadableMsHelloKey provisioned using
 ///   provision_hello_for_business_key.
 ///
 /// * `scopes` - Scopes requested to access a protected API (a resource).
@@ -1528,7 +1534,7 @@ pub unsafe extern "C" fn broker_provision_hello_for_business_key(
 pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
     client: *mut BrokerClientApplication,
     username: *const c_char,
-    key: *mut LoadableIdentityKey,
+    key: *mut LoadableMsHelloKey,
     scopes: *const *const c_char,
     scopes_len: c_int,
     request_resource: *const c_char,
@@ -1604,7 +1610,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
 ///
 /// * `username` - Typically a UPN in the form of an email address.
 ///
-/// * `key` - A LoadableIdentityKey provisioned using
+/// * `key` - A LoadableMsHelloKey provisioned using
 ///   provision_hello_for_business_key.
 ///
 /// * `tpm` - The tpm object.
@@ -1624,7 +1630,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
 pub unsafe extern "C" fn broker_acquire_user_prt_by_hello_for_business_key(
     client: *mut BrokerClientApplication,
     username: *const c_char,
-    key: *mut LoadableIdentityKey,
+    key: *mut LoadableMsHelloKey,
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     pin: *const c_char,
@@ -2071,7 +2077,19 @@ pub unsafe extern "C" fn loadable_ms_oapxbc_rsa_key_free(input: *mut LoadableMsO
 /// can be dereferenced.
 #[cfg(feature = "broker")]
 #[no_mangle]
-pub unsafe extern "C" fn loadable_identity_key_free(input: *mut LoadableIdentityKey) {
+pub unsafe extern "C" fn loadable_ms_device_enrollment_key_free(
+    input: *mut LoadableMsDeviceEnrolmentKey,
+) {
+    free_object!(input);
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `input` raw pointer is valid and
+/// can be dereferenced.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn loadable_ms_hello_key_free(input: *mut LoadableMsHelloKey) {
     free_object!(input);
 }
 
