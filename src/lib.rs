@@ -33,6 +33,8 @@ pub mod error;
 
 pub mod auth;
 pub use auth::*;
+pub mod confidential_client;
+pub use confidential_client::*;
 
 #[cfg(feature = "broker")]
 pub mod discovery;

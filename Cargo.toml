@@ -27,6 +27,9 @@ interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window
 changepassword = []
 on_behalf_of = ["broker"]
 
+[patch.crates-io]
+compact_jwt = { git = "https://github.com/dmulder/compact-jwt.git", branch = "dmulder/set_x5t" }
+
 [dependencies]
 crypto-glue = { version = "0.1.6" }
 base64 = "^0.22.0"
