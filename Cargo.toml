@@ -29,7 +29,7 @@ on_behalf_of = ["broker"]
 
 [dependencies]
 base64 = "^0.22.0"
-reqwest = { version = "^0.12.2", features = ["json", "cookies"] }
+reqwest = { version = "^0.12.2", features = ["json"] }
 serde = { version = "^1.0.180", features = ["derive"] }
 serde_json = "^1.0.96"
 tracing = "^0.1.37"
