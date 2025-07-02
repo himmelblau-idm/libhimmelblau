@@ -95,10 +95,10 @@ In order to initialize a BrokerClientApplication that was previously enrolled, e
 ```Rust
 let mut tpm = BoxedDynTpm::new(SoftTpm::new());
 let loadable_machine_key = tpm
-    .machine_key_create(&auth_value)
+    .root_storage_key_create(&auth_value)
     .expect("Unable to create new machine key");
 let machine_key = tpm
-    .machine_key_load(&auth_value, &loadable_machine_key)
+    .root_storage_key_load(&auth_value, &loadable_machine_key)
     .expect("Unable to load machine key");
 
 let app = BrokerClientApplication::new(Some(&authority), Some(&transport_key), Some(&cert_key)).expect("Failed creating app");
