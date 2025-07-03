@@ -1199,14 +1199,14 @@ pub enum AuthOption {
     NoDAGFallback,
 }
 
-struct ClientApplication {
-    client: Client,
-    client_id: String,
+pub(crate) struct ClientApplication {
+    pub(crate) client: Client,
+    pub(crate) client_id: String,
     authority: RwLock<String>,
 }
 
 impl ClientApplication {
-    fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+    pub(crate) fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
@@ -1240,7 +1240,7 @@ impl ClientApplication {
         })
     }
 
-    fn authority(&self) -> Result<String, MsalError> {
+    pub(crate) fn authority(&self) -> Result<String, MsalError> {
         self.authority
             .read()
             .map_err(|e| {
@@ -1252,7 +1252,7 @@ impl ClientApplication {
             .map(|authority| authority.clone())
     }
 
-    fn set_authority(&self, new_authority: &str) -> Result<(), MsalError> {
+    pub(crate) fn set_authority(&self, new_authority: &str) -> Result<(), MsalError> {
         self.authority
             .write()
             .map_err(|e| {

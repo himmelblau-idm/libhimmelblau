@@ -3,8 +3,6 @@ MSAL
 
 The purpose of this project is to implement MSAL for Rust, based on the specifications found in the Microsoft API Reference for [ClientApplication Class](https://learn.microsoft.com/en-us/python/api/msal/msal.application.clientapplication?view=msal-py-latest) and [PublicClientApplication Class](https://learn.microsoft.com/en-us/python/api/msal/msal.application.publicclientapplication?view=msal-py-latest). These are Python references which will be mimicked in Rust here.
 
-> **_NOTE:_**  Implementing the [ConfidentialClientApplication Class](https://learn.microsoft.com/en-us/python/api/msal/msal.application.confidentialclientapplication?view=msal-py-latest) is not currently a target for this project. If you are interested in volunteering to implement the ConfidentialClientApplication Class, please contact the maintainer.
-
 The project also implements the [MS-DRS] protocol, which is undocumented by
 microsoft. A [protocol specification](https://github.com/himmelblau-idm/aad-join-spec/releases/latest)
 is in progress as part of the himmelblau project.
@@ -97,10 +95,10 @@ In order to initialize a BrokerClientApplication that was previously enrolled, e
 ```Rust
 let mut tpm = BoxedDynTpm::new(SoftTpm::new());
 let loadable_machine_key = tpm
-    .machine_key_create(&auth_value)
+    .root_storage_key_create(&auth_value)
     .expect("Unable to create new machine key");
 let machine_key = tpm
-    .machine_key_load(&auth_value, &loadable_machine_key)
+    .root_storage_key_load(&auth_value, &loadable_machine_key)
     .expect("Unable to load machine key");
 
 let app = BrokerClientApplication::new(Some(&authority), Some(&transport_key), Some(&cert_key)).expect("Failed creating app");
