@@ -239,7 +239,7 @@ impl ConfidentialClientApplication {
                 .set_x5t(&sha1_thumbprint)
                 .build();
 
-                let mut jws_tpm_signer = match JwsTpmRs256Signer::new(tpm, &signing_key) {
+                let mut jws_tpm_signer = match JwsTpmRs256Signer::new(tpm, signing_key) {
                     Ok(jws_tpm_signer) => jws_tpm_signer,
                     Err(e) => {
                         return Err(MsalError::TPMFail(format!(
