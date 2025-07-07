@@ -190,8 +190,7 @@ impl IntuneForLinux {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
             .timeout(Duration::from_secs(3))
-            .redirect(Policy::none())
-            .cookie_store(true);
+            .redirect(Policy::none());
 
         #[cfg(feature = "proxyable")]
         {
