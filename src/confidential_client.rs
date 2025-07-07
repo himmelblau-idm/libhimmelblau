@@ -32,9 +32,7 @@ use compact_jwt::traits::JwsMutSigner as _;
 use crypto_glue::sha1::Sha1;
 use crypto_glue::traits::{Digest, EncodeDer};
 use crypto_glue::x509::Certificate;
-use kanidm_hsm_crypto::{
-    provider::BoxedDynTpm, structures::LoadableRS256Key, structures::StorageKey,
-};
+use kanidm_hsm_crypto::{provider::BoxedDynTpm, structures::RS256Key};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -69,7 +67,7 @@ pub struct Secret {
 
 pub enum ClientCredential {
     ClientSecret(Secret),
-    Certificate(Box<Certificate>, LoadableRS256Key),
+    Certificate(Box<Certificate>, RS256Key),
 }
 
 impl ClientCredential {
@@ -83,8 +81,8 @@ impl ClientCredential {
     /// Create a new client credential from a certificate.
     ///
     /// See: [2-Call-MsGraph-WithCertificate](https://github.com/Azure-Samples/ms-identity-python-daemon/blob/master/2-Call-MsGraph-WithCertificate/README.md)
-    pub fn from_certificate(cert: &Certificate, key: &LoadableRS256Key) -> Self {
-        ClientCredential::Certificate(Box::new(cert.clone()), key.clone())
+    pub fn from_certificate(cert: &Certificate, key: RS256Key) -> Self {
+        ClientCredential::Certificate(Box::new(cert.clone()), key)
     }
 }
 
@@ -192,9 +190,6 @@ impl ConfidentialClientApplication {
     /// * `tpm` - An optional TPM interface. Required only if the client was initialized
     ///   with a `LoadableRS256Key` tied to a client certificate.
     ///
-    /// * `storage_key` - An optional TPM `StorageKey` associated with this application. Also
-    ///   required only if the client uses a `LoadableRS256Key`.
-    ///
     /// # Returns
     /// * Success: A `ClientToken` containing an access token.
     /// * Failure: An `MsalError`, indicating the reason the silent token acquisition failed.
@@ -202,7 +197,6 @@ impl ConfidentialClientApplication {
         &self,
         scopes: Vec<&str>,
         tpm: Option<&mut BoxedDynTpm>,
-        storage_key: Option<&StorageKey>,
     ) -> Result<ClientToken, MsalError> {
         let url = format!("{}/oAuth2/v2.0/token", self.authority()?);
         let mut params = HashMap::new();
@@ -212,12 +206,9 @@ impl ConfidentialClientApplication {
             ClientCredential::ClientSecret(client_secret) => {
                 params.insert(CLIENT_SECRET, client_secret.value.as_str());
             }
-            ClientCredential::Certificate(cert, loadable_rs256_key) => {
+            ClientCredential::Certificate(cert, signing_key) => {
                 let tpm =
                     tpm.ok_or_else(|| MsalError::TPMFail("tpm object not provided".to_string()))?;
-                let storage_key = storage_key.ok_or_else(|| {
-                    MsalError::TPMFail("storage_key object not provided".to_string())
-                })?;
                 let now: u64 = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
@@ -233,12 +224,6 @@ impl ConfidentialClientApplication {
                     iat: now,
                     jti: uuid.as_str(),
                 };
-
-                let signing_key = tpm
-                    .rs256_load(storage_key, loadable_rs256_key)
-                    .map_err(|e| {
-                        MsalError::TPMFail(format!("Failing loading the signing key: {:?}", e))
-                    })?;
 
                 let sha1_thumbprint =
                     STANDARD.encode(Sha1::digest(&cert.to_der().map_err(|e| {
