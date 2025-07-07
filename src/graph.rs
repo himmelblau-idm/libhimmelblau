@@ -453,6 +453,47 @@ impl Graph {
         }
     }
 
+    pub async fn request_user_groups_by_user_id(
+        &self,
+        access_token: &str,
+        object_id: &str,
+    ) -> Result<Vec<DirectoryObject>, MsalError> {
+        let url = &format!(
+            "{}/v1.0/users/{}/memberOf",
+            self.graph_url().await?,
+            object_id
+        );
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        let mut res: Vec<DirectoryObject> = Vec::new();
+        if resp.status().is_success() {
+            let json_resp: DirectoryObjects = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+            for entry in json_resp.value {
+                if entry.data_type == "#microsoft.graph.group" {
+                    res.push(entry)
+                }
+            }
+            Ok(res)
+        } else {
+            let status = resp.status();
+            error!(
+                "Error encountered while fetching user groups: {}",
+                resp.text()
+                    .await
+                    .map_err(|e| { MsalError::GeneralFailure(format!("{:?}", e)) })?
+            );
+            Err(MsalError::GeneralFailure(format!("{}", status)))
+        }
+    }
+
     pub async fn assign_device_to_user(
         &self,
         access_token: &str,
