@@ -28,7 +28,7 @@ changepassword = []
 on_behalf_of = ["broker"]
 
 [patch.crates-io]
-compact_jwt = { git = "https://github.com/dmulder/compact-jwt.git", branch = "dmulder/set_x5t" }
+compact_jwt = { git = "https://github.com/kanidm/compact-jwt.git", branch = "main" }
 
 [dependencies]
 crypto-glue = { version = "0.1.6" }
