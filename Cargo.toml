@@ -27,9 +27,6 @@ interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window
 changepassword = []
 on_behalf_of = ["broker"]
 
-[patch.crates-io]
-compact_jwt = { git = "https://github.com/kanidm/compact-jwt.git", branch = "main" }
-
 [dependencies]
 crypto-glue = { version = "0.1.6" }
 base64 = "^0.22.0"
@@ -42,7 +39,7 @@ uuid = { version = "^1.4.1", features = [ "v4", "serde" ] }
 os-release = "^0.1.0"
 hostname = "^0.4.0"
 openssl = "^0.10.55"
-compact_jwt = { version = "0.5.2-dev", optional = true }
+compact_jwt = { version = "0.5.3-dev", optional = true }
 kanidm-hsm-crypto = { version = "^0.3.4", optional = true }
 regex = "^1.10.3"
 zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
