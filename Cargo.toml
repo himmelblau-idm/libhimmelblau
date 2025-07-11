@@ -30,7 +30,7 @@ on_behalf_of = ["broker"]
 [dependencies]
 crypto-glue = { version = "0.1.6" }
 base64 = "^0.22.0"
-reqwest = { version = "^0.12.2", features = ["json"] }
+reqwest = { version = "^0.12.2", features = ["json", "cookies"] }
 serde = { version = "^1.0.180", features = ["derive"] }
 serde_json = "^1.0.96"
 tracing = "^0.1.37"

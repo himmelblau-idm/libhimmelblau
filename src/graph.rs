@@ -237,7 +237,8 @@ impl Graph {
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3));
+            .timeout(Duration::from_secs(3))
+            .cookie_store(true);
 
         #[cfg(feature = "proxyable")]
         {
