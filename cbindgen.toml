@@ -20,3 +20,6 @@ enum MSAL_ERROR serialize_sealed_data(struct SealedData *value,
 enum MSAL_ERROR deserialize_sealed_data(uint8_t *in_buf, uintptr_t in_len,
                                         struct SealedData **out);
 """
+
+[defines]
+"feature = on_behalf_of" = "ON_BEHALF_OF"
