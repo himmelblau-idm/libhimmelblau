@@ -1,18 +1,29 @@
-use crate::krb5::CCache;
+// Kerberos support temporarily disabled due to licensing issues
+// use crate::krb5::FileCredentialCache as CCache;
+
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
-    AesKey, BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue,
-    UserToken, TGT,
+    AuthInit, AuthOption, BrokerClientApplication, PublicClientApplication, DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue,
+    MfaMethodInfo, UserToken,
 };
-use kanidm_hsm_crypto::soft::SoftTpm;
+
 #[cfg(feature = "tpm")]
 use kanidm_hsm_crypto::tpm::TpmTss;
 use kanidm_hsm_crypto::{
-    AuthValue, BoxedDynTpm, LoadableIdentityKey, LoadableMachineKey, LoadableMsOapxbcRsaKey,
-    MachineKey, SealedData, Tpm,
+    AuthValue,
+};
+use kanidm_hsm_crypto::provider::{
+    BoxedDynTpm,
+    SoftTpm,
+};
+use kanidm_hsm_crypto::structures::{
+    LoadableMsHelloKey, LoadableMachineKey, LoadableMsOapxbcRsaKey,
+    LoadableMsDeviceEnrolmentKey,
+    SealedData, StorageKey
 };
 use paste::paste;
-use picky_krb::messages::AsRep;
+// Kerberos support temporarily disabled
+// use picky_krb::messages::AsRep;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyType};
@@ -28,13 +39,16 @@ macro_rules! to_pyerr {
     };
 }
 
-fn wait<F>(py: Python, f: F) -> PyResult<F::Output>
+fn wait<F>(_py: Python, f: F) -> PyResult<F::Output>
 where
     F: Future + Send,
     F::Output: Send,
 {
     match Runtime::new() {
-        Ok(runtime) => Ok(py.allow_threads(|| runtime.block_on(f))),
+        Ok(runtime) => {
+            // Run async code without holding the GIL
+            Ok(runtime.block_on(f))
+        },
         Err(e) => Err(to_pyerr!(e)),
     }
 }
@@ -63,10 +77,10 @@ macro_rules! serialize_impl {
         paste! {
             #[pymethods]
             impl [<Py $type>] {
-                fn to_bytes(&self, py: Python) -> PyResult<PyObject> {
+                fn to_bytes(&self, py: Python) -> PyResult<Py<PyAny>> {
                     let bytes = serialize_obj(&self.$inner)
                         .map_err(|e| to_pyerr!(e))?;
-                    Ok(PyBytes::new_bound(py, &bytes).into())
+                    Ok(PyBytes::new(py, &bytes).into())
                 }
 
                 #[classmethod]
@@ -88,9 +102,9 @@ pub struct PyLoadableMachineKey {
 }
 serialize_impl!(LoadableMachineKey, key);
 
-#[pyclass(name = "MachineKey", module = "himmelblau", subclass)]
-pub struct PyMachineKey {
-    key: MachineKey,
+#[pyclass(name = "StorageKey", module = "himmelblau", subclass)]
+pub struct PyStorageKey {
+    key: StorageKey,
 }
 
 #[pyclass(name = "LoadableMsOapxbcRsaKey", module = "himmelblau", subclass)]
@@ -99,15 +113,60 @@ pub struct PyLoadableMsOapxbcRsaKey {
 }
 serialize_impl!(LoadableMsOapxbcRsaKey, key);
 
-#[pyclass(name = "LoadableIdentityKey", module = "himmelblau", subclass)]
-pub struct PyLoadableIdentityKey {
-    key: LoadableIdentityKey,
+#[pyclass(name = "LoadableMsHelloKey", module = "himmelblau", subclass)]
+pub struct PyLoadableMsHelloKey {
+    key: LoadableMsHelloKey,
 }
-serialize_impl!(LoadableIdentityKey, key);
+serialize_impl!(LoadableMsHelloKey, key);
+
+#[pyclass(name = "LoadableMsDeviceEnrolmentKey", module = "himmelblau", subclass)]
+pub struct PyLoadableMsDeviceEnrolmentKey {
+    key: LoadableMsDeviceEnrolmentKey,
+}
+serialize_impl!(LoadableMsDeviceEnrolmentKey, key);
 
 #[pyclass(name = "DeviceAuthorizationResponse", module = "himmelblau", subclass)]
 pub struct PyDeviceAuthorizationResponse {
     flow: DeviceAuthorizationResponse,
+}
+
+#[pyclass(name = "MfaMethodInfo", module = "himmelblau", subclass)]
+pub struct PyMfaMethodInfo {
+    info: MfaMethodInfo,
+}
+
+#[pymethods]
+impl PyMfaMethodInfo {
+    #[getter]
+    fn get_auth_method_id(&self) -> PyResult<String> {
+        Ok(self.info.auth_method_id.clone())
+    }
+
+    #[getter]
+    fn get_display(&self) -> PyResult<String> {
+        Ok(self.info.display.clone())
+    }
+
+    #[getter]
+    fn get_is_default(&self) -> PyResult<bool> {
+        Ok(self.info.is_default)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MfaMethodInfo(auth_method_id='{}', display='{}', is_default={})",
+            self.info.auth_method_id, self.info.display, self.info.is_default
+        )
+    }
+
+    fn __str__(&self) -> String {
+        format!(
+            "{} ({}{})",
+            self.info.auth_method_id,
+            self.info.display,
+            if self.info.is_default { " - DEFAULT" } else { "" }
+        )
+    }
 }
 
 #[pyclass(name = "MFAAuthContinue", module = "himmelblau", subclass)]
@@ -118,27 +177,67 @@ pub struct PyMFAAuthContinue {
 #[pymethods]
 impl PyMFAAuthContinue {
     #[getter]
-    fn get_msg(&self) -> PyResult<String> {
-        Ok(self.flow.msg.clone())
+    fn msg(&self) -> PyResult<Option<String>> {
+        Ok(Some(self.flow.msg.clone()))
     }
 
     #[getter]
-    fn get_mfa_method(&self) -> PyResult<String> {
-        Ok(self.flow.mfa_method.clone())
+    fn mfa_method(&self) -> PyResult<String> {
+        Ok(self.flow.mfa_methods.first()
+            .cloned()
+            .unwrap_or_else(String::new))
     }
 
     #[getter]
-    fn get_polling_interval(&self) -> PyResult<u32> {
+    fn polling_interval(&self) -> PyResult<u32> {
         self.flow
             .polling_interval
             .ok_or(general_py_err!("Polling interval not found!"))
     }
 
     #[getter]
-    fn get_max_poll_attempts(&self) -> PyResult<u32> {
+    fn max_poll_attempts(&self) -> PyResult<u32> {
         self.flow
             .max_poll_attempts
             .ok_or(general_py_err!("Max poll attempts not found!"))
+    }
+
+    /// Get all available MFA methods as a list of method IDs
+    fn get_available_mfa_methods(&self) -> PyResult<Vec<String>> {
+        Ok(self.flow.get_available_mfa_methods())
+    }
+
+    /// Get detailed information about all available MFA methods
+    fn get_mfa_method_details(&self) -> PyResult<Vec<PyMfaMethodInfo>> {
+        let details = self.flow.get_mfa_method_details();
+        Ok(details
+            .into_iter()
+            .map(|info| PyMfaMethodInfo { info })
+            .collect())
+    }
+
+    fn has_mfa_method(&self, method_id: &str) -> PyResult<bool> {
+        Ok(self.flow.has_mfa_method(method_id))
+    }
+
+    fn mfa_method_count(&self) -> PyResult<usize> {
+        Ok(self.flow.mfa_method_count())
+    }
+
+    fn get_default_mfa_method(&self) -> PyResult<String> {
+        self.flow.get_default_mfa_method_details()
+            .map(|info| info.auth_method_id.clone())
+            .ok_or_else(|| general_py_err!("No default MFA method found"))
+    }
+
+    /// Get detailed information about the default MFA method
+    fn get_default_mfa_method_details(&self) -> PyResult<Option<PyMfaMethodInfo>> {
+        Ok(self.flow.get_default_mfa_method_details().map(|info| PyMfaMethodInfo { info }))
+    }
+
+    /// Get detailed information about a specific MFA method by ID
+    fn get_mfa_method_by_id(&self, method_id: &str) -> PyResult<Option<PyMfaMethodInfo>> {
+        Ok(self.flow.get_mfa_method_by_id(method_id).map(|info| PyMfaMethodInfo { info }))
     }
 }
 
@@ -150,16 +249,13 @@ pub struct PyUserToken {
 #[pymethods]
 impl PyUserToken {
     #[getter]
-    fn get_refresh_token(&self) -> PyResult<String> {
+    fn refresh_token(&self) -> PyResult<String> {
         Ok(self.token.refresh_token.clone())
     }
 
     #[getter]
-    fn get_access_token(&self) -> PyResult<String> {
-        match &self.token.access_token {
-            Some(access_token) => Ok(access_token.clone()),
-            None => Err(general_py_err!("Access token not found!")),
-        }
+    fn access_token(&self) -> PyResult<Option<String>> {
+        Ok(self.token.access_token.clone())
     }
 
     #[getter]
@@ -200,66 +296,72 @@ pub struct PySealedData {
 }
 serialize_impl!(SealedData, data);
 
-#[pyclass(name = "AsRep", module = "himmelblau", subclass)]
-pub struct PyAsRep {
-    msg: AsRep,
-}
+// Kerberos support temporarily disabled
+// #[pyclass(name = "AsRep", module = "himmelblau", subclass)]
+// pub struct PyAsRep {
+//     msg: AsRep,
+// }
 
-#[pyclass(name = "TGT", module = "himmelblau", subclass)]
-pub struct PyTGT {
-    tgt: TGT,
-}
+// Kerberos support temporarily disabled
+// #[pyclass(name = "TGT", module = "himmelblau", subclass)]
+// pub struct PyTGT {
+//     tgt: TGT,
+// }
+//
+// #[pymethods]
+// impl PyTGT {
+//     #[getter]
+//     fn get_message(&self) -> PyResult<PyAsRep> {
+//         Ok(PyAsRep {
+//             msg: self.tgt.message().map_err(|e| to_pyerr!(e))?,
+//         })
+//     }
+//
+//     #[getter]
+//     fn get_realm(&self) -> PyResult<String> {
+//         match &self.tgt.realm {
+//             Some(realm) => Ok(realm.clone()),
+//             None => Err(general_py_err!("Realm not found!")),
+//         }
+//     }
+//
+//     #[getter]
+//     fn get_sn(&self) -> PyResult<String> {
+//         match &self.tgt.sn {
+//             Some(sn) => Ok(sn.clone()),
+//             None => Err(general_py_err!("sn not found!")),
+//         }
+//     }
+//
+//     #[getter]
+//     fn get_cn(&self) -> PyResult<String> {
+//         match &self.tgt.cn {
+//             Some(cn) => Ok(cn.clone()),
+//             None => Err(general_py_err!("cn not found!")),
+//         }
+//     }
+//
+//     #[getter]
+//     fn get_session_key_type(&self) -> PyResult<u32> {
+//         Ok(self.tgt.session_key_type)
+//     }
+//
+//     #[getter]
+//     fn get_account_type(&self) -> PyResult<u32> {
+//         Ok(self.tgt.account_type)
+//     }
+// }
 
-#[pymethods]
-impl PyTGT {
-    #[getter]
-    fn get_message(&self) -> PyResult<PyAsRep> {
-        Ok(PyAsRep {
-            msg: self.tgt.message().map_err(|e| to_pyerr!(e))?,
-        })
-    }
+// Kerberos support temporarily disabled
+// #[pyclass(name = "AesKey", module = "himmelblau", subclass)]
+// pub struct PyAesKey {
+//     client_key: AesKey,
+// }
 
-    #[getter]
-    fn get_realm(&self) -> PyResult<String> {
-        match &self.tgt.realm {
-            Some(realm) => Ok(realm.clone()),
-            None => Err(general_py_err!("Realm not found!")),
-        }
-    }
-
-    #[getter]
-    fn get_sn(&self) -> PyResult<String> {
-        match &self.tgt.sn {
-            Some(sn) => Ok(sn.clone()),
-            None => Err(general_py_err!("sn not found!")),
-        }
-    }
-
-    #[getter]
-    fn get_cn(&self) -> PyResult<String> {
-        match &self.tgt.cn {
-            Some(cn) => Ok(cn.clone()),
-            None => Err(general_py_err!("cn not found!")),
-        }
-    }
-
-    #[getter]
-    fn get_session_key_type(&self) -> PyResult<u32> {
-        Ok(self.tgt.session_key_type)
-    }
-
-    #[getter]
-    fn get_account_type(&self) -> PyResult<u32> {
-        Ok(self.tgt.account_type)
-    }
-}
-
-#[pyclass(name = "AesKey", module = "himmelblau", subclass)]
-pub struct PyAesKey {
-    client_key: AesKey,
-}
-
-#[pyclass(name = "Tpm", module = "himmelblau", subclass)]
+// TPM hardware interfaces are inherently single-threaded and cannot be safely
+// shared between threads. The unsendable attribute tells PyO3 this class
+// should not be thread-safe, which is appropriate for hardware interfaces.
+#[pyclass(name = "Tpm", module = "himmelblau", subclass, unsendable)]
 pub struct PyBoxedDynTpm {
     tpm: BoxedDynTpm,
 }
@@ -296,7 +398,7 @@ impl PyBoxedDynTpm {
         Ok(PyLoadableMachineKey {
             key: self
                 .tpm
-                .machine_key_create(&auth_value)
+                .root_storage_key_create(&auth_value)
                 .map_err(|e| to_pyerr!(e))?,
         })
     }
@@ -306,12 +408,12 @@ impl PyBoxedDynTpm {
         auth_value: &str,
         exported_key: &PyLoadableMachineKey,
         _py: Python,
-    ) -> PyResult<PyMachineKey> {
+    ) -> PyResult<PyStorageKey> {
         let auth_value = AuthValue::from_str(auth_value).map_err(|e| to_pyerr!(e))?;
-        Ok(PyMachineKey {
+        Ok(PyStorageKey {
             key: self
                 .tpm
-                .machine_key_load(&auth_value, &exported_key.key)
+                .root_storage_key_load(&auth_value, &exported_key.key)
                 .map_err(|e| to_pyerr!(e))?,
         })
     }
@@ -320,6 +422,38 @@ impl PyBoxedDynTpm {
 #[pyfunction]
 pub fn auth_value_generate() -> PyResult<String> {
     AuthValue::generate().map_err(|e| to_pyerr!(e))
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub enum PyAuthOption {
+    Fido,
+    Passwordless,
+    PasswordlessFido,
+    NoDAGFallback,
+}
+
+impl From<PyAuthOption> for AuthOption {
+    fn from(opt: PyAuthOption) -> Self {
+        match opt {
+            PyAuthOption::Fido => AuthOption::Fido,
+            PyAuthOption::Passwordless => AuthOption::Passwordless,
+            PyAuthOption::PasswordlessFido => AuthOption::PasswordlessFido,
+            PyAuthOption::NoDAGFallback => AuthOption::NoDAGFallback,
+        }
+    }
+}
+
+#[pyclass]
+pub struct PyAuthInit {
+    auth_init: AuthInit,
+}
+
+#[pymethods]
+impl PyAuthInit {
+    pub fn exists(&self) -> bool {
+        self.auth_init.exists()
+    }
 }
 
 #[pyclass]
@@ -380,6 +514,105 @@ impl PyEnrollAttrs {
     }
 }
 
+#[pyclass(name = "PublicClientApplication", module = "himmelblau", subclass)]
+pub struct PyPublicClientApplication {
+    client: PublicClientApplication,
+}
+
+#[pymethods]
+impl PyPublicClientApplication {
+    #[new]
+    pub fn new(
+        client_id: &str,
+        authority: Option<&str>,
+    ) -> PyResult<Self> {
+        Ok(PyPublicClientApplication {
+            client: PublicClientApplication::new(client_id, authority)
+                .map_err(|e| to_pyerr!(e))?,
+        })
+    }
+
+    pub fn check_user_exists(&self, username: &str, py: Python<'_>) -> PyResult<PyAuthInit> {
+        let auth_init = run_async!(py, self.client, check_user_exists, username, None, &[]);
+        Ok(PyAuthInit { auth_init })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]  // PyO3 requires owned types
+    pub fn initiate_acquire_token_by_mfa_flow(
+        &self,
+        username: &str,
+        password: Option<&str>,
+        scopes: Vec<String>,
+        auth_init: Option<&PyAuthInit>,
+        #[cfg(feature = "mfa_method_selection")]
+        mfa_method: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<PyMFAAuthContinue> {
+        let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
+        let rust_auth_init = auth_init.map(|a| a.auth_init.clone());
+        #[cfg(not(feature = "mfa_method_selection"))]
+        let flow = run_async!(
+            py,
+            self.client,
+            initiate_acquire_token_by_mfa_flow,
+            username,
+            password,
+            scopes_ref,
+            None,  // resource
+            &[],   // options
+            rust_auth_init
+        );
+        #[cfg(feature = "mfa_method_selection")]
+        let flow = run_async!(
+            py,
+            self.client,
+            initiate_acquire_token_by_mfa_flow,
+            username,
+            password,
+            scopes_ref,
+            None,  // resource
+            &[],   // options
+            rust_auth_init,
+            mfa_method
+        );
+        Ok(PyMFAAuthContinue { flow })
+    }
+
+    pub fn acquire_token_by_mfa_flow(
+        &self,
+        username: &str,
+        flow: &mut PyMFAAuthContinue,
+        auth_data: Option<&str>,
+        poll_attempt: Option<u32>,
+        #[cfg(feature = "mfa_method_selection")]
+        selected_method: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<PyUserToken> {
+        #[cfg(not(feature = "mfa_method_selection"))]
+        let token = run_async!(
+            py,
+            self.client,
+            acquire_token_by_mfa_flow,
+            username,
+            auth_data,
+            poll_attempt,
+            &mut flow.flow
+        );
+        #[cfg(feature = "mfa_method_selection")]
+        let token = run_async!(
+            py,
+            self.client,
+            acquire_token_by_mfa_flow,
+            username,
+            auth_data,
+            poll_attempt,
+            &mut flow.flow,
+            selected_method
+        );
+        Ok(PyUserToken { token })
+    }
+}
+
 #[pyclass(name = "BrokerClientApplication", module = "himmelblau", subclass)]
 pub struct PyBrokerClientApplication {
     client: BrokerClientApplication,
@@ -390,13 +623,15 @@ impl PyBrokerClientApplication {
     #[new]
     pub fn new(
         authority: Option<&str>,
+        client_id: Option<&str>,
         transport_key: Option<&PyLoadableMsOapxbcRsaKey>,
-        cert_key: Option<&PyLoadableIdentityKey>,
+        cert_key: Option<&PyLoadableMsDeviceEnrolmentKey>,
         _py: Python,
     ) -> PyResult<Self> {
         Ok(PyBrokerClientApplication {
             client: BrokerClientApplication::new(
                 authority,
+                client_id,
                 transport_key.map(|k| k.key.clone()),
                 cert_key.map(|k| k.key.clone()),
             )
@@ -409,9 +644,9 @@ impl PyBrokerClientApplication {
         refresh_token: &str,
         attrs: &PyEnrollAttrs,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         py: Python,
-    ) -> PyResult<(PyLoadableMsOapxbcRsaKey, PyLoadableIdentityKey, String)> {
+    ) -> PyResult<(PyLoadableMsOapxbcRsaKey, PyLoadableMsDeviceEnrolmentKey, String)> {
         let (transport_key, cert_key, device_id) = run_async!(
             py,
             self.client,
@@ -423,7 +658,7 @@ impl PyBrokerClientApplication {
         );
         Ok((
             PyLoadableMsOapxbcRsaKey { key: transport_key },
-            PyLoadableIdentityKey { key: cert_key },
+            PyLoadableMsDeviceEnrolmentKey { key: cert_key },
             device_id,
         ))
     }
@@ -435,7 +670,7 @@ impl PyBrokerClientApplication {
         password: &str,
         scopes: Vec<String>,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         request_resource: Option<String>,
         py: Python,
     ) -> PyResult<PyUserToken> {
@@ -460,7 +695,7 @@ impl PyBrokerClientApplication {
         refresh_token: &str,
         scopes: Vec<String>,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         request_resource: Option<String>,
         py: Python,
     ) -> PyResult<PyUserToken> {
@@ -519,25 +754,53 @@ impl PyBrokerClientApplication {
         })
     }
 
-    pub fn check_user_exists(&self, username: &str, py: Python) -> PyResult<bool> {
-        Ok(run_async!(py, self.client, check_user_exists, username,))
+    pub fn check_user_exists(&self, username: &str, py: Python) -> PyResult<PyAuthInit> {
+        let auth_init = run_async!(py, self.client, check_user_exists, username, &[]);
+        Ok(PyAuthInit { auth_init })
     }
 
+    #[allow(clippy::needless_pass_by_value)]  // PyO3 requires owned types
     pub fn initiate_acquire_token_by_mfa_flow_for_device_enrollment(
         &self,
         username: &str,
-        password: &str,
+        password: Option<&str>,
+        scopes: Option<Vec<String>>,
+        options: Vec<PyAuthOption>,
+        auth_init: Option<&PyAuthInit>,
+        #[cfg(feature = "mfa_method_selection")]
+        selected_method: Option<&str>,
         py: Python,
     ) -> PyResult<PyMFAAuthContinue> {
-        Ok(PyMFAAuthContinue {
-            flow: run_async!(
-                py,
-                self.client,
-                initiate_acquire_token_by_mfa_flow_for_device_enrollment,
-                username,
-                password,
-            ),
-        })
+        let rust_options: Vec<AuthOption> = options.into_iter().map(|o| o.into()).collect();
+        let rust_auth_init = auth_init.map(|a| a.auth_init.clone());
+        let scopes_vec = scopes.map(|s| s.iter().map(|s| s.as_str()).collect());
+
+        #[cfg(not(feature = "mfa_method_selection"))]
+        let flow = run_async!(
+            py,
+            self.client,
+            initiate_acquire_token_by_mfa_flow_for_device_enrollment,
+            username,
+            password,
+            scopes_vec,
+            &rust_options,
+            rust_auth_init,
+        );
+
+        #[cfg(feature = "mfa_method_selection")]
+        let flow = run_async!(
+            py,
+            self.client,
+            initiate_acquire_token_by_mfa_flow_for_device_enrollment,
+            username,
+            password,
+            scopes_vec,
+            &rust_options,
+            rust_auth_init,
+            selected_method,
+        );
+
+        Ok(PyMFAAuthContinue { flow })
     }
 
     pub fn acquire_token_by_mfa_flow(
@@ -546,19 +809,32 @@ impl PyBrokerClientApplication {
         flow: &mut PyMFAAuthContinue,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
+        #[cfg(feature = "mfa_method_selection")]
+        selected_method: Option<&str>,
         py: Python,
     ) -> PyResult<PyUserToken> {
-        Ok(PyUserToken {
-            token: run_async!(
-                py,
-                self.client,
-                acquire_token_by_mfa_flow,
-                username,
-                auth_data,
-                poll_attempt,
-                &mut flow.flow,
-            ),
-        })
+        #[cfg(not(feature = "mfa_method_selection"))]
+        let token = run_async!(
+            py,
+            self.client,
+            acquire_token_by_mfa_flow,
+            username,
+            auth_data,
+            poll_attempt,
+            &mut flow.flow,
+        );
+        #[cfg(feature = "mfa_method_selection")]
+        let token = run_async!(
+            py,
+            self.client,
+            acquire_token_by_mfa_flow,
+            username,
+            auth_data,
+            poll_attempt,
+            &mut flow.flow,
+            selected_method,
+        );
+        Ok(PyUserToken { token })
     }
 
     pub fn acquire_user_prt_by_username_password(
@@ -566,7 +842,7 @@ impl PyBrokerClientApplication {
         username: &str,
         password: &str,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         py: Python,
     ) -> PyResult<PySealedData> {
         Ok(PySealedData {
@@ -586,7 +862,7 @@ impl PyBrokerClientApplication {
         &self,
         refresh_token: &str,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         py: Python,
     ) -> PyResult<PySealedData> {
         Ok(PySealedData {
@@ -607,7 +883,7 @@ impl PyBrokerClientApplication {
         sealed_prt: &PySealedData,
         scope: Vec<String>,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         request_resource: Option<String>,
         py: Python,
     ) -> PyResult<PyUserToken> {
@@ -629,7 +905,7 @@ impl PyBrokerClientApplication {
         &self,
         sealed_prt: &PySealedData,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         request_tgt: bool,
         py: Python,
     ) -> PyResult<PySealedData> {
@@ -650,11 +926,11 @@ impl PyBrokerClientApplication {
         &self,
         token: &PyUserToken,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         pin: &str,
         py: Python,
-    ) -> PyResult<PyLoadableIdentityKey> {
-        Ok(PyLoadableIdentityKey {
+    ) -> PyResult<PyLoadableMsHelloKey> {
+        Ok(PyLoadableMsHelloKey {
             key: run_async!(
                 py,
                 self.client,
@@ -672,10 +948,10 @@ impl PyBrokerClientApplication {
     pub fn acquire_token_by_hello_for_business_key(
         &self,
         username: &str,
-        key: &PyLoadableIdentityKey,
+        key: &PyLoadableMsHelloKey,
         scopes: Vec<String>,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         pin: &str,
         request_resource: Option<String>,
         py: Python,
@@ -699,9 +975,9 @@ impl PyBrokerClientApplication {
     pub fn acquire_user_prt_by_hello_for_business_key(
         &self,
         username: &str,
-        key: &PyLoadableIdentityKey,
+        key: &PyLoadableMsHelloKey,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         pin: &str,
         py: Python,
     ) -> PyResult<PySealedData> {
@@ -723,18 +999,17 @@ impl PyBrokerClientApplication {
         &self,
         prt: &PySealedData,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
         py: Python,
     ) -> PyResult<String> {
-        let jwt = run_async!(
+        Ok(run_async!(
             py,
             self.client,
             acquire_prt_sso_cookie,
             &prt.data,
             &mut tpm.tpm,
             &machine_key.key,
-        )?;
-        Ok(jwt)
+        ))
     }
 
     pub fn store_cloud_tgt(
@@ -742,7 +1017,7 @@ impl PyBrokerClientApplication {
         sealed_prt: &PySealedData,
         filename: &str,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
     ) -> PyResult<()> {
         self.client
             .store_cloud_tgt(&sealed_prt.data, filename, &mut tpm.tpm, &machine_key.key)
@@ -754,7 +1029,7 @@ impl PyBrokerClientApplication {
         sealed_prt: &PySealedData,
         filename: &str,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
     ) -> PyResult<()> {
         self.client
             .store_ad_tgt(&sealed_prt.data, filename, &mut tpm.tpm, &machine_key.key)
@@ -765,7 +1040,7 @@ impl PyBrokerClientApplication {
         &self,
         sealed_prt: &PySealedData,
         tpm: &mut PyBoxedDynTpm,
-        machine_key: &PyMachineKey,
+        machine_key: &PyStorageKey,
     ) -> PyResult<String> {
         self.client
             .unseal_prt_kerberos_top_level_names(&sealed_prt.data, &mut tpm.tpm, &machine_key.key)
@@ -773,44 +1048,51 @@ impl PyBrokerClientApplication {
     }
 }
 
-#[pyclass(name = "CCache", module = "himmelblau", subclass)]
-pub struct PyCCache {
-    ccache: CCache,
-}
-
-#[pymethods]
-impl PyCCache {
-    #[new]
-    pub fn new(tgt: &PyAsRep, client_key: &PyAesKey, _py: Python) -> PyResult<Self> {
-        Ok(PyCCache {
-            ccache: CCache::new(&tgt.msg, &client_key.client_key).map_err(|e| to_pyerr!(e))?,
-        })
-    }
-
-    pub fn save_keytab_file(&self, filename: &str) -> PyResult<()> {
-        self.ccache
-            .save_keytab_file(filename)
-            .map_err(|e| to_pyerr!(e))
-    }
-}
+// Kerberos support temporarily disabled
+// #[pyclass(name = "CCache", module = "himmelblau", subclass)]
+// pub struct PyCCache {
+//     ccache: CCache,
+// }
+//
+// #[pymethods]
+// impl PyCCache {
+//     #[new]
+//     pub fn new(tgt: &PyAsRep, client_key: &PyAesKey, _py: Python) -> PyResult<Self> {
+//         Ok(PyCCache {
+//             ccache: CCache::new(&tgt.msg, &client_key.client_key).map_err(|e| to_pyerr!(e))?,
+//         })
+//     }
+//
+//     pub fn save_keytab_file(&self, filename: &str) -> PyResult<()> {
+//         self.ccache
+//             .save_keytab_file(filename)
+//             .map_err(|e| to_pyerr!(e))
+//     }
+// }
 
 #[pymodule]
 fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyPublicClientApplication>()?;
     m.add_class::<PyBrokerClientApplication>()?;
     m.add_class::<PyBoxedDynTpm>()?;
     m.add_class::<PyLoadableMachineKey>()?;
-    m.add_class::<PyMachineKey>()?;
+    m.add_class::<PyStorageKey>()?;
     m.add_class::<PyLoadableMsOapxbcRsaKey>()?;
-    m.add_class::<PyLoadableIdentityKey>()?;
+    m.add_class::<PyLoadableMsHelloKey>()?;
     m.add_class::<PyEnrollAttrs>()?;
     m.add_class::<PyDeviceAuthorizationResponse>()?;
+    m.add_class::<PyMfaMethodInfo>()?;
     m.add_class::<PyMFAAuthContinue>()?;
     m.add_class::<PyUserToken>()?;
     m.add_class::<PySealedData>()?;
+    m.add_class::<PyAuthOption>()?;
+    m.add_class::<PyAuthInit>()?;
     m.add_class::<TracingLevel>()?;
-    m.add_class::<PyAsRep>()?;
-    m.add_class::<PyAesKey>()?;
-    m.add_class::<PyCCache>()?;
+    // Kerberos support temporarily disabled
+    // m.add_class::<PyAsRep>()?;
+    // m.add_class::<PyAesKey>()?;
+    // m.add_class::<PyTGT>()?;
+    // m.add_class::<PyCCache>()?;
     m.add_function(wrap_pyfunction!(auth_value_generate, m)?)?;
     m.add_function(wrap_pyfunction!(set_global_tracing_level, m)?)?;
     Ok(())

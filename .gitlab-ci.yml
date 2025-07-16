@@ -6,7 +6,8 @@ stages:
 .build_template: &rust_build_setup
   image: rust:latest
   before_script:
-    - apt-get update && apt-get install -y libpam0g-dev libudev-dev libssl-dev pkg-config tpm-udev libtss2-dev libcap-dev libkrb5-dev libpcre2-dev libatk1.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev clang libclang-dev
+    - apt-get update -yq
+    - apt-get install --no-install-recommends --no-install-suggests -y libpam0g-dev libudev-dev libssl-dev pkg-config tpm-udev libtss2-dev libcap-dev libkrb5-dev libpcre2-dev libatk1.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev clang libclang-dev
     - rustup component add clippy
 
 build:

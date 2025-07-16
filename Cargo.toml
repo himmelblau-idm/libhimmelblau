@@ -27,6 +27,7 @@ proxyable = []
 interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window/threadsafe"]
 changepassword = []
 on_behalf_of = ["broker"]
+mfa_method_selection = []
 
 [dependencies]
 crypto-glue = { version = "0.1.6" }
