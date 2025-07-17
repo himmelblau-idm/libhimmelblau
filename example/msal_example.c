@@ -75,6 +75,7 @@ int main() {
 	char *kerberos_top_level_names = NULL;
 	bool mfa = false;
 	bool user_exists;
+	char *on_behalf_of = NULL;
 
 	err = set_global_tracing_level(TRACE);
 	if (err != SUCCESS) {
@@ -233,6 +234,7 @@ int main() {
 						    NULL,
 						    0,
 						    NULL,
+						    on_behalf_of,
 						    tpm,
 						    machine_key,
 						    &token0);
@@ -288,6 +290,7 @@ int main() {
 							     NULL,
 							     0,
 							     NULL,
+							     on_behalf_of,
 							     tpm,
 							     machine_key,
 							     "123456",
