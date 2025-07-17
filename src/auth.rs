@@ -1702,6 +1702,7 @@ impl PublicClientApplication {
                             None => auth_config.error_code2,
                         };
                         if let Some(error_code) = error_code {
+                            let description = auth_config.err_txt.clone();
                             // Check to see if we can get the failure message
                             if let Some(err_txt) = auth_config.err_txt {
                                 if !err_txt.is_empty() {
@@ -1720,7 +1721,10 @@ impl PublicClientApplication {
                                     ));
                                 }
                             }
-                            return Err(MsalError::AADSTSError(AADSTSError::new(error_code)));
+                            return Err(MsalError::AADSTSError(AADSTSError::new(
+                                error_code,
+                                description,
+                            )));
                         }
                     }
                     #[cfg(feature = "changepassword")]
@@ -2872,7 +2876,7 @@ impl PublicClientApplication {
             if auth_response.success {
                 Ok(auth_response)
             } else if let Some(error_code) = auth_response.error_code {
-                Err(MsalError::AADSTSError(AADSTSError::new(error_code)))
+                Err(MsalError::AADSTSError(AADSTSError::new(error_code, None)))
             } else if let Some(msg) = auth_response.message {
                 Err(MsalError::GeneralFailure(msg))
             } else {
@@ -2991,6 +2995,21 @@ impl PublicClientApplication {
             if let Some((_, error_description)) =
                 params.iter().find(|(k, _)| k == "error_description")
             {
+                let error_code_regex = Regex::new(r"AADSTS(\d+):");
+
+                if let Ok(regex) = error_code_regex {
+                    if let Some(captures) = regex.captures(error_description) {
+                        if let Some(code_match) = captures.get(1) {
+                            if let Ok(code) = code_match.as_str().parse::<u32>() {
+                                return Err(MsalError::AADSTSError(AADSTSError::new(
+                                    code,
+                                    Some(error_description.to_string()),
+                                )));
+                            }
+                        }
+                    }
+                }
+
                 return Err(MsalError::GeneralFailure(error_description.to_string()));
             }
 
