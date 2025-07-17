@@ -1087,6 +1087,22 @@ impl PrimaryRefreshToken {
     fn clone_session_key(&self, new_prt: &mut PrimaryRefreshToken) {
         new_prt.session_key_jwe.clone_from(&self.session_key_jwe);
     }
+
+    fn is_expired(&self) -> bool {
+        match self.expires_on.parse::<u64>() {
+            Ok(expiry_ts) => match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(now) => {
+                    let now = now.as_secs();
+                    now >= expiry_ts
+                }
+                Err(_) => true,
+            },
+            Err(e) => {
+                error!(?e, "Failed parsing PRT expires_on '{}'", self.expires_on);
+                true
+            }
+        }
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -6050,5 +6066,38 @@ impl BrokerClientApplication {
         } else {
             Err(MsalError::RequestFailed(format!("{}", resp.status())))
         }
+    }
+
+    /// Determine whether the Primary Refresh Token (PRT) is expired.
+    ///
+    /// This function decrypts the provided `SealedData` PRT and checks
+    /// whether the token has passed its `expires_on` timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The sealed and encrypted Primary Refresh Token.
+    /// * `tpm` - The TPM object used for cryptographic operations.
+    /// * `storage_key` - The TPM MachineKey used to load the Hello key and perform unsealing.
+    ///
+    /// # Returns
+    /// * Success: Whether or not the token is expired.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn is_prt_expired(
+        &self,
+        prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<bool, MsalError> {
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(prt, tpm, prt_storage_key)?;
+
+        Ok(prt.is_expired())
     }
 }
