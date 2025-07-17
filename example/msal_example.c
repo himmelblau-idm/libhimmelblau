@@ -56,8 +56,8 @@ int main() {
 	UserToken *token = NULL;
 	UserToken *token0 = NULL;
 	LoadableMsOapxbcRsaKey *transport_key = NULL;
-	LoadableIdentityKey *cert_key = NULL;
-	LoadableIdentityKey *hello_key = NULL;
+	LoadableMsDeviceEnrolmentKey *cert_key = NULL;
+	LoadableMsHelloKey *hello_key = NULL;
 	SealedData *prt = NULL;
 	MSAL_ERROR err;
 	char* auth_value = NULL;
@@ -75,6 +75,7 @@ int main() {
 	char *kerberos_top_level_names = NULL;
 	bool mfa = false;
 	bool user_exists;
+	char *on_behalf_of = NULL;
 
 	err = set_global_tracing_level(TRACE);
 	if (err != SUCCESS) {
@@ -233,6 +234,7 @@ int main() {
 						    NULL,
 						    0,
 						    NULL,
+						    on_behalf_of,
 						    tpm,
 						    machine_key,
 						    &token0);
@@ -288,6 +290,7 @@ int main() {
 							     NULL,
 							     0,
 							     NULL,
+							     on_behalf_of,
 							     tpm,
 							     machine_key,
 							     "123456",
@@ -371,8 +374,8 @@ OUT:
 	string_free(mfa_method);
 	string_free(device_id);
 	loadable_ms_oapxbc_rsa_key_free(transport_key);
-	loadable_identity_key_free(cert_key);
-	loadable_identity_key_free(hello_key);
+	loadable_ms_device_enrollment_key_free(cert_key);
+	loadable_ms_hello_key_free(hello_key);
 	sealed_data_free(prt);
 	string_free(refresh_token);
 	string_free(access_token);
