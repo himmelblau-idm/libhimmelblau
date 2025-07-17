@@ -2985,8 +2985,18 @@ impl PublicClientApplication {
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
             let url =
                 Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let params = url.query_pairs().collect::<Vec<_>>();
+
+            // Check for errors returned in the redirect URL parameters.
+            if let Some((_, error_description)) =
+                params.iter().find(|(k, _)| k == "error_description")
+            {
+                return Err(MsalError::GeneralFailure(error_description.to_string()));
+            }
+
             let (_, code) =
-                url.query_pairs()
+                params
+                    .iter()
                     .find(|(k, _)| k == "code")
                     .ok_or(MsalError::InvalidParse(
                         "Authorization code missing from redirect".to_string(),
@@ -3070,8 +3080,18 @@ impl PublicClientApplication {
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
             let url =
                 Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let params = url.query_pairs().collect::<Vec<_>>();
+
+            // Check for errors returned in the redirect URL parameters.
+            if let Some((_, error_description)) =
+                params.iter().find(|(k, _)| k == "error_description")
+            {
+                return Err(MsalError::GeneralFailure(error_description.to_string()));
+            }
+
             let (_, code) =
-                url.query_pairs()
+                params
+                    .iter()
                     .find(|(k, _)| k == "code")
                     .ok_or(MsalError::InvalidParse(
                         "Authorization code missing from redirect".to_string(),
