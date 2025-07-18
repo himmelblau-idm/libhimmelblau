@@ -1718,13 +1718,16 @@ impl PublicClientApplication {
                             None => auth_config.error_code2,
                         };
                         if let Some(error_code) = error_code {
-                            let description = auth_config.err_txt.clone();
+                            let description = auth_config.err_txt.or(
+                                auth_config.service_exception_msg);
+
                             // Check to see if we can get the failure message
-                            if let Some(err_txt) = auth_config.err_txt {
+                            if let Some(err_txt) = description.clone() {
                                 if !err_txt.is_empty() {
                                     error!("{}", err_txt);
                                 }
                             }
+
                             // AADSTS50203: User has not registered the authenticator app
                             if error_code == 50203 {
                                 if let Some(url_skip_mfa_registration) =
