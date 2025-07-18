@@ -354,7 +354,12 @@ impl AADSTSError {
 
 impl fmt::Display for AADSTSError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Error {}: {}", self.code, self.description)
+        let code_str = format!("AADSTS{}", self.code);
+        if self.description.starts_with(&format!("{}:", code_str)) {
+            write!(f, "{}", self.description)
+        } else {
+            write!(f, "{}: {}", code_str, self.description)
+        }
     }
 }
 
