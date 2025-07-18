@@ -16,7 +16,7 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::error::MSAL_ERROR;
+use crate::error::{make_error, MSAL_ERROR, MSAL_ERROR_CODE};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
@@ -64,14 +64,13 @@ macro_rules! run_async {
                 match $client.$func($($arg),*).await {
                     Ok(resp) => Ok(resp),
                     Err(e) => {
-                        error!("{:?}", e);
-                        Err(MSAL_ERROR::from(e))
+                        let msg = e.to_string();
+                        Err(make_error(MSAL_ERROR_CODE::from(e), msg))
                     }
                 }
             }),
             Err(e) => {
-                error!("{:?}", e);
-                Err(MSAL_ERROR::NO_MEMORY)
+                Err(make_error(MSAL_ERROR_CODE::NO_MEMORY, e.to_string()))
             }
         }
     }}
@@ -81,7 +80,7 @@ macro_rules! run_async {
 pub(crate) fn str_array_to_vec(
     arr: *const *const c_char,
     len: c_int,
-) -> Result<Vec<String>, MSAL_ERROR> {
+) -> Result<Vec<String>, *mut MSAL_ERROR> {
     if arr.is_null() && len == 0 {
         return Ok(vec![]);
     }
@@ -89,15 +88,16 @@ pub(crate) fn str_array_to_vec(
     let mut array = Vec::new();
     for &item in slice {
         if item.is_null() {
-            error!("Invalid input {}!", stringify!($arr));
-            return Err(MSAL_ERROR::INVALID_POINTER);
+            return Err(make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                format!("Invalid input {}", stringify!($arr)),
+            ));
         }
         let c_item = unsafe { CStr::from_ptr(item) };
         let str_item = match c_item.to_str() {
             Ok(str_item) => str_item,
             Err(e) => {
-                error!("{:?}", e);
-                return Err(MSAL_ERROR::INVALID_POINTER);
+                return Err(make_error(MSAL_ERROR_CODE::INVALID_POINTER, e.to_string()));
             }
         };
         array.push(str_item.to_string());
@@ -120,10 +120,12 @@ macro_rules! c_str_from_object_string {
             unsafe {
                 *$out = c_str;
             }
-            MSAL_ERROR::SUCCESS
+            no_error()
         } else {
-            error!("Invalid object {}.{}", stringify!($obj), stringify!($item));
-            MSAL_ERROR::INVALID_POINTER
+            make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                format!("Invalid object {}.{}", stringify!($obj), stringify!($item)),
+            )
         }
     }};
 }
@@ -138,16 +140,18 @@ macro_rules! c_str_from_object_option_string {
                     unsafe {
                         *$out = c_str;
                     }
-                    MSAL_ERROR::SUCCESS
+                    no_error()
                 } else {
-                    error!("Invalid object {}.{}", stringify!($obj), stringify!($item));
-                    MSAL_ERROR::INVALID_POINTER
+                    make_error(
+                        MSAL_ERROR_CODE::INVALID_POINTER,
+                        format!("Invalid object {}.{}", stringify!($obj), stringify!($item)),
+                    )
                 }
             }
-            None => {
-                error!("Object is None {}.{}", stringify!($obj), stringify!($item));
-                MSAL_ERROR::INVALID_POINTER
-            }
+            None => make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                format!("Object is None {}.{}", stringify!($obj), stringify!($item)),
+            ),
         }
     }};
 }
@@ -162,19 +166,16 @@ macro_rules! c_str_from_object_func {
                     unsafe {
                         *$out = c_str;
                     }
-                    MSAL_ERROR::SUCCESS
+                    no_error()
                 } else {
-                    error!(
-                        "Invalid response {}.{}()",
-                        stringify!($obj),
-                        stringify!($func)
-                    );
-                    MSAL_ERROR::INVALID_POINTER
+                    make_error(
+                        MSAL_ERROR_CODE::INVALID_POINTER,
+                        format!("Invalid response {}.{}()", stringify!($obj), stringify!($func))
+                    )
                 }
             }
             Err(e) => {
-                error!("{:?}", e);
-                MSAL_ERROR::INVALID_POINTER
+                make_error(MSAL_ERROR_CODE::INVALID_POINTER, e.to_string())
             }
         }
     }};

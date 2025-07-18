@@ -59,7 +59,7 @@ int main() {
 	LoadableMsDeviceEnrolmentKey *cert_key = NULL;
 	LoadableMsHelloKey *hello_key = NULL;
 	SealedData *prt = NULL;
-	MSAL_ERROR err;
+	MSAL_ERROR *err;
 	char* auth_value = NULL;
 	char *domain = NULL;
 	size_t len;
@@ -78,22 +78,22 @@ int main() {
 	char *on_behalf_of = NULL;
 
 	err = set_global_tracing_level(TRACE);
-	if (err != SUCCESS) {
-		printf("Failed setting the tracing level\n");
+	if (err != NULL) {
+		printf("Failed setting the tracing level: %s\n", err->msg);
 		goto OUT;
 	}
 
 	err = tpm_init(NULL, &tpm);
-	if (err != SUCCESS) {
-		printf("Failed to initialize tpm!\n");
+	if (err != NULL) {
+		printf("Failed to initialize tpm: %s\n", err->msg);
 		goto OUT;
 	}
 	auth_value_generate(&auth_value);
 	printf("auth_value: %s\n", auth_value);
 
 	err = tpm_machine_key_create(tpm, auth_value, &loadable_machine_key);
-	if (err != SUCCESS) {
-		printf("Failed to create loadable machine key!\n");
+	if (err != NULL) {
+		printf("Failed to create loadable machine key: %s\n", err->msg);
 		goto OUT;
 	}
 
@@ -101,14 +101,14 @@ int main() {
 				   auth_value,
 				   loadable_machine_key,
 				   &machine_key);
-	if (err != SUCCESS) {
-		printf("Failed to load machine key!\n");
+	if (err != NULL) {
+		printf("Failed to load machine key: %s\n", err->msg);
 		goto OUT;
 	}
 
 	err = broker_init(NULL, NULL, NULL, NULL, &client);
-	if (err != SUCCESS) {
-		printf("Failed to initialize the broker!\n");
+	if (err != NULL) {
+		printf("Failed to initialize the broker: %s\n", err->msg);
 		goto OUT;
 	}
 
@@ -120,13 +120,13 @@ int main() {
 	if (domain != NULL) {
 		domain++;
 	} else {
-		printf("Failed to find the domain name from the user upn!\n");
+		printf("Failed to find the domain name from the user upn: %s\n", err->msg);
 		goto OUT;
 	}
 
 	err = broker_check_user_exists(client, username, &user_exists);
-	if (err != SUCCESS) {
-		printf("Failed to check if the user exists!\n");
+	if (err != NULL) {
+		printf("Failed to check if the user exists: %s\n", err->msg);
 		goto OUT;
 	}
 	if (user_exists) {
@@ -142,22 +142,22 @@ int main() {
 									      username,
 									      password,
 									      &flow);
-	if (err != SUCCESS) {
-		printf("Failed to initiate an mfa token acquire!\n");
+	if (err != NULL) {
+		printf("Failed to initiate an mfa token acquire: %s\n", err->msg);
 		goto OUT;
 	}
 
 	err = mfa_auth_continue_msg(flow, &msg);
-	if (err != SUCCESS) {
-		printf("Failed to fetch MFA auth message!\n");
+	if (err != NULL) {
+		printf("Failed to fetch MFA auth message: %s\n", err->msg);
 		goto OUT;
 	}
 	printf("%s", msg);
 	fflush(stdout);
 
 	err = mfa_auth_continue_mfa_method(flow, &mfa_method);
-	if (err != SUCCESS) {
-		printf("Failed to fetch MFA method!\n");
+	if (err != NULL) {
+		printf("Failed to fetch MFA method: %s\n", err->msg);
 		goto OUT;
 	}
 	if (strcmp(mfa_method, "PhoneAppOTP") == 0
@@ -170,8 +170,8 @@ int main() {
 						       0,
 						       flow,
 						       &token);
-		if (err != SUCCESS) {
-			printf("Failed to authenticate with otp!\n");
+		if (err != NULL) {
+			printf("Failed to authenticate with otp: %s\n", err->msg);
 			goto OUT;
 		}
 	} else {
@@ -185,12 +185,12 @@ int main() {
 							       i,
 							       flow,
 							       &token);
-			if (err == MFA_POLL_CONTINUE) {
+			if (err == NULL) {
+			    break;
+			} else if (err->code == MFA_POLL_CONTINUE) {
 				sleep(polling_interval/1000);
-			} else if (err == SUCCESS) {
-				break;
 			} else {
-				printf("Failed to authenticate when polling!\n");
+				printf("Failed to authenticate when polling: %s\n", err->msg);
 				goto OUT;
 			}
 		}
@@ -203,14 +203,14 @@ int main() {
 				0,
 				NULL,
 				&attrs);
-	if (err != SUCCESS) {
-		printf("Failed to create enrollment attributes!\n");
+	if (err != NULL) {
+		printf("Failed to create enrollment attributes: %s\n", err->msg);
 		goto OUT;
 	}
 
 	err = user_token_refresh_token(token, &refresh_token);
-	if (err != SUCCESS) {
-		printf("Failed fetching refresh token\n");
+	if (err != NULL) {
+		printf("Failed fetching refresh token: %s\n", err->msg);
 		goto OUT;
 	}
 
@@ -222,8 +222,8 @@ int main() {
 				   &transport_key,
 				   &cert_key,
 				   &device_id);
-	if (err != SUCCESS) {
-		printf("Failed to enroll the device!\n");
+	if (err != NULL) {
+		printf("Failed to enroll the device: %s\n", err->msg);
 		goto OUT;
 	}
 	printf("Enrolled with device id: %s\n", device_id);
@@ -238,29 +238,29 @@ int main() {
 						    tpm,
 						    machine_key,
 						    &token0);
-	if (err != SUCCESS) {
-		printf("Failed to acquire token by refresh token\n");
+	if (err != NULL) {
+		printf("Failed to acquire token by refresh token: %s\n", err->msg);
 		goto OUT;
 	}
 
 	err = user_token_access_token(token0, &access_token);
-	if (err != SUCCESS) {
-		printf("Failed fetching access token\n");
+	if (err != NULL) {
+		printf("Failed fetching access token: %s\n", err->msg);
 		goto OUT;
 	}
 	err = user_token_spn(token0, &spn);
-	if (err != SUCCESS) {
-		printf("Failed fetching token spn\n");
+	if (err != NULL) {
+		printf("Failed fetching token spn: %s\n", err->msg);
 		goto OUT;
 	}
 	err = user_token_uuid(token0, &uuid);
-	if (err != SUCCESS) {
-		printf("Failed fetching token uuid\n");
+	if (err != NULL) {
+		printf("Failed fetching token uuid: %s\n", err->msg);
 		goto OUT;
 	}
 	err = user_token_amr_mfa(token0, &mfa);
-	if (err != SUCCESS) {
-		printf("Failed fetching token amr_mfa\n");
+	if (err != NULL) {
+		printf("Failed fetching token amr_mfa: %s\n", err->msg);
 		goto OUT;
 	}
 	printf("access_token: %s, spn: %s, uuid: %s, mfa?: %d\n",
@@ -276,8 +276,8 @@ int main() {
 						      machine_key,
 						      "123456",
 						      &hello_key);
-	if (err != SUCCESS) {
-		printf("Failed to provision a hello key!\n");
+	if (err != NULL) {
+		printf("Failed to provision a hello key: %s\n", err->msg);
 		goto OUT;
 	}
 
@@ -295,32 +295,32 @@ int main() {
 							     machine_key,
 							     "123456",
 							     &token0);
-	if (err != SUCCESS) {
-		printf("Failed to acquire a token using the provisioned hello key!\n");
+	if (err != NULL) {
+		printf("Failed to acquire a token using the provisioned hello key: %s\n", err->msg);
 		goto OUT;
 	}
 
 	string_free(access_token);
 	err = user_token_access_token(token0, &access_token);
-	if (err != SUCCESS) {
-		printf("Failed fetching access token\n");
+	if (err != NULL) {
+		printf("Failed fetching access token: %s\n", err->msg);
 		goto OUT;
 	}
 	string_free(spn);
 	err = user_token_spn(token0, &spn);
-	if (err != SUCCESS) {
-		printf("Failed fetching token spn\n");
+	if (err != NULL) {
+		printf("Failed fetching token spn: %s\n", err->msg);
 		goto OUT;
 	}
 	string_free(uuid);
 	err = user_token_uuid(token0, &uuid);
-	if (err != SUCCESS) {
-		printf("Failed fetching token uuid\n");
+	if (err != NULL) {
+		printf("Failed fetching token uuid: %s\n", err->msg);
 		goto OUT;
 	}
 	err = user_token_amr_mfa(token0, &mfa);
-	if (err != SUCCESS) {
-		printf("Failed fetching token amr_mfa\n");
+	if (err != NULL) {
+		printf("Failed fetching token amr_mfa: %s\n", err->msg);
 		goto OUT;
 	}
 	printf("access_token: %s, spn: %s, uuid: %s, mfa?: %d\n",
@@ -331,8 +331,8 @@ int main() {
 
 	printf("Unseal the TGT from the PRT\n");
 	err = user_token_prt(token0, &prt);
-	if (err != SUCCESS) {
-		printf("Failed fetching token prt\n");
+	if (err != NULL) {
+		printf("Failed fetching token prt: %s\n", err->msg);
 		goto OUT;
 	}
 
@@ -342,8 +342,8 @@ int main() {
 				     "./c_test_ccache",
 				     tpm,
 				     machine_key);
-	if (err != SUCCESS) {
-		printf("Failed storing TGT\n");
+	if (err != NULL) {
+		printf("Failed storing TGT: %s\n", err->msg);
 		goto OUT;
 	}
 	cat_file("./c_test_ccache");
@@ -354,13 +354,14 @@ int main() {
 							 tpm,
 							 machine_key,
 							 &kerberos_top_level_names);
-	if (err != SUCCESS) {
-		printf("Failed to unseal the kerberos top level names\n");
+	if (err != NULL) {
+		printf("Failed to unseal the kerberos top level names: %s\n", err->msg);
 		goto OUT;
 	}
 	printf("%s\n", kerberos_top_level_names);
 
 OUT:
+    error_free(err);
 	user_token_free(token);
 	user_token_free(token0);
 	mfa_auth_continue_free(flow);

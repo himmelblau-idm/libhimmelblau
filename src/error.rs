@@ -16,11 +16,12 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
+pub use crate::aadsts_err_gen::*;
 use serde::{Deserialize, Serialize};
 use std::convert::From;
+use std::ffi::CString;
 use std::fmt;
-
-pub use crate::aadsts_err_gen::*;
+use std::os::raw::c_char;
 
 pub const INVALID_CRED: u32 = 0xC3CE;
 pub const REQUIRES_MFA: u32 = 0xC39C;
@@ -123,7 +124,7 @@ impl fmt::Display for MsalError {
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub enum MSAL_ERROR {
+pub enum MSAL_ERROR_CODE {
     INVALID_JSON,
     INVALID_BASE64,
     INVALID_REGEX,
@@ -141,7 +142,6 @@ pub enum MSAL_ERROR {
     MFA_POLL_CONTINUE,
     MISSING,
     FORMAT_ERROR,
-    SUCCESS,
     INVALID_POINTER,
     NO_MEMORY,
     AADSTS_ERROR,
@@ -152,32 +152,77 @@ pub enum MSAL_ERROR {
     CONSENT_REQUESTED,
 }
 
-impl From<MsalError> for MSAL_ERROR {
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct MSAL_ERROR {
+    pub code: MSAL_ERROR_CODE,
+    pub msg: *const c_char,
+    pub aadsts_code: u32,
+}
+
+impl From<MsalError> for MSAL_ERROR_CODE {
     fn from(error: MsalError) -> Self {
         match error {
-            MsalError::InvalidJson(_) => MSAL_ERROR::INVALID_JSON,
-            MsalError::InvalidBase64(_) => MSAL_ERROR::INVALID_BASE64,
-            MsalError::InvalidRegex(_) => MSAL_ERROR::INVALID_REGEX,
-            MsalError::InvalidParse(_) => MSAL_ERROR::INVALID_PARSE,
-            MsalError::AcquireTokenFailed(_) => MSAL_ERROR::ACQUIRE_TOKEN_FAILED,
-            MsalError::GeneralFailure(_) => MSAL_ERROR::GENERAL_FAILURE,
-            MsalError::RequestFailed(_) => MSAL_ERROR::REQUEST_FAILED,
-            MsalError::AuthTypeUnsupported => MSAL_ERROR::AUTH_TYPE_UNSUPPORTED,
-            MsalError::TPMFail(_) => MSAL_ERROR::TPM_FAIL,
-            MsalError::URLFormatFailed(_) => MSAL_ERROR::URL_FORMAT_FAILED,
-            MsalError::DeviceEnrollmentFail(_) => MSAL_ERROR::DEVICE_ENROLLMENT_FAIL,
-            MsalError::CryptoFail(_) => MSAL_ERROR::CRYPTO_FAIL,
-            MsalError::NotImplemented => MSAL_ERROR::NOT_IMPLEMENTED,
-            MsalError::ConfigError(_) => MSAL_ERROR::CONFIG_ERROR,
-            MsalError::MFAPollContinue => MSAL_ERROR::MFA_POLL_CONTINUE,
-            MsalError::AADSTSError(_) => MSAL_ERROR::AADSTS_ERROR,
-            MsalError::Missing(_) => MSAL_ERROR::MISSING,
-            MsalError::FormatError(_) => MSAL_ERROR::FORMAT_ERROR,
+            MsalError::InvalidJson(_) => MSAL_ERROR_CODE::INVALID_JSON,
+            MsalError::InvalidBase64(_) => MSAL_ERROR_CODE::INVALID_BASE64,
+            MsalError::InvalidRegex(_) => MSAL_ERROR_CODE::INVALID_REGEX,
+            MsalError::InvalidParse(_) => MSAL_ERROR_CODE::INVALID_PARSE,
+            MsalError::AcquireTokenFailed(_) => MSAL_ERROR_CODE::ACQUIRE_TOKEN_FAILED,
+            MsalError::GeneralFailure(_) => MSAL_ERROR_CODE::GENERAL_FAILURE,
+            MsalError::RequestFailed(_) => MSAL_ERROR_CODE::REQUEST_FAILED,
+            MsalError::AuthTypeUnsupported => MSAL_ERROR_CODE::AUTH_TYPE_UNSUPPORTED,
+            MsalError::TPMFail(_) => MSAL_ERROR_CODE::TPM_FAIL,
+            MsalError::URLFormatFailed(_) => MSAL_ERROR_CODE::URL_FORMAT_FAILED,
+            MsalError::DeviceEnrollmentFail(_) => MSAL_ERROR_CODE::DEVICE_ENROLLMENT_FAIL,
+            MsalError::CryptoFail(_) => MSAL_ERROR_CODE::CRYPTO_FAIL,
+            MsalError::NotImplemented => MSAL_ERROR_CODE::NOT_IMPLEMENTED,
+            MsalError::ConfigError(_) => MSAL_ERROR_CODE::CONFIG_ERROR,
+            MsalError::MFAPollContinue => MSAL_ERROR_CODE::MFA_POLL_CONTINUE,
+            MsalError::AADSTSError(_) => MSAL_ERROR_CODE::AADSTS_ERROR,
+            MsalError::Missing(_) => MSAL_ERROR_CODE::MISSING,
+            MsalError::FormatError(_) => MSAL_ERROR_CODE::FORMAT_ERROR,
             #[cfg(feature = "changepassword")]
-            MsalError::ChangePassword => MSAL_ERROR::CHANGE_PASSWORD,
-            MsalError::PasswordRequired => MSAL_ERROR::PASSWORD_REQUIRED,
-            MsalError::SkipMfaRegistration(_, _, _) => MSAL_ERROR::SKIP_MFA_REGISTRATION,
-            MsalError::ConsentRequested(_) => MSAL_ERROR::CONSENT_REQUESTED,
+            MsalError::ChangePassword => MSAL_ERROR_CODE::CHANGE_PASSWORD,
+            MsalError::PasswordRequired => MSAL_ERROR_CODE::PASSWORD_REQUIRED,
+            MsalError::SkipMfaRegistration(_, _, _) => MSAL_ERROR_CODE::SKIP_MFA_REGISTRATION,
+            MsalError::ConsentRequested(_) => MSAL_ERROR_CODE::CONSENT_REQUESTED,
         }
     }
+}
+
+impl From<MsalError> for MSAL_ERROR {
+    fn from(error: MsalError) -> Self {
+        let aadsts_code = match error {
+            MsalError::AADSTSError(ref err) => err.code,
+            _ => 0,
+        };
+        let msg = match CString::new(error.to_string()) {
+            Ok(cstr) => cstr.into_raw(),
+            Err(_) => std::ptr::null(),
+        };
+        let code = MSAL_ERROR_CODE::from(error);
+
+        MSAL_ERROR {
+            code,
+            msg,
+            aadsts_code,
+        }
+    }
+}
+
+pub fn no_error() -> *mut MSAL_ERROR {
+    std::ptr::null_mut()
+}
+
+pub fn make_error(code: MSAL_ERROR_CODE, msg: String) -> *mut MSAL_ERROR {
+    let msg = match CString::new(msg) {
+        Ok(cstr) => cstr.into_raw(),
+        Err(_) => std::ptr::null(),
+    };
+
+    Box::into_raw(Box::new(MSAL_ERROR {
+        code,
+        msg,
+        aadsts_code: 0,
+    }))
 }
