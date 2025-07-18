@@ -1748,8 +1748,8 @@ impl PublicClientApplication {
                             None => auth_config.error_code2,
                         };
                         if let Some(error_code) = error_code {
-                            let description = auth_config.err_txt.or(
-                                auth_config.service_exception_msg);
+                            let description =
+                                auth_config.err_txt.or(auth_config.service_exception_msg);
 
                             // Check to see if we can get the failure message
                             if let Some(err_txt) = description.clone() {

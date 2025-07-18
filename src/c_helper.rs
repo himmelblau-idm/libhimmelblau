@@ -16,7 +16,7 @@
    along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::error::MSAL_ERROR;
+use crate::error::MsalError;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
@@ -64,14 +64,13 @@ macro_rules! run_async {
                 match $client.$func($($arg),*).await {
                     Ok(resp) => Ok(resp),
                     Err(e) => {
-                        error!("{:?}", e);
-                        Err(MSAL_ERROR::from(e))
+                        let msg = e.to_string();
+                        Err(make_error(MSAL_ERROR_CODE::from(e), msg))
                     }
                 }
             }),
             Err(e) => {
-                error!("{:?}", e);
-                Err(MSAL_ERROR::NO_MEMORY)
+                Err(make_error(MSAL_ERROR_CODE::NO_MEMORY, e.to_string()))
             }
         }
     }}
@@ -81,7 +80,7 @@ macro_rules! run_async {
 pub(crate) fn str_array_to_vec(
     arr: *const *const c_char,
     len: c_int,
-) -> Result<Vec<String>, MSAL_ERROR> {
+) -> Result<Vec<String>, *mut MSAL_ERROR> {
     if arr.is_null() && len == 0 {
         return Ok(vec![]);
     }
@@ -89,15 +88,16 @@ pub(crate) fn str_array_to_vec(
     let mut array = Vec::new();
     for &item in slice {
         if item.is_null() {
-            error!("Invalid input {}!", stringify!($arr));
-            return Err(MSAL_ERROR::INVALID_POINTER);
+            return Err(make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                format!("Invalid input {}", stringify!($arr)),
+            ));
         }
         let c_item = unsafe { CStr::from_ptr(item) };
         let str_item = match c_item.to_str() {
             Ok(str_item) => str_item,
             Err(e) => {
-                error!("{:?}", e);
-                return Err(MSAL_ERROR::INVALID_POINTER);
+                return Err(make_error(MSAL_ERROR_CODE::INVALID_POINTER, e.to_string()));
             }
         };
         array.push(str_item.to_string());
@@ -120,10 +120,12 @@ macro_rules! c_str_from_object_string {
             unsafe {
                 *$out = c_str;
             }
-            MSAL_ERROR::SUCCESS
+            no_error()
         } else {
-            error!("Invalid object {}.{}", stringify!($obj), stringify!($item));
-            MSAL_ERROR::INVALID_POINTER
+            make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                format!("Invalid object {}.{}", stringify!($obj), stringify!($item)),
+            )
         }
     }};
 }
@@ -138,16 +140,18 @@ macro_rules! c_str_from_object_option_string {
                     unsafe {
                         *$out = c_str;
                     }
-                    MSAL_ERROR::SUCCESS
+                    no_error()
                 } else {
-                    error!("Invalid object {}.{}", stringify!($obj), stringify!($item));
-                    MSAL_ERROR::INVALID_POINTER
+                    make_error(
+                        MSAL_ERROR_CODE::INVALID_POINTER,
+                        format!("Invalid object {}.{}", stringify!($obj), stringify!($item)),
+                    )
                 }
             }
-            None => {
-                error!("Object is None {}.{}", stringify!($obj), stringify!($item));
-                MSAL_ERROR::INVALID_POINTER
-            }
+            None => make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                format!("Object is None {}.{}", stringify!($obj), stringify!($item)),
+            ),
         }
     }};
 }
@@ -162,20 +166,123 @@ macro_rules! c_str_from_object_func {
                     unsafe {
                         *$out = c_str;
                     }
-                    MSAL_ERROR::SUCCESS
+                    no_error()
                 } else {
-                    error!(
-                        "Invalid response {}.{}()",
-                        stringify!($obj),
-                        stringify!($func)
-                    );
-                    MSAL_ERROR::INVALID_POINTER
+                    make_error(
+                        MSAL_ERROR_CODE::INVALID_POINTER,
+                        format!("Invalid response {}.{}()", stringify!($obj), stringify!($func))
+                    )
                 }
             }
             Err(e) => {
-                error!("{:?}", e);
-                MSAL_ERROR::INVALID_POINTER
+                make_error(MSAL_ERROR_CODE::INVALID_POINTER, e.to_string())
             }
         }
     }};
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum MSAL_ERROR_CODE {
+    INVALID_JSON,
+    INVALID_BASE64,
+    INVALID_REGEX,
+    INVALID_PARSE,
+    ACQUIRE_TOKEN_FAILED,
+    GENERAL_FAILURE,
+    REQUEST_FAILED,
+    AUTH_TYPE_UNSUPPORTED,
+    TPM_FAIL,
+    URL_FORMAT_FAILED,
+    DEVICE_ENROLLMENT_FAIL,
+    CRYPTO_FAIL,
+    NOT_IMPLEMENTED,
+    CONFIG_ERROR,
+    MFA_POLL_CONTINUE,
+    MISSING,
+    FORMAT_ERROR,
+    INVALID_POINTER,
+    NO_MEMORY,
+    AADSTS_ERROR,
+    #[cfg(feature = "changepassword")]
+    CHANGE_PASSWORD,
+    PASSWORD_REQUIRED,
+    SKIP_MFA_REGISTRATION,
+    CONSENT_REQUESTED,
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct MSAL_ERROR {
+    pub code: MSAL_ERROR_CODE,
+    pub msg: *const c_char,
+    pub aadsts_code: u32,
+}
+
+impl From<MsalError> for MSAL_ERROR_CODE {
+    fn from(error: MsalError) -> Self {
+        match error {
+            MsalError::InvalidJson(_) => MSAL_ERROR_CODE::INVALID_JSON,
+            MsalError::InvalidBase64(_) => MSAL_ERROR_CODE::INVALID_BASE64,
+            MsalError::InvalidRegex(_) => MSAL_ERROR_CODE::INVALID_REGEX,
+            MsalError::InvalidParse(_) => MSAL_ERROR_CODE::INVALID_PARSE,
+            MsalError::AcquireTokenFailed(_) => MSAL_ERROR_CODE::ACQUIRE_TOKEN_FAILED,
+            MsalError::GeneralFailure(_) => MSAL_ERROR_CODE::GENERAL_FAILURE,
+            MsalError::RequestFailed(_) => MSAL_ERROR_CODE::REQUEST_FAILED,
+            MsalError::AuthTypeUnsupported => MSAL_ERROR_CODE::AUTH_TYPE_UNSUPPORTED,
+            MsalError::TPMFail(_) => MSAL_ERROR_CODE::TPM_FAIL,
+            MsalError::URLFormatFailed(_) => MSAL_ERROR_CODE::URL_FORMAT_FAILED,
+            MsalError::DeviceEnrollmentFail(_) => MSAL_ERROR_CODE::DEVICE_ENROLLMENT_FAIL,
+            MsalError::CryptoFail(_) => MSAL_ERROR_CODE::CRYPTO_FAIL,
+            MsalError::NotImplemented => MSAL_ERROR_CODE::NOT_IMPLEMENTED,
+            MsalError::ConfigError(_) => MSAL_ERROR_CODE::CONFIG_ERROR,
+            MsalError::MFAPollContinue => MSAL_ERROR_CODE::MFA_POLL_CONTINUE,
+            MsalError::AADSTSError(_) => MSAL_ERROR_CODE::AADSTS_ERROR,
+            MsalError::Missing(_) => MSAL_ERROR_CODE::MISSING,
+            MsalError::FormatError(_) => MSAL_ERROR_CODE::FORMAT_ERROR,
+            #[cfg(feature = "changepassword")]
+            MsalError::ChangePassword => MSAL_ERROR_CODE::CHANGE_PASSWORD,
+            MsalError::PasswordRequired => MSAL_ERROR_CODE::PASSWORD_REQUIRED,
+            MsalError::SkipMfaRegistration(_, _, _) => MSAL_ERROR_CODE::SKIP_MFA_REGISTRATION,
+            MsalError::ConsentRequested(_) => MSAL_ERROR_CODE::CONSENT_REQUESTED,
+        }
+    }
+}
+
+impl From<MsalError> for MSAL_ERROR {
+    fn from(error: MsalError) -> Self {
+        let aadsts_code = match error {
+            MsalError::AADSTSError(ref err) => err.code,
+            _ => 0,
+        };
+        let msg = match CString::new(error.to_string()) {
+            Ok(cstr) => cstr.into_raw(),
+            Err(_) => std::ptr::null(),
+        };
+        let code = MSAL_ERROR_CODE::from(error);
+
+        MSAL_ERROR {
+            code,
+            msg,
+            aadsts_code,
+        }
+    }
+}
+
+pub fn no_error() -> *mut MSAL_ERROR {
+    std::ptr::null_mut()
+}
+
+pub fn make_error(code: MSAL_ERROR_CODE, msg: String) -> *mut MSAL_ERROR {
+    let msg = match CString::new(msg) {
+        Ok(cstr) => cstr.into_raw(),
+        Err(_) => std::ptr::null(),
+    };
+
+    Box::into_raw(Box::new(MSAL_ERROR {
+        code,
+        msg,
+        aadsts_code: 0,
+    }))
 }

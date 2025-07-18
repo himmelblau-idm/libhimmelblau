@@ -49,12 +49,12 @@ use std::slice;
 use std::str::FromStr;
 #[cfg(feature = "broker")]
 use tokio::runtime;
-use tracing::{error, warn, Level};
+use tracing::{warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::auth::*;
 use crate::c_helper::*;
-use crate::error::MSAL_ERROR;
+use crate::c_helper::{make_error, no_error, MSAL_ERROR, MSAL_ERROR_CODE};
 use crate::serializer::{deserialize_obj, serialize_obj};
 #[cfg(feature = "broker")]
 use crate::EnrollAttrs;
@@ -86,12 +86,11 @@ macro_rules! serialize_and_deserialize_funcs {
             pub unsafe extern "C" fn [<serialize _ $type:snake:lower>] (value: &$type,
                                                                         out_buf: *mut *mut u8,
                                                                         out_len: *mut usize,
-            ) -> MSAL_ERROR {
+            ) -> *mut MSAL_ERROR {
                 let bytes = match serialize_obj(&value.0) {
                     Ok(bytes) => bytes,
                     Err(e) => {
-                        error!("{:?}", e);
-                        return MSAL_ERROR::INVALID_JSON;
+                        return make_error(MSAL_ERROR_CODE::INVALID_JSON, e.to_string());
                     },
                 };
 
@@ -101,7 +100,7 @@ macro_rules! serialize_and_deserialize_funcs {
                     *out_len = bytes.len();
                 }
 
-                MSAL_ERROR::SUCCESS
+                no_error()
             }
 
             /// # Safety
@@ -113,20 +112,19 @@ macro_rules! serialize_and_deserialize_funcs {
             pub unsafe extern "C" fn [<deserialize _ $type:snake:lower>] (in_buf: *mut u8,
                                                                           in_len: usize,
                                                                           out: *mut *mut $type,
-            ) -> MSAL_ERROR {
+            ) -> *mut MSAL_ERROR {
                 let bytes = slice::from_raw_parts(in_buf, in_len);
                 let res = match deserialize_obj(bytes) {
                     Ok(res) => res,
                     Err(e) => {
-                        error!("{:?}", e);
-                        return MSAL_ERROR::INVALID_JSON;
+                        return make_error(MSAL_ERROR_CODE::INVALID_JSON, e.to_string());
                     },
                 };
                 unsafe {
                     *out = Box::into_raw(Box::new($type(res)));
                 }
 
-                MSAL_ERROR::SUCCESS
+                no_error()
             }
         }
     };
@@ -172,16 +170,13 @@ impl From<TracingLevel> for Level {
 }
 
 #[no_mangle]
-pub extern "C" fn set_global_tracing_level(level: TracingLevel) -> MSAL_ERROR {
+pub extern "C" fn set_global_tracing_level(level: TracingLevel) -> *mut MSAL_ERROR {
     let level: Level = level.into();
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
 
     match tracing::subscriber::set_global_default(subscriber) {
-        Ok(_) => MSAL_ERROR::SUCCESS,
-        Err(e) => {
-            error!("{:?}", e);
-            MSAL_ERROR::GENERAL_FAILURE
-        }
+        Ok(_) => no_error(),
+        Err(e) => make_error(MSAL_ERROR_CODE::GENERAL_FAILURE, e.to_string()),
     }
 }
 
@@ -205,10 +200,12 @@ pub extern "C" fn set_global_tracing_level(level: TracingLevel) -> MSAL_ERROR {
 pub unsafe extern "C" fn tpm_init(
     tcti_name: *const c_char,
     out: *mut *mut BoxedDynTpm,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let tpm = BoxedDynTpm(match wrap_c_char(tcti_name) {
@@ -216,8 +213,7 @@ pub unsafe extern "C" fn tpm_init(
         Some(tcti_name) => match TssTpm::new(&tcti_name) {
             Ok(tpm_tss) => BoxedDynTpmIn::new(tpm_tss),
             Err(e) => {
-                error!("{:?}", e);
-                return MSAL_ERROR::TPM_FAIL;
+                return make_error(MSAL_ERROR_CODE::TPM_FAIL, format!("{:?}", e));
             }
         },
         #[cfg(not(feature = "tpm"))]
@@ -234,7 +230,7 @@ pub unsafe extern "C" fn tpm_init(
         *out = Box::into_raw(Box::new(tpm));
     }
 
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// # Safety
@@ -243,18 +239,15 @@ pub unsafe extern "C" fn tpm_init(
 /// char double pointer.
 #[cfg(feature = "broker")]
 #[no_mangle]
-pub unsafe extern "C" fn auth_value_generate(out: *mut *mut c_char) -> MSAL_ERROR {
+pub unsafe extern "C" fn auth_value_generate(out: *mut *mut c_char) -> *mut MSAL_ERROR {
     match AuthValue::generate() {
         Ok(auth_str) => {
             unsafe {
                 *out = wrap_string(&auth_str);
             }
-            MSAL_ERROR::SUCCESS
+            no_error()
         }
-        Err(e) => {
-            error!("{:?}", e);
-            MSAL_ERROR::NO_MEMORY
-        }
+        Err(e) => make_error(MSAL_ERROR_CODE::NO_MEMORY, format!("{:?}", e)),
     }
 }
 
@@ -269,28 +262,28 @@ pub unsafe extern "C" fn tpm_machine_key_create(
     tpm: *mut BoxedDynTpm,
     auth_value: *const c_char,
     out: *mut *mut LoadableMachineKey,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     let tpm = &mut unsafe { &mut *tpm }.0;
     let auth_str = match wrap_c_char(auth_value) {
         Some(auth_str) => auth_str,
         None => {
-            error!("Invalid auth_value parameter!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid auth_value parameter!".to_string(),
+            );
         }
     };
     let auth_value = match AuthValue::from_str(&auth_str) {
         Ok(auth_value) => auth_value,
         Err(e) => {
-            error!("{:?}", e);
-            return MSAL_ERROR::TPM_FAIL;
+            return make_error(MSAL_ERROR_CODE::TPM_FAIL, format!("{:?}", e));
         }
     };
 
     let loadable_machine_key = match tpm.root_storage_key_create(&auth_value) {
         Ok(loadable_machine_key) => loadable_machine_key,
         Err(e) => {
-            error!("{:?}", e);
-            return MSAL_ERROR::TPM_FAIL;
+            return make_error(MSAL_ERROR_CODE::TPM_FAIL, format!("{:?}", e));
         }
     };
 
@@ -298,7 +291,7 @@ pub unsafe extern "C" fn tpm_machine_key_create(
         *out = Box::into_raw(Box::new(LoadableMachineKey(loadable_machine_key)));
     }
 
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// # Safety
@@ -313,20 +306,21 @@ pub unsafe extern "C" fn tpm_machine_key_load(
     auth_value: *const c_char,
     exported_key: *mut LoadableMachineKey,
     out: *mut *mut MachineKey,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     let tpm = &mut unsafe { &mut *tpm }.0;
     let auth_str = match wrap_c_char(auth_value) {
         Some(auth_str) => auth_str,
         None => {
-            error!("Invalid auth_value parameter!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid auth_value parameter!".to_string(),
+            );
         }
     };
     let auth_value = match AuthValue::from_str(&auth_str) {
         Ok(auth_value) => auth_value,
         Err(e) => {
-            error!("{:?}", e);
-            return MSAL_ERROR::TPM_FAIL;
+            return make_error(MSAL_ERROR_CODE::TPM_FAIL, format!("{:?}", e));
         }
     };
     let exported_key = &mut unsafe { &mut *exported_key }.0;
@@ -334,8 +328,7 @@ pub unsafe extern "C" fn tpm_machine_key_load(
     let machine_key = match tpm.root_storage_key_load(&auth_value, exported_key) {
         Ok(machine_key) => machine_key,
         Err(e) => {
-            error!("{:?}", e);
-            return MSAL_ERROR::TPM_FAIL;
+            return make_error(MSAL_ERROR_CODE::TPM_FAIL, format!("{:?}", e));
         }
     };
 
@@ -343,7 +336,7 @@ pub unsafe extern "C" fn tpm_machine_key_load(
         *out = Box::into_raw(Box::new(MachineKey(machine_key)));
     }
 
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Create an instance of an application.
@@ -386,9 +379,12 @@ pub unsafe extern "C" fn broker_init(
     transport_key: *mut LoadableMsOapxbcRsaKey,
     cert_key: *mut LoadableMsDeviceEnrolmentKey,
     out: *mut *mut BrokerClientApplication,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if out.is_null() {
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
     let transport_key = match transport_key.is_null() {
         true => None,
@@ -408,11 +404,11 @@ pub unsafe extern "C" fn broker_init(
             unsafe {
                 *out = Box::into_raw(Box::new(client));
             }
-            MSAL_ERROR::SUCCESS
+            no_error()
         }
         Err(e) => {
-            error!("{:?}", e);
-            MSAL_ERROR::from(e)
+            let msg = e.to_string();
+            make_error(MSAL_ERROR_CODE::from(e), msg)
         }
     }
 }
@@ -456,17 +452,21 @@ pub unsafe extern "C" fn enroll_attrs_init(
     join_type: c_int,
     os_version: *mut c_char,
     out: *mut *mut EnrollAttrs,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
     match EnrollAttrs::new(
         match wrap_c_char(target_domain) {
             Some(target_domain) => target_domain,
             None => {
-                error!("Invalid target_domain parameter!");
-                return MSAL_ERROR::INVALID_POINTER;
+                return make_error(
+                    MSAL_ERROR_CODE::INVALID_POINTER,
+                    "Invalid target_domain parameter!".to_string(),
+                );
             }
         },
         wrap_c_char(device_display_name),
@@ -478,11 +478,11 @@ pub unsafe extern "C" fn enroll_attrs_init(
             unsafe {
                 *out = Box::into_raw(Box::new(attrs));
             }
-            MSAL_ERROR::SUCCESS
+            no_error()
         }
         Err(e) => {
-            error!("{:?}", e);
-            MSAL_ERROR::from(e)
+            let msg = e.to_string();
+            make_error(MSAL_ERROR_CODE::from(e), msg)
         }
     }
 }
@@ -528,24 +528,30 @@ pub unsafe extern "C" fn broker_enroll_device(
     out_transport_key: *mut *mut LoadableMsOapxbcRsaKey,
     out_cert_key: *mut *mut LoadableMsDeviceEnrolmentKey,
     out_device_id: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     // Ensure our input parameters are not NULL
     if client.is_null() || attrs.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameters are not NULL
     if out_transport_key.is_null() || out_cert_key.is_null() || out_device_id.is_null() {
-        error!("Invalid output parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameters!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let refresh_token = match wrap_c_char(refresh_token) {
         Some(refresh_token) => refresh_token,
         None => {
-            error!("Invalid refresh_token input!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid refresh_token input!".to_string(),
+            );
         }
     };
     let attrs = unsafe { Box::from_raw(attrs) };
@@ -565,8 +571,7 @@ pub unsafe extern "C" fn broker_enroll_device(
     let c_device_id = match CString::new(device_id) {
         Ok(c_device_id) => c_device_id,
         Err(e) => {
-            error!("{:?}", e);
-            return MSAL_ERROR::NO_MEMORY;
+            return make_error(MSAL_ERROR_CODE::NO_MEMORY, e.to_string());
         }
     };
     unsafe {
@@ -574,7 +579,7 @@ pub unsafe extern "C" fn broker_enroll_device(
         *out_cert_key = Box::into_raw(Box::new(LoadableMsDeviceEnrolmentKey(cert_key)));
         *out_device_id = c_device_id.into_raw();
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Gets a token for a given resource via user credentials.
@@ -617,30 +622,38 @@ pub unsafe extern "C" fn broker_acquire_token_by_username_password(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out: *mut *mut UserToken,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let password = match wrap_c_char(password) {
         Some(password) => password,
         None => {
-            error!("Invalid input password!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input password!".to_string(),
+            );
         }
     };
     let scopes = match str_array_to_vec(scopes, scopes_len) {
@@ -670,7 +683,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_username_password(
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Acquire token(s) based on a refresh token (RT) obtained from elsewhere.
@@ -709,23 +722,29 @@ pub unsafe extern "C" fn broker_acquire_token_by_refresh_token(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out: *mut *mut UserToken,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let refresh_token = match wrap_c_char(refresh_token) {
         Some(refresh_token) => refresh_token,
         None => {
-            error!("Invalid input refresh_token!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input refresh_token!".to_string(),
+            );
         }
     };
     let scopes = match str_array_to_vec(scopes, scopes_len) {
@@ -754,7 +773,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_refresh_token(
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Gets a token for enrollment via user credentials.
@@ -780,30 +799,38 @@ pub unsafe extern "C" fn broker_acquire_token_by_username_password_for_device_en
     username: *const c_char,
     password: *const c_char,
     out: *mut *mut UserToken,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let password = match wrap_c_char(password) {
         Some(password) => password,
         None => {
-            error!("Invalid input password!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input password!".to_string(),
+            );
         }
     };
     let resp = match run_async!(
@@ -818,7 +845,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_username_password_for_device_en
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Initiate a Device Flow instance for enrollment, which will be
@@ -840,15 +867,19 @@ pub unsafe extern "C" fn broker_acquire_token_by_username_password_for_device_en
 pub unsafe extern "C" fn broker_initiate_device_flow_for_device_enrollment(
     client: *mut BrokerClientApplication,
     out: *mut *mut DeviceAuthorizationResponse,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() {
-        error!("Invalid input parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameter!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
@@ -859,7 +890,7 @@ pub unsafe extern "C" fn broker_initiate_device_flow_for_device_enrollment(
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Obtain token for enrollment by a device flow object, with customizable
@@ -884,15 +915,19 @@ pub unsafe extern "C" fn broker_acquire_token_by_device_flow(
     client: *mut BrokerClientApplication,
     flow: *mut DeviceAuthorizationResponse,
     out: *mut *mut UserToken,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || flow.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
@@ -904,7 +939,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_device_flow(
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Check if a user exists in Azure Entra ID
@@ -927,23 +962,29 @@ pub unsafe extern "C" fn broker_check_user_exists(
     client: *mut BrokerClientApplication,
     username: *const c_char,
     out: *mut bool,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() {
-        error!("Invalid input parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameter!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let resp = match run_async!(client, check_user_exists, &username, &[]) {
@@ -953,7 +994,7 @@ pub unsafe extern "C" fn broker_check_user_exists(
     unsafe {
         *out = resp.exists();
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Initiate an MFA flow for enrollment via user credentials.
@@ -981,25 +1022,31 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
     username: *const c_char,
     password: *const c_char,
     out: *mut *mut MFAAuthContinue,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let password = match wrap_c_char(password) {
         Some(password) => password,
         None => {
-            error!("Invalid input password!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input password!".to_string(),
+            );
         }
     };
     let flow = match run_async!(
@@ -1016,7 +1063,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
     unsafe {
         *out = Box::into_raw(Box::new(flow));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Obtain token by a MFA flow object.
@@ -1052,18 +1099,22 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
     poll_attempt: c_int,
     flow: *mut MFAAuthContinue,
     out: *mut *mut UserToken,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let auth_data = wrap_c_char(auth_data);
@@ -1086,7 +1137,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Get the msg from a MFAAuthContinue flow
@@ -1099,7 +1150,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
 pub unsafe extern "C" fn mfa_auth_continue_msg(
     flow: *mut MFAAuthContinue,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     c_str_from_object_string!(flow, msg, out)
 }
 
@@ -1113,7 +1164,7 @@ pub unsafe extern "C" fn mfa_auth_continue_msg(
 pub unsafe extern "C" fn mfa_auth_continue_mfa_method(
     flow: *mut MFAAuthContinue,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     c_str_from_object_string!(flow, mfa_method, out)
 }
 
@@ -1181,30 +1232,38 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_username_password(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out: *mut *mut SealedData,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let password = match wrap_c_char(password) {
         Some(password) => password,
         None => {
-            error!("Invalid input password!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input password!".to_string(),
+            );
         }
     };
     let tpm = unsafe { &mut *tpm };
@@ -1223,7 +1282,7 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_username_password(
     unsafe {
         *out = Box::into_raw(Box::new(SealedData(resp)));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Gets a Primary Refresh Token (PRT) via a refresh token (RT) obtained
@@ -1253,23 +1312,29 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_refresh_token(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out: *mut *mut SealedData,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let refresh_token = match wrap_c_char(refresh_token) {
         Some(refresh_token) => refresh_token,
         None => {
-            error!("Invalid input refresh_token!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input refresh_token!".to_string(),
+            );
         }
     };
     let tpm = unsafe { &mut *tpm };
@@ -1287,7 +1352,7 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_refresh_token(
     unsafe {
         *out = Box::into_raw(Box::new(SealedData(resp)));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Given the primary refresh token, this method requests an access token.
@@ -1328,15 +1393,19 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out: *mut *mut UserToken,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
@@ -1367,7 +1436,7 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Given the primary refresh token, this method requests a new primary
@@ -1403,15 +1472,19 @@ pub unsafe extern "C" fn broker_exchange_prt_for_prt(
     machine_key: *mut MachineKey,
     request_tgt: c_int,
     out: *mut *mut SealedData,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || sealed_prt.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
@@ -1433,7 +1506,7 @@ pub unsafe extern "C" fn broker_exchange_prt_for_prt(
     unsafe {
         *out = Box::into_raw(Box::new(SealedData(resp)));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Provision a new Hello for Business Key
@@ -1469,15 +1542,19 @@ pub unsafe extern "C" fn broker_provision_hello_for_business_key(
     machine_key: *mut MachineKey,
     pin: *const c_char,
     out: *mut *mut LoadableMsHelloKey,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || token.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
@@ -1487,8 +1564,10 @@ pub unsafe extern "C" fn broker_provision_hello_for_business_key(
     let pin = match wrap_c_char(pin) {
         Some(pin) => pin,
         None => {
-            error!("Invalid input pin!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input pin!".to_string(),
+            );
         }
     };
     let resp = match run_async!(
@@ -1505,7 +1584,7 @@ pub unsafe extern "C" fn broker_provision_hello_for_business_key(
     unsafe {
         *out = Box::into_raw(Box::new(LoadableMsHelloKey(resp)));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Gets a token for a given resource via a Hello for Business Key
@@ -1551,23 +1630,29 @@ pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
     machine_key: *mut MachineKey,
     pin: *const c_char,
     out: *mut *mut UserToken,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || key.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let key = unsafe { &mut *key };
@@ -1583,8 +1668,10 @@ pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
     let pin = match wrap_c_char(pin) {
         Some(pin) => pin,
         None => {
-            error!("Invalid input pin!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input pin!".to_string(),
+            );
         }
     };
     let resp = match run_async!(
@@ -1606,7 +1693,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_hello_for_business_key(
     unsafe {
         *out = Box::into_raw(Box::new(resp));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Gets a Primary Refresh Token (PRT) via a Hello for Business Key
@@ -1643,23 +1730,29 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_hello_for_business_key(
     machine_key: *mut MachineKey,
     pin: *const c_char,
     out: *mut *mut SealedData,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || key.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
     let username = match wrap_c_char(username) {
         Some(username) => username,
         None => {
-            error!("Invalid input username!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
         }
     };
     let key = unsafe { &mut *key };
@@ -1668,8 +1761,10 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_hello_for_business_key(
     let pin = match wrap_c_char(pin) {
         Some(pin) => pin,
         None => {
-            error!("Invalid input pin!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input pin!".to_string(),
+            );
         }
     };
     let resp = match run_async!(
@@ -1687,7 +1782,7 @@ pub unsafe extern "C" fn broker_acquire_user_prt_by_hello_for_business_key(
     unsafe {
         *out = Box::into_raw(Box::new(SealedData(resp)));
     }
-    MSAL_ERROR::SUCCESS
+    no_error()
 }
 
 /// Creates a single sign-on (SSO) JWT Cookie from an encrypted Primary
@@ -1720,16 +1815,20 @@ pub unsafe extern "C" fn broker_acquire_prt_sso_cookie(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     if client.is_null() || prt.is_null() || tpm.is_null() || machine_key.is_null() {
-        error!("Invalid input parameters!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
     }
 
     // Ensure our out parameter is not NULL
     if out.is_null() {
-        error!("Invalid output parameter!");
-        return MSAL_ERROR::INVALID_POINTER;
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
     }
 
     let client = unsafe { &mut *client };
@@ -1753,9 +1852,12 @@ pub unsafe extern "C" fn broker_acquire_prt_sso_cookie(
         unsafe {
             *out = c_str;
         }
-        MSAL_ERROR::SUCCESS
+        no_error()
     } else {
-        MSAL_ERROR::INVALID_POINTER
+        make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid response from acquire_prt_sso_cookie".to_string(),
+        )
     }
 }
 
@@ -1767,7 +1869,7 @@ pub unsafe extern "C" fn broker_acquire_prt_sso_cookie(
 pub unsafe extern "C" fn user_token_refresh_token(
     token: *mut UserToken,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     c_str_from_object_string!(token, refresh_token, out)
 }
 
@@ -1779,7 +1881,7 @@ pub unsafe extern "C" fn user_token_refresh_token(
 pub unsafe extern "C" fn user_token_access_token(
     token: *mut UserToken,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     c_str_from_object_option_string!(token, access_token, out)
 }
 
@@ -1791,7 +1893,7 @@ pub unsafe extern "C" fn user_token_access_token(
 pub unsafe extern "C" fn user_token_tenant_id(
     token: *mut UserToken,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     c_str_from_object_func!(token, tenant_id, out)
 }
 
@@ -1803,7 +1905,7 @@ pub unsafe extern "C" fn user_token_tenant_id(
 pub unsafe extern "C" fn user_token_spn(
     token: *mut UserToken,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     c_str_from_object_func!(token, spn, out)
 }
 
@@ -1815,7 +1917,7 @@ pub unsafe extern "C" fn user_token_spn(
 pub unsafe extern "C" fn user_token_uuid(
     token: *mut UserToken,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     let token = unsafe { &mut *token };
     match token.uuid() {
         Ok(uuid) => {
@@ -1824,16 +1926,15 @@ pub unsafe extern "C" fn user_token_uuid(
                 unsafe {
                     *out = c_str;
                 }
-                MSAL_ERROR::SUCCESS
+                no_error()
             } else {
-                error!("Invalid response token.uuid()",);
-                MSAL_ERROR::INVALID_POINTER
+                make_error(
+                    MSAL_ERROR_CODE::INVALID_POINTER,
+                    "Invalid response token.uuid()".to_string(),
+                )
             }
         }
-        Err(e) => {
-            error!("{:?}", e);
-            MSAL_ERROR::INVALID_POINTER
-        }
+        Err(e) => make_error(MSAL_ERROR_CODE::INVALID_POINTER, e.to_string()),
     }
 }
 
@@ -1842,19 +1943,19 @@ pub unsafe extern "C" fn user_token_uuid(
 /// The calling function must ensure that the `token` raw pointer is valid and
 /// can be dereferenced, and that `out` is a valid pointer to a bool.
 #[no_mangle]
-pub unsafe extern "C" fn user_token_amr_mfa(token: *mut UserToken, out: *mut bool) -> MSAL_ERROR {
+pub unsafe extern "C" fn user_token_amr_mfa(
+    token: *mut UserToken,
+    out: *mut bool,
+) -> *mut MSAL_ERROR {
     let token = unsafe { &mut *token };
     match token.amr_mfa() {
         Ok(res) => {
             unsafe {
                 *out = res;
             }
-            MSAL_ERROR::SUCCESS
+            no_error()
         }
-        Err(e) => {
-            error!("{:?}", e);
-            MSAL_ERROR::INVALID_POINTER
-        }
+        Err(e) => make_error(MSAL_ERROR_CODE::INVALID_POINTER, e.to_string()),
     }
 }
 
@@ -1866,27 +1967,29 @@ pub unsafe extern "C" fn user_token_amr_mfa(token: *mut UserToken, out: *mut boo
 pub unsafe extern "C" fn user_token_prt(
     token: *mut UserToken,
     out: *mut *mut SealedData,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     let token = unsafe { &mut *token };
     match &token.prt {
         Some(prt) => {
             unsafe {
                 *out = Box::into_raw(Box::new(SealedData(prt.clone())));
             }
-            MSAL_ERROR::SUCCESS
+            no_error()
         }
-        None => {
-            error!("PRT not found!");
-            MSAL_ERROR::INVALID_POINTER
-        }
+        None => make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "PRT not found!".to_string(),
+        ),
     }
 }
 
 macro_rules! broker_store_tgt {
     ($func:ident, $client:ident, $sealed_prt:ident, $filename:ident, $tpm:ident, $machine_key:ident) => {{
         if $client.is_null() || $sealed_prt.is_null() || $tpm.is_null() || $machine_key.is_null() {
-            error!("Invalid input parameters!");
-            return MSAL_ERROR::INVALID_POINTER;
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input parameters!".to_string(),
+            );
         }
 
         let client = unsafe { &mut *$client };
@@ -1894,8 +1997,10 @@ macro_rules! broker_store_tgt {
         let filename = match wrap_c_char($filename) {
             Some(filename) => filename,
             None => {
-                error!("Invalid input username!");
-                return MSAL_ERROR::INVALID_POINTER;
+                return make_error(
+                    MSAL_ERROR_CODE::INVALID_POINTER,
+                    "Invalid input username!".to_string(),
+                );
             }
         };
         let tpm = unsafe { &mut *$tpm };
@@ -1904,12 +2009,12 @@ macro_rules! broker_store_tgt {
         match client.$func(&sealed_prt.0, &filename, &mut tpm.0, &machine_key.0) {
             Ok(res) => res,
             Err(e) => {
-                error!("{:?}", e);
-                return MSAL_ERROR::from(e);
+                let msg = e.to_string();
+                return make_error(MSAL_ERROR_CODE::from(e), msg);
             }
         }
 
-        MSAL_ERROR::SUCCESS
+        no_error()
     }};
 }
 
@@ -1941,7 +2046,7 @@ pub unsafe extern "C" fn broker_store_cloud_tgt(
     filename: *const c_char,
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     broker_store_tgt!(
         store_cloud_tgt,
         client,
@@ -1980,7 +2085,7 @@ pub unsafe extern "C" fn broker_store_ad_tgt(
     filename: *const c_char,
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     broker_store_tgt!(store_ad_tgt, client, sealed_prt, filename, tpm, machine_key)
 }
 
@@ -2012,7 +2117,7 @@ pub unsafe extern "C" fn broker_unseal_prt_kerberos_top_level_names(
     tpm: *mut BoxedDynTpm,
     machine_key: *mut MachineKey,
     out: *mut *mut c_char,
-) -> MSAL_ERROR {
+) -> *mut MSAL_ERROR {
     let sealed_prt = unsafe { &mut *sealed_prt };
     let tpm = unsafe { &mut *tpm };
     let machine_key = unsafe { &mut *machine_key };
@@ -2024,6 +2129,20 @@ pub unsafe extern "C" fn broker_unseal_prt_kerberos_top_level_names(
         &mut tpm.0,
         &machine_key.0
     )
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `error` raw pointer is valid and
+/// can be dereferenced.
+#[no_mangle]
+pub unsafe extern "C" fn error_free(error: *mut MSAL_ERROR) {
+    if !error.is_null() {
+        let error = Box::from_raw(error);
+        if !error.msg.is_null() {
+            drop(CString::from_raw(error.msg as *mut c_char));
+        }
+    }
 }
 
 /// # Safety

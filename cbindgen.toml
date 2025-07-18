@@ -3,22 +3,22 @@ language = "C"
 # These prototypes are added manually because cbindgen fails to parse macro
 # generated functions.
 trailer = """
-enum MSAL_ERROR serialize_loadable_ms_device_enrollment_key(struct LoadableMsDeviceEnrolmentKey *value,
-                                                char **out_buf, uintptr_t *out_len);
-enum MSAL_ERROR deserialize_loadable_ms_device_enrollment_key(uint8_t *in_buf, uintptr_t in_len,
-                                                  struct LoadableMsDeviceEnrolmentKey **out);
-enum MSAL_ERROR serialize_loadable_machine_key(struct LoadableMachineKey *value,
-                                               char **out_buf, uintptr_t *out_len);
-enum MSAL_ERROR deserialize_loadable_machine_key(uint8_t *in_buf, uintptr_t in_len,
-                                                 struct LoadableMachineKey **out);
-enum MSAL_ERROR serialize_loadable_ms_oapxbc_rsa_key(struct LoadableMsOapxbcRsaKey *value,
-                                                     char **out_buf, uintptr_t *out_len);
-enum MSAL_ERROR deserialize_loadable_ms_oapxbc_rsa_key(uint8_t *in_buf, uintptr_t in_len,
-                                                       struct LoadableMsOapxbcRsaKey **out);
-enum MSAL_ERROR serialize_sealed_data(struct SealedData *value,
-                                      char **out_buf, uintptr_t *out_len);
-enum MSAL_ERROR deserialize_sealed_data(uint8_t *in_buf, uintptr_t in_len,
-                                        struct SealedData **out);
+MSAL_ERROR *serialize_loadable_ms_device_enrollment_key(struct LoadableMsDeviceEnrolmentKey *value,
+                                                        char **out_buf, uintptr_t *out_len);
+MSAL_ERROR *deserialize_loadable_ms_device_enrollment_key(uint8_t *in_buf, uintptr_t in_len,
+                                                          struct LoadableMsDeviceEnrolmentKey **out);
+MSAL_ERROR *serialize_loadable_machine_key(struct LoadableMachineKey *value,
+                                           char **out_buf, uintptr_t *out_len);
+MSAL_ERROR *deserialize_loadable_machine_key(uint8_t *in_buf, uintptr_t in_len,
+                                             struct LoadableMachineKey **out);
+MSAL_ERROR *serialize_loadable_ms_oapxbc_rsa_key(struct LoadableMsOapxbcRsaKey *value,
+                                                 char **out_buf, uintptr_t *out_len);
+MSAL_ERROR *deserialize_loadable_ms_oapxbc_rsa_key(uint8_t *in_buf, uintptr_t in_len,
+                                                   struct LoadableMsOapxbcRsaKey **out);
+MSAL_ERROR *serialize_sealed_data(struct SealedData *value,
+                                  char **out_buf, uintptr_t *out_len);
+MSAL_ERROR *deserialize_sealed_data(uint8_t *in_buf, uintptr_t in_len,
+                                    struct SealedData **out);
 """
 
 [defines]
