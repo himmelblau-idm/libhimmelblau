@@ -18,6 +18,21 @@ build:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
 
+build_c_example:
+  <<: *rust_build_setup
+  stage: build
+  script:
+    - cargo install cargo-c
+    - cargo cbuild --lib --all-features --all-targets
+    - TARGET_TRIPLE=$(rustc -vV | awk '/host:/ {print $2}')
+    - cp -a "target/${TARGET_TRIPLE}/debug/include/himmelblau" .
+    - cp "target/${TARGET_TRIPLE}/debug/libhimmelblau.so" .
+    - ln -sf libhimmelblau.so libhimmelblau.so.0
+    - CFLAGS="-I.. -o msal_example" LDFLAGS="-L.." make -C example all
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+
 clippy:
   <<: *rust_build_setup
   stage: lint

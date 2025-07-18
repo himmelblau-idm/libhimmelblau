@@ -1090,6 +1090,22 @@ impl PrimaryRefreshToken {
     fn clone_session_key(&self, new_prt: &mut PrimaryRefreshToken) {
         new_prt.session_key_jwe.clone_from(&self.session_key_jwe);
     }
+
+    fn is_expired(&self) -> bool {
+        match self.expires_on.parse::<u64>() {
+            Ok(expiry_ts) => match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(now) => {
+                    let now = now.as_secs();
+                    now >= expiry_ts
+                }
+                Err(_) => true,
+            },
+            Err(e) => {
+                error!(?e, "Failed parsing PRT expires_on '{}'", self.expires_on);
+                true
+            }
+        }
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -1732,12 +1748,16 @@ impl PublicClientApplication {
                             None => auth_config.error_code2,
                         };
                         if let Some(error_code) = error_code {
+                            let description = auth_config.err_txt.or(
+                                auth_config.service_exception_msg);
+
                             // Check to see if we can get the failure message
-                            if let Some(err_txt) = auth_config.err_txt {
+                            if let Some(err_txt) = description.clone() {
                                 if !err_txt.is_empty() {
                                     error!("{}", err_txt);
                                 }
                             }
+
                             // AADSTS50203: User has not registered the authenticator app
                             if error_code == 50203 {
                                 if let Some(url_skip_mfa_registration) =
@@ -1750,7 +1770,10 @@ impl PublicClientApplication {
                                     ));
                                 }
                             }
-                            return Err(MsalError::AADSTSError(AADSTSError::new(error_code)));
+                            return Err(MsalError::AADSTSError(AADSTSError::new(
+                                error_code,
+                                description,
+                            )));
                         }
                     }
                     #[cfg(feature = "changepassword")]
@@ -2902,7 +2925,7 @@ impl PublicClientApplication {
             if auth_response.success {
                 Ok(auth_response)
             } else if let Some(error_code) = auth_response.error_code {
-                Err(MsalError::AADSTSError(AADSTSError::new(error_code)))
+                Err(MsalError::AADSTSError(AADSTSError::new(error_code, None)))
             } else if let Some(msg) = auth_response.message {
                 Err(MsalError::GeneralFailure(msg))
             } else {
@@ -3015,8 +3038,33 @@ impl PublicClientApplication {
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
             let url =
                 Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let params = url.query_pairs().collect::<Vec<_>>();
+
+            // Check for errors returned in the redirect URL parameters.
+            if let Some((_, error_description)) =
+                params.iter().find(|(k, _)| k == "error_description")
+            {
+                let error_code_regex = Regex::new(r"AADSTS(\d+):");
+
+                if let Ok(regex) = error_code_regex {
+                    if let Some(captures) = regex.captures(error_description) {
+                        if let Some(code_match) = captures.get(1) {
+                            if let Ok(code) = code_match.as_str().parse::<u32>() {
+                                return Err(MsalError::AADSTSError(AADSTSError::new(
+                                    code,
+                                    Some(error_description.to_string()),
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                return Err(MsalError::GeneralFailure(error_description.to_string()));
+            }
+
             let (_, code) =
-                url.query_pairs()
+                params
+                    .iter()
                     .find(|(k, _)| k == "code")
                     .ok_or(MsalError::InvalidParse(
                         "Authorization code missing from redirect".to_string(),
@@ -3100,8 +3148,18 @@ impl PublicClientApplication {
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
             let url =
                 Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let params = url.query_pairs().collect::<Vec<_>>();
+
+            // Check for errors returned in the redirect URL parameters.
+            if let Some((_, error_description)) =
+                params.iter().find(|(k, _)| k == "error_description")
+            {
+                return Err(MsalError::GeneralFailure(error_description.to_string()));
+            }
+
             let (_, code) =
-                url.query_pairs()
+                params
+                    .iter()
                     .find(|(k, _)| k == "code")
                     .ok_or(MsalError::InvalidParse(
                         "Authorization code missing from redirect".to_string(),
@@ -6057,5 +6115,38 @@ impl BrokerClientApplication {
         } else {
             Err(MsalError::RequestFailed(format!("{}", resp.status())))
         }
+    }
+
+    /// Determine whether the Primary Refresh Token (PRT) is expired.
+    ///
+    /// This function decrypts the provided `SealedData` PRT and checks
+    /// whether the token has passed its `expires_on` timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The sealed and encrypted Primary Refresh Token.
+    /// * `tpm` - The TPM object used for cryptographic operations.
+    /// * `storage_key` - The TPM MachineKey used to load the Hello key and perform unsealing.
+    ///
+    /// # Returns
+    /// * Success: Whether or not the token is expired.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn is_prt_expired(
+        &self,
+        prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<bool, MsalError> {
+        let transport_key = self.transport_key(tpm, storage_key)?;
+
+        // This allows a transition, where existing msoapxbc keys will provide
+        // their sealing content encryption keys, but newer keys will not, falling back
+        // to the provided key.
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+        let prt = self.unseal_user_prt(prt, tpm, prt_storage_key)?;
+
+        Ok(prt.is_expired())
     }
 }
