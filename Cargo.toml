@@ -1,7 +1,7 @@
 [package]
 name = "libhimmelblau"
 description = "Samba Library for Azure Entra ID Authentication"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
@@ -30,7 +30,7 @@ on_behalf_of = ["broker"]
 [dependencies]
 crypto-glue = { version = "0.1.6" }
 base64 = "^0.22.0"
-reqwest = { version = "^0.12.2", features = ["json"] }
+reqwest = { version = "^0.12.2", features = ["json", "cookies"] }
 serde = { version = "^1.0.180", features = ["derive"] }
 serde_json = "^1.0.96"
 tracing = "^0.1.37"
@@ -58,6 +58,7 @@ percent-encoding = "2.3.1"
 browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], optional = true }
 serde_bytes = "0.11.17"
 serde_urlencoded = "0.7.1"
+reqwest_cookie_store = "0.8.0"
 
 [build-dependencies]
 cbindgen = "0.29.0"

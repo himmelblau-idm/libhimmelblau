@@ -111,6 +111,9 @@ use serde_json::to_string_pretty;
 #[cfg(feature = "broker")]
 use zeroize::Zeroizing;
 
+use reqwest_cookie_store::{CookieStore, CookieStoreMutex};
+use std::sync::Arc;
+
 #[cfg(feature = "broker")]
 const BROKER_CLIENT_IDENT: &str = "38aa3b87-a06d-4817-b275-7a316988d93b";
 #[cfg(feature = "broker")]
@@ -1219,15 +1222,18 @@ pub(crate) struct ClientApplication {
     pub(crate) client: Client,
     pub(crate) client_id: String,
     authority: RwLock<String>,
+    jar: Arc<CookieStoreMutex>,
 }
 
 impl ClientApplication {
     pub(crate) fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+        let jar = Arc::new(CookieStoreMutex::new(CookieStore::default()));
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
             .timeout(Duration::from_secs(3))
-            .redirect(Policy::none());
+            .redirect(Policy::none())
+            .cookie_provider(jar.clone());
 
         #[cfg(feature = "proxyable")]
         {
@@ -1252,7 +1258,15 @@ impl ClientApplication {
                 Some(authority) => authority.to_string(),
                 None => "https://login.microsoftonline.com/common".to_string(),
             }),
+            jar,
         })
+    }
+
+    pub(crate) fn clear_cookies(&self) {
+        match self.jar.lock() {
+            Ok(mut jar) => jar.clear(),
+            Err(e) => error!("Failed to clear cookies: {:?}", e),
+        }
     }
 
     pub(crate) fn authority(&self) -> Result<String, MsalError> {
@@ -1515,6 +1529,22 @@ impl PublicClientApplication {
 
     fn client_id(&self) -> &str {
         &self.app.client_id
+    }
+
+    /// Clears all cookies stored in the internal cookie jar
+    ///
+    /// This forcibly removes all session and persistent cookies
+    /// currently held by the HTTP client. Useful for resetting
+    /// authentication state or periodically cycling cookies to
+    /// avoid issues with long-lived sessions.
+    ///
+    /// # Remarks
+    ///
+    /// This function does not return an error on failure, but will
+    /// log an error message if the internal cookie store cannot be
+    /// locked.
+    pub fn clear_cookies(&self) {
+        self.app.clear_cookies()
     }
 
     fn authority(&self) -> Result<String, MsalError> {
@@ -3780,6 +3810,22 @@ impl BrokerClientApplication {
 
     fn client(&self) -> &Client {
         self.app.client()
+    }
+
+    /// Clears all cookies stored in the internal cookie jar
+    ///
+    /// This forcibly removes all session and persistent cookies
+    /// currently held by the HTTP client. Useful for resetting
+    /// authentication state or periodically cycling cookies to
+    /// avoid issues with long-lived sessions.
+    ///
+    /// # Remarks
+    ///
+    /// This function does not return an error on failure, but will
+    /// log an error message if the internal cookie store cannot be
+    /// locked.
+    pub fn clear_cookies(&self) {
+        self.app.clear_cookies()
     }
 
     fn authority(&self) -> Result<String, MsalError> {
