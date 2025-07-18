@@ -54,7 +54,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::auth::*;
 use crate::c_helper::*;
-use crate::error::{make_error, no_error, MSAL_ERROR, MSAL_ERROR_CODE};
+use crate::c_helper::{make_error, no_error, MSAL_ERROR, MSAL_ERROR_CODE};
 use crate::serializer::{deserialize_obj, serialize_obj};
 #[cfg(feature = "broker")]
 use crate::EnrollAttrs;

@@ -18,10 +18,7 @@
 
 pub use crate::aadsts_err_gen::*;
 use serde::{Deserialize, Serialize};
-use std::convert::From;
-use std::ffi::CString;
 use std::fmt;
-use std::os::raw::c_char;
 
 pub const INVALID_CRED: u32 = 0xC3CE;
 pub const REQUIRES_MFA: u32 = 0xC39C;
@@ -120,109 +117,4 @@ impl fmt::Display for MsalError {
             MsalError::ConsentRequested(msg) => write!(f, "{}", msg),
         }
     }
-}
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-pub enum MSAL_ERROR_CODE {
-    INVALID_JSON,
-    INVALID_BASE64,
-    INVALID_REGEX,
-    INVALID_PARSE,
-    ACQUIRE_TOKEN_FAILED,
-    GENERAL_FAILURE,
-    REQUEST_FAILED,
-    AUTH_TYPE_UNSUPPORTED,
-    TPM_FAIL,
-    URL_FORMAT_FAILED,
-    DEVICE_ENROLLMENT_FAIL,
-    CRYPTO_FAIL,
-    NOT_IMPLEMENTED,
-    CONFIG_ERROR,
-    MFA_POLL_CONTINUE,
-    MISSING,
-    FORMAT_ERROR,
-    INVALID_POINTER,
-    NO_MEMORY,
-    AADSTS_ERROR,
-    #[cfg(feature = "changepassword")]
-    CHANGE_PASSWORD,
-    PASSWORD_REQUIRED,
-    SKIP_MFA_REGISTRATION,
-    CONSENT_REQUESTED,
-}
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-pub struct MSAL_ERROR {
-    pub code: MSAL_ERROR_CODE,
-    pub msg: *const c_char,
-    pub aadsts_code: u32,
-}
-
-impl From<MsalError> for MSAL_ERROR_CODE {
-    fn from(error: MsalError) -> Self {
-        match error {
-            MsalError::InvalidJson(_) => MSAL_ERROR_CODE::INVALID_JSON,
-            MsalError::InvalidBase64(_) => MSAL_ERROR_CODE::INVALID_BASE64,
-            MsalError::InvalidRegex(_) => MSAL_ERROR_CODE::INVALID_REGEX,
-            MsalError::InvalidParse(_) => MSAL_ERROR_CODE::INVALID_PARSE,
-            MsalError::AcquireTokenFailed(_) => MSAL_ERROR_CODE::ACQUIRE_TOKEN_FAILED,
-            MsalError::GeneralFailure(_) => MSAL_ERROR_CODE::GENERAL_FAILURE,
-            MsalError::RequestFailed(_) => MSAL_ERROR_CODE::REQUEST_FAILED,
-            MsalError::AuthTypeUnsupported => MSAL_ERROR_CODE::AUTH_TYPE_UNSUPPORTED,
-            MsalError::TPMFail(_) => MSAL_ERROR_CODE::TPM_FAIL,
-            MsalError::URLFormatFailed(_) => MSAL_ERROR_CODE::URL_FORMAT_FAILED,
-            MsalError::DeviceEnrollmentFail(_) => MSAL_ERROR_CODE::DEVICE_ENROLLMENT_FAIL,
-            MsalError::CryptoFail(_) => MSAL_ERROR_CODE::CRYPTO_FAIL,
-            MsalError::NotImplemented => MSAL_ERROR_CODE::NOT_IMPLEMENTED,
-            MsalError::ConfigError(_) => MSAL_ERROR_CODE::CONFIG_ERROR,
-            MsalError::MFAPollContinue => MSAL_ERROR_CODE::MFA_POLL_CONTINUE,
-            MsalError::AADSTSError(_) => MSAL_ERROR_CODE::AADSTS_ERROR,
-            MsalError::Missing(_) => MSAL_ERROR_CODE::MISSING,
-            MsalError::FormatError(_) => MSAL_ERROR_CODE::FORMAT_ERROR,
-            #[cfg(feature = "changepassword")]
-            MsalError::ChangePassword => MSAL_ERROR_CODE::CHANGE_PASSWORD,
-            MsalError::PasswordRequired => MSAL_ERROR_CODE::PASSWORD_REQUIRED,
-            MsalError::SkipMfaRegistration(_, _, _) => MSAL_ERROR_CODE::SKIP_MFA_REGISTRATION,
-            MsalError::ConsentRequested(_) => MSAL_ERROR_CODE::CONSENT_REQUESTED,
-        }
-    }
-}
-
-impl From<MsalError> for MSAL_ERROR {
-    fn from(error: MsalError) -> Self {
-        let aadsts_code = match error {
-            MsalError::AADSTSError(ref err) => err.code,
-            _ => 0,
-        };
-        let msg = match CString::new(error.to_string()) {
-            Ok(cstr) => cstr.into_raw(),
-            Err(_) => std::ptr::null(),
-        };
-        let code = MSAL_ERROR_CODE::from(error);
-
-        MSAL_ERROR {
-            code,
-            msg,
-            aadsts_code,
-        }
-    }
-}
-
-pub fn no_error() -> *mut MSAL_ERROR {
-    std::ptr::null_mut()
-}
-
-pub fn make_error(code: MSAL_ERROR_CODE, msg: String) -> *mut MSAL_ERROR {
-    let msg = match CString::new(msg) {
-        Ok(cstr) => cstr.into_raw(),
-        Err(_) => std::ptr::null(),
-    };
-
-    Box::into_raw(Box::new(MSAL_ERROR {
-        code,
-        msg,
-        aadsts_code: 0,
-    }))
 }
