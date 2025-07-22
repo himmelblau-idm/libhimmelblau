@@ -35,7 +35,7 @@ use reqwest::Proxy;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 #[derive(Deserialize, Debug)]
 struct EnrollmentResponse {
@@ -105,8 +105,8 @@ impl From<Vec<IntunePolicy>> for IntuneStatus {
                         actual_value: "".to_string(),
                         error_type: None,
                         error_code: None,
-                        new_compliance_state: "Error".to_string(),
-                        old_compliance_state: "Unknown".to_string(),
+                        new_compliance_state: ComplianceState::NonCompliant.to_string(),
+                        old_compliance_state: ComplianceState::Unknown.to_string(),
                     })
                     .collect(),
             })
@@ -142,6 +142,25 @@ pub struct PolicyStatus {
     pub details: Vec<PolicyDetails>,
 }
 
+pub enum ComplianceState {
+    Compliant,
+    NonCompliant,
+    Unknown,
+    Error,
+}
+
+impl fmt::Display for ComplianceState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            ComplianceState::Compliant => "Compliant",
+            ComplianceState::NonCompliant => "NonCompliant",
+            ComplianceState::Unknown => "Unknown",
+            ComplianceState::Error => "Error",
+        };
+        write!(f, "{s}")
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PolicyDetails {
     #[serde(rename = "ruleId")]
@@ -167,7 +186,7 @@ impl PolicyDetails {
         &mut self,
         expected_value: Option<String>,
         actual_value: Option<String>,
-        compliant: bool,
+        compliant: &ComplianceState,
     ) {
         if let Some(expected_value) = expected_value {
             self.expected_value = expected_value;
@@ -175,9 +194,7 @@ impl PolicyDetails {
         if let Some(actual_value) = actual_value {
             self.actual_value = actual_value;
         }
-        if compliant {
-            self.new_compliance_state = "Compliant".to_string();
-        }
+        self.new_compliance_state = compliant.to_string();
     }
 }
 pub struct IntuneForLinux {
