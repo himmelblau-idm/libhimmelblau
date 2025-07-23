@@ -37,6 +37,154 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{fmt, time::Duration};
 
+#[derive(Debug, Deserialize)]
+pub struct DeviceAction {
+    #[serde(rename = "target")]
+    pub target: String,
+    #[serde(rename = "title")]
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NoncompliantRule {
+    #[serde(rename = "ComplianceSource")]
+    pub compliance_source: Option<String>,
+    #[serde(rename = "ExpectedValue")]
+    pub expected_value: Option<String>,
+    #[serde(rename = "RemediationOwner")]
+    pub remediation_owner: Option<u8>,
+    #[serde(rename = "SettingID")]
+    pub setting_id: String,
+
+    #[serde(rename = "Description")]
+    pub description: Option<String>,
+    #[serde(rename = "MoreInfoUri")]
+    pub more_info_uri: Option<String>,
+    #[serde(rename = "Title")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceInfo {
+    #[serde(rename = "#CommonContainer.CheckCompliance")]
+    pub check_compliance: DeviceAction,
+    #[serde(rename = "#CommonContainer.GetManagementState")]
+    pub get_management_state: DeviceAction,
+    #[serde(rename = "#CommonContainer.RegisterForAppPushNotifications")]
+    pub register_for_app_push_notifications: DeviceAction,
+    #[serde(rename = "#CommonContainer.RemoveSignedDeviceIdPolicyAssignment")]
+    pub remove_signed_device_id_policy_assignment: DeviceAction,
+    #[serde(rename = "#CommonContainer.Retire")]
+    pub retire: DeviceAction,
+    #[serde(rename = "#CommonContainer.SetHeartBeat")]
+    pub set_heartbeat: DeviceAction,
+    #[serde(rename = "#CommonContainer.SetOptIn")]
+    pub set_opt_in: DeviceAction,
+    #[serde(rename = "#CommonContainer.SetRD")]
+    pub set_rd: DeviceAction,
+    #[serde(rename = "#CommonContainer.UpdateAadId")]
+    pub update_aad_id: DeviceAction,
+
+    #[serde(rename = "AadId")]
+    pub aad_id: String,
+    #[serde(rename = "AppWrapperCertSN")]
+    pub app_wrapper_cert_sn: Option<String>,
+    #[serde(rename = "Architecture")]
+    pub architecture: Option<String>,
+    #[serde(rename = "CategoryId")]
+    pub category_id: Option<String>,
+    #[serde(rename = "CategorySetByEndUser")]
+    pub category_set_by_end_user: bool,
+    #[serde(rename = "ChassisType")]
+    pub chassis_type: String,
+    #[serde(rename = "CoManagementFeatures")]
+    pub co_management_features: u32,
+    #[serde(rename = "ComplianceState")]
+    pub compliance_state: ComplianceState,
+    #[serde(rename = "CreatedDate")]
+    pub created_date: String,
+    #[serde(rename = "DeviceActions")]
+    pub device_actions: Vec<serde_json::Value>,
+    #[serde(rename = "DeviceHWId")]
+    pub device_hw_id: Option<String>,
+    #[serde(rename = "EasId")]
+    pub eas_id: String,
+    #[serde(rename = "EnrollmentType")]
+    pub enrollment_type: u8,
+    #[serde(rename = "ExchangeActivationItemEasId")]
+    pub exchange_activation_item_eas_id: String,
+    #[serde(rename = "ExchangeActivationItems")]
+    pub exchange_activation_items: Vec<serde_json::Value>,
+    #[serde(rename = "InGracePeriodUntilDateTimeUtc")]
+    pub in_grace_period_until: String,
+    #[serde(rename = "IsCompliantInGraph")]
+    pub is_compliant_in_graph: bool,
+    #[serde(rename = "IsExchangeActivated")]
+    pub is_exchange_activated: bool,
+    #[serde(rename = "IsManagedInGraph")]
+    pub is_managed_in_graph: bool,
+    #[serde(rename = "IsPartnerManaged")]
+    pub is_partner_managed: bool,
+    #[serde(rename = "IsReadOnly")]
+    pub is_read_only: bool,
+    #[serde(rename = "IsSharedDevice")]
+    pub is_shared_device: bool,
+    #[serde(rename = "IsSspConfirmed")]
+    pub is_ssp_confirmed: Option<bool>,
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "LastContact")]
+    pub last_contact: String,
+    #[serde(rename = "LastContactNotification")]
+    pub last_contact_notification: String,
+    #[serde(rename = "ManagementAgent")]
+    pub management_agent: String,
+    #[serde(rename = "ManagementType")]
+    pub management_type: String,
+    #[serde(rename = "Manufacturer")]
+    pub manufacturer: String,
+    #[serde(rename = "Model")]
+    pub model: Option<String>,
+    #[serde(rename = "Nickname")]
+    pub nickname: Option<String>,
+    #[serde(rename = "NoncompliantRules")]
+    pub noncompliant_rules: Vec<NoncompliantRule>,
+    #[serde(rename = "OSSubtype")]
+    pub os_subtype: String,
+    #[serde(rename = "OSVersion")]
+    pub os_version: String,
+    #[serde(rename = "OfficialName")]
+    pub official_name: String,
+    #[serde(rename = "OperatingSystem")]
+    pub operating_system: String,
+    #[serde(rename = "OperatingSystemId")]
+    pub operating_system_id: String,
+    #[serde(rename = "OwnerType")]
+    pub owner_type: u8,
+    #[serde(rename = "PartnerLocalizedSelfServicePortalName")]
+    pub partner_localized_ssp_name: Option<String>,
+    #[serde(rename = "PartnerName")]
+    pub partner_name: Option<String>,
+    #[serde(rename = "PartnerRemediationUrl")]
+    pub partner_remediation_url: Option<String>,
+    #[serde(rename = "PartnerSelfServicePortalUrl")]
+    pub partner_ssp_url: Option<String>,
+    #[serde(rename = "RemotableProperties")]
+    pub remotable_properties: Option<serde_json::Value>,
+    #[serde(rename = "RemoteSessionUri")]
+    pub remote_session_uri: Option<String>,
+    #[serde(rename = "SupervisedStatus")]
+    pub supervised_status: u8,
+    #[serde(rename = "UdaStatus")]
+    pub uda_status: u8,
+    #[serde(rename = "UserApprovedEnrollment")]
+    pub user_approved_enrollment: u8,
+    #[serde(rename = "odata.id")]
+    pub odata_id: String,
+    #[serde(rename = "odata.metadata")]
+    pub odata_metadata: String,
+}
+
 #[derive(Deserialize, Debug)]
 struct EnrollmentResponse {
     #[serde(rename = "deviceId")]
@@ -142,8 +290,11 @@ pub struct PolicyStatus {
     pub details: Vec<PolicyDetails>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum ComplianceState {
     Compliant,
+    #[serde(rename = "Noncompliant")]
     NonCompliant,
     Unknown,
     Error,
@@ -451,6 +602,53 @@ impl IntuneForLinux {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(json_resp.policies)
+        } else {
+            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+        }
+    }
+
+    pub async fn get_compliance_info(
+        &self,
+        token: &UserToken,
+        intune_device_id: &str,
+    ) -> Result<DeviceInfo, MsalError> {
+        let url = Url::parse_with_params(
+            &format!(
+                "{}/Devices(guid'{}')",
+                &self.service_endpoints.get("IWService")?,
+                intune_device_id,
+            ),
+            &[
+                ("api-version", "16.4".to_string()),
+                ("ssp", "LinuxCP".to_string()),
+                ("ssp-version", APP_VERSION.to_string()),
+                ("os", "Linux".to_string()),
+                ("mgmt-agent", "mdm".to_string()),
+            ],
+        )
+        .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+
+        // The access token must be for the resource b8066b99-6e67-41be-abfa-75db1a2c8809
+        let access_token = token.access_token.as_ref().ok_or_else(|| {
+            MsalError::GeneralFailure(
+                "Failed to check compliance: missing access_token".to_string(),
+            )
+        })?;
+
+        let resp = self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
+        if resp.status().is_success() {
+            let json_resp: DeviceInfo = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+            Ok(json_resp)
         } else {
             Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
