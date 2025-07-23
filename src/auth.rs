@@ -224,6 +224,8 @@ struct AuthConfig {
     #[cfg(feature = "changepassword")]
     #[serde(rename = "urlAsyncSsprPoll")]
     url_async_sspr_poll: Option<String>,
+    #[serde(rename = "fIsPasskeySupportEnabled")]
+    is_passkey_support_enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Default)]
@@ -319,6 +321,8 @@ struct OneTimeCode {
 struct FidoParams {
     #[serde(rename = "AllowList")]
     fido_allow_list: Vec<String>,
+    #[serde(rename = "HasCrossDeviceCapablePasskey")]
+    has_cross_device_capable_passkey: Option<bool>,
 }
 
 #[allow(dead_code)]
@@ -2422,42 +2426,55 @@ impl PublicClientApplication {
             };
         }
 
+        let fido_is_a_passkey = cred_type
+            .credentials
+            .fido_params
+            .as_ref()
+            .map(|fido_params| {
+                fido_params
+                    .has_cross_device_capable_passkey
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
         macro_rules! passwordless_fido {
             () => {
                 if options.contains(&AuthOption::PasswordlessFido) {
-                    if let Some(fido_params) = cred_type.credentials.fido_params {
-                        // Passwordless fido is enabled, we can drop out here
-                        let url_post = match &auth_config.url_post {
-                            Some(url_post) => url_post.clone(),
-                            None => {
-                                return Err(MsalError::GeneralFailure(
-                                    "urlBeginAuth is missing".to_string(),
-                                ))
-                            }
-                        };
-                        auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
-                        let fido_auth_config = self
-                            .handle_auth_config_fido_get(username, &auth_config, &request_id)
-                            .await?;
-                        return Ok(MFAAuthContinue {
-                            mfa_method: "FidoKey".to_string(),
-                            msg: "".to_string(),
-                            entropy: None,
-                            max_poll_attempts: auth_config.max_poll_attempts,
-                            polling_interval: Some(5000),
-                            session_id: fido_auth_config.session_id,
-                            flow_token: sft,
-                            ctx: sctx,
-                            canary: auth_config.canary,
-                            url_end_auth: auth_config.url_end_auth,
-                            url_post,
-                            resource: resource.map(|s| s.to_string()),
-                            dag: None,
-                            fido_challenge: fido_auth_config.fido_challenge,
-                            fido_allow_list: Some(fido_params.fido_allow_list),
-                            cross_domain_canary: fido_auth_config.cross_domain_canary,
-                            url_session_state: auth_config.url_session_state,
-                        });
+                    if let Some(ref fido_params) = cred_type.credentials.fido_params {
+                        // If this is a Passkey, bail out. We don't support passkey auth
+                        if !fido_is_a_passkey {
+                            // Passwordless fido is enabled, we can drop out here
+                            let url_post = match &auth_config.url_post {
+                                Some(url_post) => url_post.clone(),
+                                None => {
+                                    return Err(MsalError::GeneralFailure(
+                                        "urlBeginAuth is missing".to_string(),
+                                    ))
+                                }
+                            };
+                            auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
+                            let fido_auth_config = self
+                                .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                                .await?;
+                            return Ok(MFAAuthContinue {
+                                mfa_method: "FidoKey".to_string(),
+                                msg: "".to_string(),
+                                entropy: None,
+                                max_poll_attempts: auth_config.max_poll_attempts,
+                                polling_interval: Some(5000),
+                                session_id: fido_auth_config.session_id,
+                                flow_token: sft,
+                                ctx: sctx,
+                                canary: auth_config.canary,
+                                url_end_auth: auth_config.url_end_auth,
+                                url_post,
+                                resource: resource.map(|s| s.to_string()),
+                                dag: None,
+                                fido_challenge: fido_auth_config.fido_challenge,
+                                fido_allow_list: Some(fido_params.fido_allow_list.clone()),
+                                cross_domain_canary: fido_auth_config.cross_domain_canary,
+                                url_session_state: auth_config.url_session_state,
+                            });
+                        }
                     }
                 }
             };
@@ -2605,22 +2622,38 @@ impl PublicClientApplication {
                     }
                 }
                 if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
-                    let default_auth_method =
-                        match arr_user_proofs.iter().find(|proof| proof.is_default) {
-                            Some(default_auth_method) => default_auth_method,
+                    let fido_is_a_passkey = fido_is_a_passkey
+                        || auth_config.is_passkey_support_enabled.unwrap_or(false);
+                    let default_auth_method = if let Some(method) =
+                        arr_user_proofs.iter().find(|proof| {
+                            proof.is_default
+                                && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                        }) {
+                        method
+                    } else if fido_is_a_passkey {
+                        // Skip FidoKey methods entirely if we can't use them
+                        match arr_user_proofs
+                            .iter()
+                            .find(|proof| proof.auth_method_id == "PhoneAppNotification")
+                            .or_else(|| {
+                                arr_user_proofs
+                                    .iter()
+                                    .find(|proof| proof.auth_method_id != "FidoKey")
+                            }) {
+                            Some(method) => method,
                             None => {
-                                if arr_user_proofs.is_empty() {
-                                    info!("No MFA methods found");
-                                    dag_fallback!();
-                                } else {
-                                    // Sometimes MS fails to set is_default on
-                                    // any method. In this case, just choose
-                                    // the first one (which may be the only
-                                    // one).
-                                    &arr_user_proofs[0]
-                                }
+                                info!("No usable MFA methods found (FIDO was passkey)");
+                                dag_fallback!();
                             }
-                        };
+                        }
+                    } else if arr_user_proofs.is_empty() {
+                        info!("No MFA methods found");
+                        dag_fallback!();
+                    } else {
+                        // MS sometimes doesn't set is_default; fallback to the first
+                        &arr_user_proofs[0]
+                    };
+
                     let sctx = match &auth_config.sctx {
                         Some(sctx) => sctx.clone(),
                         None => {
