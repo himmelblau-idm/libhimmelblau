@@ -75,7 +75,7 @@ pub struct DeviceInfo {
     #[serde(rename = "#CommonContainer.RemoveSignedDeviceIdPolicyAssignment")]
     pub remove_signed_device_id_policy_assignment: DeviceAction,
     #[serde(rename = "#CommonContainer.Retire")]
-    pub retire: DeviceAction,
+    pub retire: Option<DeviceAction>,
     #[serde(rename = "#CommonContainer.SetHeartBeat")]
     pub set_heartbeat: DeviceAction,
     #[serde(rename = "#CommonContainer.SetOptIn")]
