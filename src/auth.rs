@@ -364,6 +364,8 @@ pub struct IdToken {
     pub puid: Option<String>,
     pub tenant_region_scope: Option<String>,
     pub tid: String,
+    #[serde(skip_serializing)]
+    pub raw: Option<String>,
 }
 
 fn decode_string_or_struct<'de, T, D>(deserializer: D) -> Result<T, D::Error>
@@ -426,9 +428,10 @@ impl FromStr for IdToken {
                 ));
             }
         };
-        let payload: IdToken = json_from_str(&payload_str).map_err(|e| {
+        let mut payload: IdToken = json_from_str(&payload_str).map_err(|e| {
             MsalError::InvalidParse(format!("Failed parsing id_token from json: {}", e))
         })?;
+        payload.raw = Some(s.to_string());
         Ok(payload)
     }
 }
@@ -4693,7 +4696,7 @@ impl BrokerClientApplication {
 
         let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
-        self.exchange_prt_for_access_token_internal(
+        let mut token = self.exchange_prt_for_access_token_internal(
             &prt,
             scope,
             v2_endpoint,
@@ -4705,7 +4708,9 @@ impl BrokerClientApplication {
             #[cfg(feature = "on_behalf_of")]
             on_behalf_of_client_id,
         )
-        .await
+        .await?;
+        token.client_info = prt.client_info.clone();
+        Ok(token)
     }
 
     #[allow(clippy::too_many_arguments)]
