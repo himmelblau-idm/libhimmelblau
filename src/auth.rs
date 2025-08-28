@@ -4692,19 +4692,20 @@ impl BrokerClientApplication {
 
         let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
-        let mut token = self.exchange_prt_for_access_token_internal(
-            &prt,
-            scope,
-            v2_endpoint,
-            tpm,
-            // TODO: Is this the correct storage key to pass here? I think it may not be?
-            storage_key,
-            &session_key,
-            request_resource,
-            #[cfg(feature = "on_behalf_of")]
-            on_behalf_of_client_id,
-        )
-        .await?;
+        let mut token = self
+            .exchange_prt_for_access_token_internal(
+                &prt,
+                scope,
+                v2_endpoint,
+                tpm,
+                // TODO: Is this the correct storage key to pass here? I think it may not be?
+                storage_key,
+                &session_key,
+                request_resource,
+                #[cfg(feature = "on_behalf_of")]
+                on_behalf_of_client_id,
+            )
+            .await?;
         token.client_info = prt.client_info.clone();
         Ok(token)
     }
