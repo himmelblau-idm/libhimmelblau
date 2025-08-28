@@ -3112,16 +3112,12 @@ impl PublicClientApplication {
             // password change is indicated, raise an error.
             match self.parse_auth_config(&text, false, false) {
                 #[cfg(feature = "changepassword")]
-                Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
-                Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
-                Err(MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary)) => {
-                    return Err(MsalError::SkipMfaRegistration(
-                        url_skip_mfa_registration,
-                        sft,
-                        canary,
-                    ))
-                }
-                _ => return Err(MsalError::GeneralFailure(text)),
+                Err(MsalError::ChangePassword) => Err(MsalError::ChangePassword),
+                Err(MsalError::AADSTSError(e)) => Err(MsalError::AADSTSError(e)),
+                Err(MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary)) => Err(
+                    MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary),
+                ),
+                _ => Err(MsalError::GeneralFailure(text)),
             }
         } else {
             Err(MsalError::GeneralFailure(
@@ -3675,9 +3671,9 @@ impl PublicClientApplication {
                         if status.authorization_state == 0 {
                             Err(MsalError::MFAPollContinue)
                         } else if status.authorization_state == 1 {
-                            return Err(MsalError::GeneralFailure(
+                            Err(MsalError::GeneralFailure(
                                 "Authorization denied".to_string(),
-                            ));
+                            ))
                         } else if status.authorization_state == 2 {
                             let auth_code = self
                                 .request_authorization_passwordless_internal(username, flow)
@@ -3690,7 +3686,7 @@ impl PublicClientApplication {
                                 )
                                 .await;
                         } else {
-                            return Err(MsalError::GeneralFailure(text));
+                            Err(MsalError::GeneralFailure(text))
                         }
                     }
                 } else {
@@ -4696,19 +4692,20 @@ impl BrokerClientApplication {
 
         let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
-        let mut token = self.exchange_prt_for_access_token_internal(
-            &prt,
-            scope,
-            v2_endpoint,
-            tpm,
-            // TODO: Is this the correct storage key to pass here? I think it may not be?
-            storage_key,
-            &session_key,
-            request_resource,
-            #[cfg(feature = "on_behalf_of")]
-            on_behalf_of_client_id,
-        )
-        .await?;
+        let mut token = self
+            .exchange_prt_for_access_token_internal(
+                &prt,
+                scope,
+                v2_endpoint,
+                tpm,
+                // TODO: Is this the correct storage key to pass here? I think it may not be?
+                storage_key,
+                &session_key,
+                request_resource,
+                #[cfg(feature = "on_behalf_of")]
+                on_behalf_of_client_id,
+            )
+            .await?;
         token.client_info = prt.client_info.clone();
         Ok(token)
     }
