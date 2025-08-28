@@ -156,7 +156,7 @@ impl FileCredentialCache {
             0,
             u32::from_be_bytes([tktflags[3], tktflags[2], tktflags[1], tktflags[0]]),
             CountedOctetString::new(
-                picky_asn1_der::to_vec(&tgt.0.ticket.0 .0)
+                picky_asn1_der::to_vec(&tgt.0.ticket.0)
                     .map_err(|e| MsalError::CryptoFail(format!("{:?}", e)))?,
             ),
         );
