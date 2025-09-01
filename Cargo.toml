@@ -46,7 +46,7 @@ zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
 scraper = "0.24.0"
 tokio = { version = "1.37.0", features = ["full"] }
 tracing-subscriber = "0.3.18"
-pyo3 = { version = "0.25.1", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.26.0", features = ["extension-module"], optional = true }
 paste = "1.0.15"
 picky-krb = "0.11.0"
 picky-asn1-der = "0.5.2"
