@@ -3,9 +3,9 @@ language = "C"
 # These prototypes are added manually because cbindgen fails to parse macro
 # generated functions.
 trailer = """
-MSAL_ERROR *serialize_loadable_ms_device_enrollment_key(struct LoadableMsDeviceEnrolmentKey *value,
+MSAL_ERROR *serialize_loadable_ms_device_enrolment_key(struct LoadableMsDeviceEnrolmentKey *value,
                                                         char **out_buf, uintptr_t *out_len);
-MSAL_ERROR *deserialize_loadable_ms_device_enrollment_key(uint8_t *in_buf, uintptr_t in_len,
+MSAL_ERROR *deserialize_loadable_ms_device_enrolment_key(uint8_t *in_buf, uintptr_t in_len,
                                                           struct LoadableMsDeviceEnrolmentKey **out);
 MSAL_ERROR *serialize_loadable_machine_key(struct LoadableMachineKey *value,
                                            char **out_buf, uintptr_t *out_len);
