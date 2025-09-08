@@ -2142,6 +2142,14 @@ pub unsafe extern "C" fn error_free(error: *mut MSAL_ERROR) {
         if !error.msg.is_null() {
             drop(CString::from_raw(error.msg as *mut c_char));
         }
+        // Free the error codes if they exist
+        if error.acquire_token_error_codes_len > 0 {
+            let _ = Vec::from_raw_parts(
+                error.acquire_token_error_codes as *mut u32,
+                error.acquire_token_error_codes_len,
+                error.acquire_token_error_codes_len,
+            );
+        }
     }
 }
 

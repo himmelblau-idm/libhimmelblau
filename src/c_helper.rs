@@ -215,6 +215,8 @@ pub struct MSAL_ERROR {
     pub code: MSAL_ERROR_CODE,
     pub msg: *const c_char,
     pub aadsts_code: u32,
+    pub acquire_token_error_codes: *const u32,
+    pub acquire_token_error_codes_len: usize,
 }
 
 impl From<MsalError> for MSAL_ERROR_CODE {
@@ -253,16 +255,31 @@ impl From<MsalError> for MSAL_ERROR {
             MsalError::AADSTSError(ref err) => err.code,
             _ => 0,
         };
+
+        // If the error is an AcquireTokenFailed, also extract error codes
+        let acquire_token_error_codes = match error {
+            MsalError::AcquireTokenFailed(ref err) => err.error_codes.clone(),
+            _ => vec![],
+        };
+
         let msg = match CString::new(error.to_string()) {
             Ok(cstr) => cstr.into_raw(),
             Err(_) => std::ptr::null(),
         };
+
         let code = MSAL_ERROR_CODE::from(error);
 
         MSAL_ERROR {
             code,
             msg,
             aadsts_code,
+            acquire_token_error_codes: if acquire_token_error_codes.is_empty() {
+                std::ptr::null()
+            } else {
+                let buf = acquire_token_error_codes.clone().into_boxed_slice();
+                Box::into_raw(buf) as *const u32
+            },
+            acquire_token_error_codes_len: acquire_token_error_codes.len(),
         }
     }
 }
@@ -281,6 +298,8 @@ pub fn make_error(code: MSAL_ERROR_CODE, msg: String) -> *mut MSAL_ERROR {
         code,
         msg,
         aadsts_code: 0,
+        acquire_token_error_codes: std::ptr::null(),
+        acquire_token_error_codes_len: 0,
     }))
 }
 
