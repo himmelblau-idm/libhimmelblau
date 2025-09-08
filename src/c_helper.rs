@@ -63,10 +63,7 @@ macro_rules! run_async {
             Ok(rt) => rt.block_on(async {
                 match $client.$func($($arg),*).await {
                     Ok(resp) => Ok(resp),
-                    Err(e) => {
-                        let msg = e.to_string();
-                        Err(make_error(MSAL_ERROR_CODE::from(e), msg))
-                    }
+                    Err(e) => Err(make_error_from_msal_error(e)),
                 }
             }),
             Err(e) => {
@@ -285,4 +282,8 @@ pub fn make_error(code: MSAL_ERROR_CODE, msg: String) -> *mut MSAL_ERROR {
         msg,
         aadsts_code: 0,
     }))
+}
+
+pub fn make_error_from_msal_error(error: MsalError) -> *mut MSAL_ERROR {
+    Box::into_raw(Box::new(MSAL_ERROR::from(error)))
 }
