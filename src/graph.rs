@@ -422,7 +422,7 @@ impl Graph {
         &self,
         access_token: &str,
     ) -> Result<Vec<DirectoryObject>, MsalError> {
-        let url = &format!("{}/v1.0/me/memberOf", self.graph_url().await?);
+        let url = &format!("{}/v1.0/me/memberOf?$top=999", self.graph_url().await?);
         let resp = self
             .client
             .get(url)
