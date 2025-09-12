@@ -51,8 +51,6 @@ paste = "1.0.15"
 picky-krb = "0.11.0"
 picky-asn1-der = "0.5.2"
 picky-asn1 = "0.10.1"
-himmelblau_kerberos_crypto = "0.4.0"
-himmelblau_kerberos_ccache = "0.4.0"
 chrono = "0.4.38"
 percent-encoding = "2.3.1"
 browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], optional = true }

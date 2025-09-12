@@ -94,18 +94,22 @@ use tracing::debug;
 use crate::discovery::Services;
 #[cfg(feature = "broker")]
 use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
-#[cfg(feature = "broker")]
+
+// FIXME(licensing): Kerberos ccache injection is temporarily disabled.
+// The prior implementation pulled in an AGPL-3.0 dependency; distributing it
+// would compel the combined work to be AGPL. This will be resolved in a future
+// release by integrating with libkrimes.
+/*#[cfg(feature = "broker")]
 use crate::krb5::FileCredentialCache;
 #[cfg(feature = "broker")]
 use crate::krb5::IntegerAsn1;
 #[cfg(feature = "broker")]
+use picky_krb::messages::AsRep;*/
+
+#[cfg(feature = "broker")]
 use base64::engine::general_purpose::STANDARD;
 #[cfg(feature = "broker")]
 use compact_jwt::JwtError;
-#[cfg(feature = "broker")]
-use himmelblau_kerberos_crypto::{AesCipher, AesSizes, KerberosCipher};
-#[cfg(feature = "broker")]
-use picky_krb::messages::AsRep;
 #[cfg(feature = "broker")]
 use serde_json::to_string_pretty;
 #[cfg(feature = "broker")]
@@ -950,7 +954,11 @@ pub struct TGT {
     pub account_type: u32,
 }
 
-#[cfg(feature = "broker")]
+// FIXME(licensing): Kerberos ccache injection is temporarily disabled.
+// The prior implementation pulled in an AGPL-3.0 dependency; distributing it
+// would compel the combined work to be AGPL. This will be resolved in a future
+// release by integrating with libkrimes.
+/*#[cfg(feature = "broker")]
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct AesKey {
     key: Vec<u8>,
@@ -1042,7 +1050,7 @@ impl TGT {
         };
         Ok(tgt)
     }
-}
+}*/
 
 #[cfg(feature = "broker")]
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
@@ -1154,6 +1162,7 @@ impl SessionKey {
             .map_err(|e| MsalError::CryptoFail(format!("Failed to decipher Jwe: {}", e)))
     }
 
+    #[allow(dead_code)]
     fn decipher_tgt_client_key(
         &self,
         tpm: &mut BoxedDynTpm,
@@ -5747,12 +5756,18 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub fn store_cloud_tgt(
         &self,
-        sealed_prt: &SealedData,
-        filename: &str,
-        tpm: &mut BoxedDynTpm,
-        storage_key: &StorageKey,
+        _sealed_prt: &SealedData,
+        _filename: &str,
+        _tpm: &mut BoxedDynTpm,
+        _storage_key: &StorageKey,
     ) -> Result<(), MsalError> {
-        let transport_key = self.transport_key(tpm, storage_key)?;
+        // FIXME(licensing): Kerberos ccache injection is temporarily disabled.
+        // The prior implementation pulled in an AGPL-3.0 dependency; distributing it
+        // would compel the combined work to be AGPL. This will be resolved in a future
+        // release by integrating with libkrimes.
+        Err(MsalError::NotImplemented)
+
+        /*let transport_key = self.transport_key(tpm, storage_key)?;
 
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
@@ -5770,7 +5785,7 @@ impl BrokerClientApplication {
                 .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_cloud.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
-        ccache.save_keytab_file(filename)
+        ccache.save_keytab_file(filename)*/
     }
 
     /// Gets the AD TGT from a sealed PRT and stores it in the Kerberos CCache
@@ -5790,12 +5805,18 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub fn store_ad_tgt(
         &self,
-        sealed_prt: &SealedData,
-        filename: &str,
-        tpm: &mut BoxedDynTpm,
-        storage_key: &StorageKey,
+        _sealed_prt: &SealedData,
+        _filename: &str,
+        _tpm: &mut BoxedDynTpm,
+        _storage_key: &StorageKey,
     ) -> Result<(), MsalError> {
-        let transport_key = self.transport_key(tpm, storage_key)?;
+        // FIXME(licensing): Kerberos ccache injection is temporarily disabled.
+        // The prior implementation pulled in an AGPL-3.0 dependency; distributing it
+        // would compel the combined work to be AGPL. This will be resolved in a future
+        // release by integrating with libkrimes.
+        Err(MsalError::NotImplemented)
+
+        /*let transport_key = self.transport_key(tpm, storage_key)?;
 
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
@@ -5812,8 +5833,9 @@ impl BrokerClientApplication {
             prt.tgt_ad
                 .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_ad.message()?;
+
         let ccache = FileCredentialCache::new(&message, &client_key)?;
-        ccache.save_keytab_file(filename)
+        ccache.save_keytab_file(filename)*/
     }
 
     /// Gets the Cloud TGT from a sealed PRT and returns it in a Kerberos CCache
@@ -5832,11 +5854,17 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub fn fetch_cloud_ccache(
         &self,
-        sealed_prt: &SealedData,
-        tpm: &mut BoxedDynTpm,
-        storage_key: &StorageKey,
+        _sealed_prt: &SealedData,
+        _tpm: &mut BoxedDynTpm,
+        _storage_key: &StorageKey,
     ) -> Result<Vec<u8>, MsalError> {
-        let transport_key = self.transport_key(tpm, storage_key)?;
+        // FIXME(licensing): Kerberos ccache injection is temporarily disabled.
+        // The prior implementation pulled in an AGPL-3.0 dependency; distributing it
+        // would compel the combined work to be AGPL. This will be resolved in a future
+        // release by integrating with libkrimes.
+        Err(MsalError::NotImplemented)
+
+        /*let transport_key = self.transport_key(tpm, storage_key)?;
 
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
@@ -5853,8 +5881,9 @@ impl BrokerClientApplication {
             prt.tgt_cloud
                 .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_cloud.message()?;
+
         let ccache = FileCredentialCache::new(&message, &client_key)?;
-        Ok(ccache.to_bytes())
+        Ok(ccache.to_bytes())*/
     }
 
     /// Gets the AD TGT from a sealed PRT and returns it in a Kerberos CCache
@@ -5873,11 +5902,17 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub fn fetch_ad_ccache(
         &self,
-        sealed_prt: &SealedData,
-        tpm: &mut BoxedDynTpm,
-        storage_key: &StorageKey,
+        _sealed_prt: &SealedData,
+        _tpm: &mut BoxedDynTpm,
+        _storage_key: &StorageKey,
     ) -> Result<Vec<u8>, MsalError> {
-        let transport_key = self.transport_key(tpm, storage_key)?;
+        // FIXME(licensing): Kerberos ccache injection is temporarily disabled.
+        // The prior implementation pulled in an AGPL-3.0 dependency; distributing it
+        // would compel the combined work to be AGPL. This will be resolved in a future
+        // release by integrating with libkrimes.
+        Err(MsalError::NotImplemented)
+
+        /*let transport_key = self.transport_key(tpm, storage_key)?;
 
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
@@ -5895,7 +5930,7 @@ impl BrokerClientApplication {
                 .client_key(tpm, &transport_key, prt_storage_key, &session_key)?;
         let message = prt.tgt_ad.message()?;
         let ccache = FileCredentialCache::new(&message, &client_key)?;
-        Ok(ccache.to_bytes())
+        Ok(ccache.to_bytes())*/
     }
 
     /// Get the Kerberos top level names from a sealed PRT
