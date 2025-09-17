@@ -50,7 +50,7 @@ use std::str::FromStr;
 #[cfg(feature = "broker")]
 use tokio::runtime;
 use tracing::{warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::auth::*;
 use crate::c_helper::*;
@@ -173,6 +173,38 @@ impl From<TracingLevel> for Level {
 pub extern "C" fn set_global_tracing_level(level: TracingLevel) -> *mut MSAL_ERROR {
     let level: Level = level.into();
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+
+    match tracing::subscriber::set_global_default(subscriber) {
+        Ok(_) => no_error(),
+        Err(e) => make_error(MSAL_ERROR_CODE::GENERAL_FAILURE, e.to_string()),
+    }
+}
+
+/// Sets module-specific log levels using a filter string (e.g. "warn,himmelblau=debug").
+/// The syntax is the same as that used by the `RUST_LOG` environment variable.
+/// See https://docs.rs/env_logger/latest/env_logger/#enabling-logging for more details.
+#[no_mangle]
+pub extern "C" fn set_module_tracing_filter(filter: *const c_char) -> *mut MSAL_ERROR {
+    let filter_str = unsafe {
+        if filter.is_null() {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Null filter string".to_string(),
+            );
+        }
+        match CString::from_raw(filter as *mut c_char).into_string() {
+            Ok(s) => s,
+            Err(_) => {
+                return make_error(
+                    MSAL_ERROR_CODE::INVALID_POINTER,
+                    "Invalid filter string".to_string(),
+                )
+            }
+        }
+    };
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::new(filter_str))
+        .finish();
 
     match tracing::subscriber::set_global_default(subscriber) {
         Ok(_) => no_error(),
