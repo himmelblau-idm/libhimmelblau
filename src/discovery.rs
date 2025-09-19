@@ -386,8 +386,14 @@ pub struct Services {
 
 impl Services {
     pub async fn new(access_token: &str, domain_name: &str) -> Result<Self, MsalError> {
+        let discovery_url = if cfg!(feature = "custom_oidc_discovery_url") {
+            std::env::var("HIMMELBLAU_DISCOVERY_URL").unwrap_or_else(|_| DISCOVERY_URL.to_string())
+        } else {
+            DISCOVERY_URL.to_string()
+        };
+
         let url = Url::parse_with_params(
-            &format!("{}/{}/Discover", DISCOVERY_URL, domain_name),
+            &format!("{}/{}/Discover", discovery_url, domain_name),
             &[("api-version", DRS_PROTOCOL_VERSION), ("managed", "True")],
         )
         .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
