@@ -19,8 +19,8 @@
 use crate::error::MsalError;
 #[cfg(feature = "proxyable")]
 use reqwest::Proxy;
-use reqwest::{header, Client, Url};
-use serde::de::Error;
+use reqwest::{header, Client, StatusCode, Url};
+use serde::de::{DeserializeOwned, Error};
 use serde::Deserialize;
 use serde_json::{json, to_string_pretty};
 use serde_json::{Map, Value};
@@ -29,7 +29,8 @@ use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, error};
+use tokio::time::sleep;
+use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 struct FederationProvider {
@@ -101,14 +102,11 @@ impl<'de> Deserialize<'de> for DirectoryObject {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct DirectoryObjects {
-    value: Vec<DirectoryObject>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Objects {
-    value: Vec<Value>,
+#[derive(Deserialize)]
+struct GraphPage<T> {
+    value: Vec<T>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,100 +320,76 @@ impl Graph {
         &self,
         access_token: &str,
     ) -> Result<Vec<UserObject>, MsalError> {
-        let url = Url::parse(&format!("{}/beta/users", self.graph_url().await?))
+        let url = Url::parse(&format!("{}/beta/users?$top=999", self.graph_url().await?))
             .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
 
-        let resp = self
-            .client
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
-            .send()
+        let objs = self
+            .fetch_all_pages(url.as_str(), access_token)
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map(|objs: Vec<Value>| objs)?;
 
-        if resp.status().is_success() {
-            let json_resp: Objects = resp
-                .json()
-                .await
+        let mut res: Vec<UserObject> = vec![];
+        for user in &objs {
+            let mut userobj: UserObject = serde_json::from_value(user.clone())
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
 
-            let mut res: Vec<UserObject> = vec![];
-            for user in &json_resp.value {
-                let mut userobj: UserObject = serde_json::from_value(user.clone())
-                    .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
-
-                if let Value::Object(obj) = &user {
-                    for (key, value) in obj.iter() {
-                        if key.starts_with("extension_") {
-                            if key.ends_with("uidNumber") {
-                                if let Value::Number(num) = value {
-                                    userobj.uid = num.as_u64().map(|uid| uid as u32);
-                                }
-                            } else if key.ends_with("gidNumber") {
-                                if let Value::Number(num) = value {
-                                    userobj.gid = num.as_u64().map(|gid| gid as u32);
-                                }
+            if let Value::Object(obj) = &user {
+                for (key, value) in obj.iter() {
+                    if key.starts_with("extension_") {
+                        if key.ends_with("uidNumber") {
+                            if let Value::Number(num) = value {
+                                userobj.uid = num.as_u64().map(|uid| uid as u32);
+                            }
+                        } else if key.ends_with("gidNumber") {
+                            if let Value::Number(num) = value {
+                                userobj.gid = num.as_u64().map(|gid| gid as u32);
                             }
                         }
                     }
                 }
-
-                if userobj.uid.is_some() || userobj.gid.is_some() {
-                    res.push(userobj);
-                }
             }
 
-            Ok(res)
-        } else {
-            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+            if userobj.uid.is_some() || userobj.gid.is_some() {
+                res.push(userobj);
+            }
         }
+
+        Ok(res)
     }
 
     pub async fn request_all_groups_with_extension_attributes(
         &self,
         access_token: &str,
     ) -> Result<Vec<GroupObject>, MsalError> {
-        let url = Url::parse(&format!("{}/beta/groups", self.graph_url().await?))
+        let url = Url::parse(&format!("{}/beta/groups?$top=999", self.graph_url().await?))
             .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
 
-        let resp = self
-            .client
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
-            .send()
+        let objs = self
+            .fetch_all_pages(url.as_str(), access_token)
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map(|objs: Vec<Value>| objs)?;
 
-        if resp.status().is_success() {
-            let json_resp: Objects = resp
-                .json()
-                .await
+        let mut res: Vec<GroupObject> = vec![];
+        for user in &objs {
+            let mut groupobj: GroupObject = serde_json::from_value(user.clone())
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
 
-            let mut res: Vec<GroupObject> = vec![];
-            for user in &json_resp.value {
-                let mut groupobj: GroupObject = serde_json::from_value(user.clone())
-                    .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
-
-                if let Value::Object(obj) = &user {
-                    for (key, value) in obj.iter() {
-                        if key.starts_with("extension_") && key.ends_with("gidNumber") {
-                            if let Value::Number(num) = value {
-                                groupobj.gid = num.as_u64().map(|gid| gid as u32);
-                            }
+            if let Value::Object(obj) = &user {
+                for (key, value) in obj.iter() {
+                    if key.starts_with("extension_") && key.ends_with("gidNumber") {
+                        if let Value::Number(num) = value {
+                            groupobj.gid = num.as_u64().map(|gid| gid as u32);
                         }
                     }
                 }
-
-                if groupobj.gid.is_some() {
-                    res.push(groupobj);
-                }
             }
 
-            Ok(res)
-        } else {
-            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+            if groupobj.gid.is_some() {
+                res.push(groupobj);
+            }
         }
+
+        Ok(res)
     }
 
     pub async fn request_user_groups(
@@ -423,35 +397,9 @@ impl Graph {
         access_token: &str,
     ) -> Result<Vec<DirectoryObject>, MsalError> {
         let url = &format!("{}/v1.0/me/memberOf?$top=999", self.graph_url().await?);
-        let resp = self
-            .client
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
-            .send()
+        self.fetch_all_pages(url, access_token)
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
-        let mut res: Vec<DirectoryObject> = Vec::new();
-        if resp.status().is_success() {
-            let json_resp: DirectoryObjects = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
-            for entry in json_resp.value {
-                if entry.data_type == "#microsoft.graph.group" {
-                    res.push(entry)
-                }
-            }
-            Ok(res)
-        } else {
-            let status = resp.status();
-            error!(
-                "Error encountered while fetching user groups: {}",
-                resp.text()
-                    .await
-                    .map_err(|e| { MsalError::GeneralFailure(format!("{:?}", e)) })?
-            );
-            Err(MsalError::GeneralFailure(format!("{}", status)))
-        }
+            .map(|objs: Vec<DirectoryObject>| objs)
     }
 
     pub async fn request_user_groups_by_user_id(
@@ -464,35 +412,9 @@ impl Graph {
             self.graph_url().await?,
             object_id
         );
-        let resp = self
-            .client
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
-            .send()
+        self.fetch_all_pages(url, access_token)
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
-        let mut res: Vec<DirectoryObject> = Vec::new();
-        if resp.status().is_success() {
-            let json_resp: DirectoryObjects = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
-            for entry in json_resp.value {
-                if entry.data_type == "#microsoft.graph.group" {
-                    res.push(entry)
-                }
-            }
-            Ok(res)
-        } else {
-            let status = resp.status();
-            error!(
-                "Error encountered while fetching user groups: {}",
-                resp.text()
-                    .await
-                    .map_err(|e| { MsalError::GeneralFailure(format!("{:?}", e)) })?
-            );
-            Err(MsalError::GeneralFailure(format!("{}", status)))
-        }
+            .map(|objs: Vec<DirectoryObject>| objs)
     }
 
     pub async fn assign_device_to_user(
@@ -737,5 +659,106 @@ impl Graph {
         } else {
             Err(MsalError::RequestFailed(format!("{}", resp.status())))
         }
+    }
+
+    async fn fetch_with_retry(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<reqwest::Response, MsalError> {
+        let mut attempt = 0;
+        let max_attempts = 6;
+
+        loop {
+            let resp = self
+                .client
+                .get(url)
+                .bearer_auth(token)
+                .header("ConsistencyLevel", "eventual")
+                .send()
+                .await
+                .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+
+            match resp.status() {
+                StatusCode::OK => return Ok(resp),
+                StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::GATEWAY_TIMEOUT => {
+                    attempt += 1;
+                    if attempt >= max_attempts {
+                        return Err(MsalError::RequestFailed(format!(
+                            "HTTP {} after {} attempts",
+                            resp.status(),
+                            attempt
+                        )));
+                    }
+                    let wait = resp
+                        .headers()
+                        .get("Retry-After")
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(Duration::from_secs)
+                        .unwrap_or_else(|| {
+                            Duration::from_millis(200u64.saturating_mul(2u64.pow(attempt.min(5))))
+                        });
+                    sleep(wait).await;
+                }
+                s => {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(MsalError::GeneralFailure(format!(
+                        "Graph error {}: {}",
+                        s, body
+                    )));
+                }
+            }
+        }
+    }
+
+    async fn fetch_all_pages<T: DeserializeOwned>(
+        &self,
+        first_url: &str,
+        token: &str,
+    ) -> Result<Vec<T>, MsalError> {
+        let mut url = first_url.to_string();
+        let mut all = Vec::<T>::new();
+
+        loop {
+            let resp = self.fetch_with_retry(&url, token).await?;
+            let text = resp.text().await.map_err(|e| {
+                MsalError::GeneralFailure(format!("Failed getting text from response: {:?}", e))
+            })?;
+            let page: GraphPage<T> = serde_json::from_str(&text).or_else(
+                |_| -> std::result::Result<GraphPage<T>, MsalError> {
+                    let v: Value = serde_json::from_str(&text).map_err(|e| {
+                        MsalError::InvalidJson(format!("Failed parsing page: {:?}", e))
+                    })?;
+                    let value = v
+                        .get("value")
+                        .cloned()
+                        .ok_or_else(|| MsalError::GeneralFailure("missing 'value'".to_string()))?;
+                    let next = v
+                        .get("@odata.nextLink")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string());
+                    let items: Vec<T> = serde_json::from_value(value).map_err(|e| {
+                        MsalError::InvalidJson(format!("Failed parsing page: {:?}", e))
+                    })?;
+                    Ok(GraphPage {
+                        value: items,
+                        next_link: next,
+                    })
+                },
+            )?;
+
+            all.extend(page.value);
+            if let Some(next) = page.next_link {
+                url = next;
+            } else {
+                break;
+            }
+        }
+
+        Ok(all)
     }
 }
