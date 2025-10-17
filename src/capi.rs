@@ -1088,7 +1088,6 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
         &username,
         Some(&password),
-        None,  // No scopes (uses default empty vector)
         &[],
         None,
     ) {
@@ -1101,7 +1100,6 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
         &username,
         Some(&password),
-        None,  // No scopes (uses default empty vector)
         &[],
         None,
         None,  // No specific MFA method

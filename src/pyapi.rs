@@ -764,7 +764,6 @@ impl PyBrokerClientApplication {
         &self,
         username: &str,
         password: Option<&str>,
-        scopes: Option<Vec<String>>,
         options: Vec<PyAuthOption>,
         auth_init: Option<&PyAuthInit>,
         #[cfg(feature = "mfa_method_selection")]
@@ -773,7 +772,6 @@ impl PyBrokerClientApplication {
     ) -> PyResult<PyMFAAuthContinue> {
         let rust_options: Vec<AuthOption> = options.into_iter().map(|o| o.into()).collect();
         let rust_auth_init = auth_init.map(|a| a.auth_init.clone());
-        let scopes_vec = scopes.map(|s| s.iter().map(|s| s.as_str()).collect());
 
         #[cfg(not(feature = "mfa_method_selection"))]
         let flow = run_async!(
@@ -782,7 +780,6 @@ impl PyBrokerClientApplication {
             initiate_acquire_token_by_mfa_flow_for_device_enrollment,
             username,
             password,
-            scopes_vec,
             &rust_options,
             rust_auth_init,
         );
@@ -794,7 +791,6 @@ impl PyBrokerClientApplication {
             initiate_acquire_token_by_mfa_flow_for_device_enrollment,
             username,
             password,
-            scopes_vec,
             &rust_options,
             rust_auth_init,
             selected_method,

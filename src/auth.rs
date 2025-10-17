@@ -300,6 +300,17 @@ impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
 }
 
 impl MFAAuthContinue {
+    /// Get the default MFA method (for backwards compatibility)
+    pub fn mfa_method(&self) -> Option<String> {
+        if let Some(method) = self.get_default_mfa_method_details() {
+            Some(method.auth_method_id)
+        } else if self.mfa_methods.len() > 0 {
+            Some(self.mfa_methods[0].clone())
+        } else {
+            None
+        }
+    }
+
     /// Get all available MFA methods. Returns a vector containing all method IDs.
     pub fn get_available_mfa_methods(&self) -> Vec<String> {
         self.mfa_methods.clone()
@@ -2287,7 +2298,6 @@ impl PublicClientApplication {
         })
     }
 
-
     /// Initiate an MFA flow via user credentials.
     ///
     /// # Arguments
@@ -3023,7 +3033,7 @@ impl PublicClientApplication {
             params.push(("amr_values", "ngcmfa"));
         }
         let url = Url::parse_with_params(
-            &format!("{}/oauth2/v2.0/authorize", self.authority()?),
+            &format!("{}/oauth2/authorize", self.authority()?),
             &params.to_vec(),
         )
         .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
@@ -3410,12 +3420,9 @@ impl PublicClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
-        // TODO: conditional on whether to use v2 or v1 endpoint here?
-        let token_endpoint = format!("{}/oauth2/v2.0/token", self.authority()?);
-
         let resp = self
             .client()
-            .post(token_endpoint)
+            .post(format!("{}/oauth2/token", self.authority()?))
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(payload)
@@ -3423,13 +3430,10 @@ impl PublicClientApplication {
             .await
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         if resp.status().is_success() {
-            let text = resp
-                .text()
+            let token: UserToken = resp
+                .json()
                 .await
-                .map_err(|e| MsalError::RequestFailed(format!("Failed to read response text: {}", e)))?;
-
-            let token: UserToken = json_from_str(&text)
-                .map_err(|e| MsalError::InvalidJson(format!("Failed to parse UserToken: {}. Raw response: {}", e, text)))?;
+                .map_err(|e| MsalError::InvalidJson(format!("Failed to parse UserToken: {}", e)))?;
 
             Ok(token)
         } else {
@@ -3885,6 +3889,19 @@ impl PublicClientApplication {
         }
     }
 
+    /// Obtain token interactively.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `resource` - A resource for obtaining an access token.
+    ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
+    ///
+    /// # Returns
+    ///
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
     #[cfg(feature = "interactive")]
     pub async fn acquire_token_interactive(
         &self,
@@ -4451,8 +4468,6 @@ impl BrokerClientApplication {
     ///
     /// * `password` - The password.
     ///
-    /// * `scopes` - Optional scopes requested to access a protected API. Defaults to empty vector.
-    ///
     /// * `options` - Authentication options to enable, such as Fido.
     ///
     /// * `auth_init` - The result of `check_user_exists`, required if called
@@ -4469,19 +4484,17 @@ impl BrokerClientApplication {
         &self,
         username: &str,
         password: Option<&str>,
-        scopes: Option<Vec<&str>>,
         options: &[AuthOption],
         auth_init: Option<AuthInit>,
         #[cfg(feature = "mfa_method_selection")]
         selected_method: Option<&str>,
     ) -> Result<MFAAuthContinue, MsalError> {
         let drs_resource = "https://enrollment.manage.microsoft.com/";
-        let scopes = scopes.unwrap_or_default();
         self.app
             .initiate_acquire_token_by_mfa_flow(
                 username,
                 password,
-                scopes,
+                vec![],
                 Some(drs_resource),
                 options,
                 auth_init,
@@ -4490,7 +4503,6 @@ impl BrokerClientApplication {
             )
             .await
     }
-
 
     /// Obtain token by a MFA flow object.
     ///
