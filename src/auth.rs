@@ -304,7 +304,7 @@ impl MFAAuthContinue {
     pub fn mfa_method(&self) -> Option<String> {
         if let Some(method) = self.get_default_mfa_method_details() {
             Some(method.auth_method_id)
-        } else if self.mfa_methods.len() > 0 {
+        } else if !self.mfa_methods.is_empty() {
             Some(self.mfa_methods[0].clone())
         } else {
             None
