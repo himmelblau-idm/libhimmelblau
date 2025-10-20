@@ -11,10 +11,6 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "deps(rust)"
-    ignore:
-      # Ignore these pending the changes in https://gitlab.com/samba-team/libhimmelblau/-/merge_requests/68
-      - dependency-name: "kanidm-hsm-crypto"
-      - dependency-name: "compact_jwt"
     groups:
       all-cargo-updates:
         patterns:
