@@ -161,7 +161,7 @@ pub struct DeviceAuthorizationResponse {
     pub message: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ArrUserProofs {
     #[serde(rename = "authMethodId")]
     auth_method_id: String,
@@ -170,7 +170,28 @@ struct ArrUserProofs {
     display: String,
 }
 
-#[derive(Deserialize)]
+/// Detailed information about an MFA method
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MfaMethodInfo {
+    /// The authentication method identifier (e.g., "PhoneAppNotification", "PhoneAppOTP")
+    pub auth_method_id: String,
+    /// Human-readable display name for the method (e.g., phone number for SMS)
+    pub display: String,
+    /// Whether this is the default/preferred method
+    pub is_default: bool,
+}
+
+impl From<&ArrUserProofs> for MfaMethodInfo {
+    fn from(proof: &ArrUserProofs) -> Self {
+        MfaMethodInfo {
+            auth_method_id: proof.auth_method_id.clone(),
+            display: proof.display.clone(),
+            is_default: proof.is_default,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
 struct AuthConfig {
     #[serde(rename = "sessionId")]
     session_id: String,
@@ -234,7 +255,6 @@ struct AuthConfig {
 
 #[derive(Deserialize, Serialize, Default)]
 pub struct MFAAuthContinue {
-    pub mfa_method: String,
     pub msg: String,
     pub entropy: Option<u8>,
     pub max_poll_attempts: Option<u32>,
@@ -251,6 +271,8 @@ pub struct MFAAuthContinue {
     pub fido_challenge: Option<String>,
     pub fido_allow_list: Option<Vec<String>>,
     pub cross_domain_canary: Option<String>,
+    pub mfa_methods: Vec<String>,
+    pub mfa_method_details: Vec<MfaMethodInfo>,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -274,6 +296,54 @@ impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
             dag: Some(item),
             ..Default::default()
         }
+    }
+}
+
+impl MFAAuthContinue {
+    /// Get the default MFA method (for backwards compatibility)
+    pub fn mfa_method(&self) -> Option<String> {
+        if let Some(method) = self.get_default_mfa_method_details() {
+            Some(method.auth_method_id)
+        } else if !self.mfa_methods.is_empty() {
+            Some(self.mfa_methods[0].clone())
+        } else {
+            None
+        }
+    }
+
+    /// Get all available MFA methods. Returns a vector containing all method IDs.
+    pub fn get_available_mfa_methods(&self) -> Vec<String> {
+        self.mfa_methods.clone()
+    }
+
+    /// Get detailed information about all available MFA methods.
+    /// Returns detailed info including display names and default status.
+    pub fn get_mfa_method_details(&self) -> Vec<MfaMethodInfo> {
+        self.mfa_method_details.clone()
+    }
+
+    /// Check if a specific MFA method is available
+    pub fn has_mfa_method(&self, method_id: &str) -> bool {
+        self.get_available_mfa_methods().contains(&method_id.to_string())
+    }
+
+    /// Get the count of available MFA methods
+    pub fn mfa_method_count(&self) -> usize {
+        self.get_available_mfa_methods().len()
+    }
+
+    /// Get details of the first default MFA method
+    pub fn get_default_mfa_method_details(&self) -> Option<MfaMethodInfo> {
+        self.get_mfa_method_details()
+            .into_iter()
+            .find(|method| method.is_default)
+    }
+
+    /// Get detailed information about a specific MFA method by ID
+    pub fn get_mfa_method_by_id(&self, method_id: &str) -> Option<MfaMethodInfo> {
+        self.get_mfa_method_details()
+            .into_iter()
+            .find(|method| method.auth_method_id == method_id)
     }
 }
 
@@ -301,7 +371,7 @@ struct DeviceCodeStatus {
     authorization_state: u8,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct RemoteNgcParams {
     #[serde(rename = "SessionIdentifier")]
     session_identifier: String,
@@ -321,7 +391,7 @@ struct OneTimeCode {
     error: Option<OTCError>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct FidoParams {
     #[serde(rename = "AllowList")]
     fido_allow_list: Vec<String>,
@@ -330,7 +400,7 @@ struct FidoParams {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Credentials {
     #[serde(rename = "FederationRedirectUrl")]
     federation_redirect_url: Option<String>,
@@ -350,7 +420,7 @@ struct Credentials {
     has_remote_ngc: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct CredType {
     #[serde(rename = "Credentials")]
     credentials: Credentials,
@@ -1477,6 +1547,7 @@ impl ClientApplication {
     }
 }
 
+#[derive(Clone)]
 pub struct AuthInit {
     auth_config: AuthConfig,
     cred_type: CredType,
@@ -2129,7 +2200,7 @@ impl PublicClientApplication {
             Err(MsalError::GeneralFailure(
                 resp.text()
                     .await
-                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+                    .map_err(|e| MsalError::GeneralFailure(format!("Request to FIDO login URL failed: {}", e)))?,
             ))
         }
     }
@@ -2188,7 +2259,7 @@ impl PublicClientApplication {
             Err(MsalError::GeneralFailure(
                 resp.text()
                     .await
-                    .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
+                    .map_err(|e| MsalError::GeneralFailure(format!("Request for handle_auth_config_req_internal() failed: {}", e)))?,
             ))
         }
     }
@@ -2257,7 +2328,12 @@ impl PublicClientApplication {
         resource: Option<&str>,
         options: &[AuthOption],
         auth_init: Option<AuthInit>,
+        #[cfg(feature = "mfa_method_selection")]
+        mfa_method: Option<&str>,
     ) -> Result<MFAAuthContinue, MsalError> {
+        #[cfg(not(feature = "mfa_method_selection"))]
+        let mfa_method: Option<&str> = None;
+
         macro_rules! dag_fallback {
             () => {
                 if !options.contains(&AuthOption::NoDAGFallback) {
@@ -2365,7 +2441,6 @@ impl PublicClientApplication {
                         }
                     };
                     return Ok(MFAAuthContinue {
-                        mfa_method: "AccessPass".to_string(),
                         msg,
                         entropy: None,
                         max_poll_attempts: None,
@@ -2382,6 +2457,12 @@ impl PublicClientApplication {
                         fido_allow_list: None,
                         cross_domain_canary: None,
                         url_session_state: auth_config.url_session_state,
+                        mfa_methods: vec!["AccessPass".to_string()].into(),
+                        mfa_method_details: vec![MfaMethodInfo {
+                            auth_method_id: "AccessPass".to_string(),
+                            display: "AccessPass".to_string(),
+                            is_default: true
+                        }]
                     });
                 }
             };
@@ -2414,7 +2495,6 @@ impl PublicClientApplication {
                                 }
                             };
                             return Ok(MFAAuthContinue {
-                                mfa_method: "PhoneAppNotification".to_string(),
                                 msg,
                                 entropy: Some(remote_ngc_params.entropy),
                                 max_poll_attempts: auth_config.max_poll_attempts,
@@ -2431,6 +2511,12 @@ impl PublicClientApplication {
                                 fido_allow_list: None,
                                 cross_domain_canary: None,
                                 url_session_state: auth_config.url_session_state,
+                                mfa_methods: vec!["PhoneAppNotification".to_string()].into(),
+                                mfa_method_details: vec![MfaMethodInfo {
+                                    auth_method_id: "PhoneAppNotification".to_string(),
+                                    display: "PhoneAppNotification".to_string(),
+                                    is_default: true
+                                }]
                             });
                         }
                     }
@@ -2468,7 +2554,6 @@ impl PublicClientApplication {
                                 .handle_auth_config_fido_get(username, &auth_config, &request_id)
                                 .await?;
                             return Ok(MFAAuthContinue {
-                                mfa_method: "FidoKey".to_string(),
                                 msg: "".to_string(),
                                 entropy: None,
                                 max_poll_attempts: auth_config.max_poll_attempts,
@@ -2485,6 +2570,12 @@ impl PublicClientApplication {
                                 fido_allow_list: Some(fido_params.fido_allow_list.clone()),
                                 cross_domain_canary: fido_auth_config.cross_domain_canary,
                                 url_session_state: auth_config.url_session_state,
+                                mfa_methods: vec!["FidoKey".to_string()].into(),
+                                mfa_method_details: vec![MfaMethodInfo {
+                                    auth_method_id: "FidoKey".to_string(),
+                                    display: "FidoKey".to_string(),
+                                    is_default: true
+                                }]
                             });
                         }
                     }
@@ -2636,11 +2727,26 @@ impl PublicClientApplication {
                 if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
                     let fido_is_a_passkey = fido_is_a_passkey
                         || auth_config.is_passkey_support_enabled.unwrap_or(false);
-                    let default_auth_method = if let Some(method) =
+
+                    // Try to use provided MFA method if available
+                    let selected_auth_method = if let Some(requested_method) = mfa_method {
                         arr_user_proofs.iter().find(|proof| {
-                            proof.is_default
+                            proof.auth_method_id == requested_method
                                 && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
-                        }) {
+                        }).ok_or_else(|| {
+                            let available = arr_user_proofs.iter()
+                                .map(|p| p.auth_method_id.as_str())
+                                .collect::<Vec<_>>();
+                            MsalError::GeneralFailure(format!(
+                                "Requested MFA method '{}' not available. Available methods: {}",
+                                requested_method, available.join(", ")
+                            ))
+                        })?
+                    } else if let Some(method) =
+                            arr_user_proofs.iter().find(|proof| {
+                                proof.is_default
+                                    && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                            }) {
                         method
                     } else if fido_is_a_passkey {
                         // Skip FidoKey methods entirely if we can't use them
@@ -2694,7 +2800,7 @@ impl PublicClientApplication {
                             dag_fallback!();
                         }
                     };
-                    let (flow_token, ctx, msg) = if default_auth_method.auth_method_id == "FidoKey"
+                    let (flow_token, ctx, msg) = if selected_auth_method.auth_method_id == "FidoKey"
                     {
                         let fido_auth_config = self
                             .handle_auth_config_fido_get(username, &auth_config, &request_id)
@@ -2704,12 +2810,12 @@ impl PublicClientApplication {
                         auth_config.cross_domain_canary =
                             fido_auth_config.cross_domain_canary.clone();
                         (sft, sctx, "".to_string())
-                    } else if default_auth_method.auth_method_id == "AccessPass" {
+                    } else if selected_auth_method.auth_method_id == "AccessPass" {
                         (sft, sctx, "Enter Temporary Access Pass: ".to_string())
                     } else {
                         let auth_response = match self
                             .mfa_begin_auth_internal(
-                                &default_auth_method.auth_method_id,
+                                &selected_auth_method.auth_method_id,
                                 &url_begin_auth,
                                 &sctx,
                                 &sft,
@@ -2730,16 +2836,18 @@ impl PublicClientApplication {
                                 dag_fallback!(e);
                             }
                         };
-                        let msg = match default_auth_method.auth_method_id.as_str() {
+                        let msg = match selected_auth_method.auth_method_id.as_str() {
                             "PhoneAppNotification" | "CompanionAppsNotification" => format!("Open your Authenticator app, and enter the number '{}' to sign in.", auth_response.entropy),
                             "PhoneAppOTP" =>
                                 "Please type in the code displayed on your authenticator app from your device:".to_string(),
                             "ConsolidatedTelephony" | "OneWaySMS" =>
-                                format!("We texted your phone {}. Please enter the code to sign in:", default_auth_method.display),
+                                format!("We texted your phone {}. Please enter the code to sign in:", selected_auth_method.display),
                             "TwoWayVoiceMobile" =>
-                                format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
+                                format!("We're calling your phone {}. Please answer it to continue.", selected_auth_method.display),
                             "TwoWayVoiceAlternateMobile" =>
-                                format!("We're calling your phone {}. Please answer it to continue.", default_auth_method.display),
+                                format!("We're calling your phone {}. Please answer it to continue.", selected_auth_method.display),
+                            "TwoWayVoiceOffice" =>
+                                format!("We're calling your office phone {}. Please answer it to continue.", selected_auth_method.display),
                             method => {
                                 info!("Unsupported MFA method {}", method);
                                 dag_fallback!();
@@ -2748,7 +2856,6 @@ impl PublicClientApplication {
                         (auth_response.flow_token, auth_response.ctx, msg)
                     };
                     Ok(MFAAuthContinue {
-                        mfa_method: default_auth_method.auth_method_id.clone(),
                         msg,
                         entropy: None,
                         max_poll_attempts: auth_config.max_poll_attempts,
@@ -2765,6 +2872,12 @@ impl PublicClientApplication {
                         fido_allow_list: auth_config.fido_allow_list.clone(),
                         cross_domain_canary: auth_config.cross_domain_canary.clone(),
                         url_session_state: None,
+                        mfa_methods: arr_user_proofs.iter()
+                            .map(|proof| proof.auth_method_id.clone())
+                            .collect(),
+                        mfa_method_details: arr_user_proofs.iter()
+                            .map(|proof| proof.into())
+                            .collect(),
                     })
                 } else {
                     info!("No MFA methods found");
@@ -2812,7 +2925,7 @@ impl PublicClientApplication {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             if let Some(error) = &json_resp.error {
-                return Err(MsalError::GeneralFailure(error.message.clone()));
+                return Err(MsalError::GeneralFailure(format!("Failed to parse response for /GetOneTimeCode: {}", error.message.clone())));
             }
             json_resp.remote_ngc_params.ok_or(MsalError::GeneralFailure(
                 "remote_ngc_params missing".to_string(),
@@ -2822,7 +2935,7 @@ impl PublicClientApplication {
                 .text()
                 .await
                 .map_err(|e| MsalError::GeneralFailure(format!("Failed getting otc: {}", e)))?;
-            Err(MsalError::GeneralFailure(text))
+            Err(MsalError::GeneralFailure(format!("Request to /GetOneTimeCode failed: {}", text)))
         }
     }
 
@@ -2886,6 +2999,18 @@ impl PublicClientApplication {
         let caller_app_redirect_uri = self
             .app
             .get_auth_redirect_uri(Some(LINUX_BROKER_APP_ID), resource);
+
+        debug!("request_auth_config_internal() client_id={} redirect_uri={} scope={} resource={} caller_app_redirect_uri={}",
+            self.client_id(),
+            redirect_uri.as_str(),
+            &scope,
+            resource.unwrap_or("https://graph.microsoft.com"),
+            caller_app_redirect_uri.as_str()
+        );
+
+        // TODO: the sso_reload, resource, caller_app_client_id, caller_app_redirect_uri, and amr_values parameters are only
+        // supported with the "v1" /oauth2/authorize endpoint and are not supported by /oauth/v2.0/authorize
+        // See: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow for details
         let mut params = vec![
             ("client_id", self.client_id()),
             ("response_type", "code"),
@@ -2972,7 +3097,7 @@ impl PublicClientApplication {
             } else if let Some(error_code) = auth_response.error_code {
                 Err(MsalError::AADSTSError(AADSTSError::new(error_code, None)))
             } else if let Some(msg) = auth_response.message {
-                Err(MsalError::GeneralFailure(msg))
+                Err(MsalError::GeneralFailure(format!("BeginAuth failed with message: {}", msg)))
             } else {
                 Err(MsalError::GeneralFailure("BeginAuth failed".to_string()))
             }
@@ -2990,7 +3115,7 @@ impl PublicClientApplication {
         while let Some(chunk) = resp
             .chunk()
             .await
-            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+            .map_err(|e| MsalError::GeneralFailure(format!("Error reading response chunks: {}", e)))?
         {
             body.extend(&chunk);
         }
@@ -3044,12 +3169,12 @@ impl PublicClientApplication {
                 .form(&form_data)
                 .send()
                 .await
-                .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+                .map_err(|e| MsalError::RequestFailed(format!("Request failed in await_working(): {}", e)))?;
             let mut body = Vec::new();
             while let Some(chunk) = resp
                 .chunk()
                 .await
-                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?
+                .map_err(|e| MsalError::GeneralFailure(format!("Error reading response chunks: {}", e)))?
             {
                 body.extend(&chunk);
             }
@@ -3104,7 +3229,7 @@ impl PublicClientApplication {
                     }
                 }
 
-                return Err(MsalError::GeneralFailure(error_description.to_string()));
+                return Err(MsalError::GeneralFailure(format!("Unknown error in request to {}: {}", url, error_description)));
             }
 
             let (_, code) =
@@ -3123,10 +3248,16 @@ impl PublicClientApplication {
                 #[cfg(feature = "changepassword")]
                 Err(MsalError::ChangePassword) => Err(MsalError::ChangePassword),
                 Err(MsalError::AADSTSError(e)) => Err(MsalError::AADSTSError(e)),
-                Err(MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary)) => Err(
-                    MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary),
-                ),
-                _ => Err(MsalError::GeneralFailure(text)),
+                Err(MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary)) => {
+                    Err(MsalError::SkipMfaRegistration(
+                        url_skip_mfa_registration,
+                        sft,
+                        canary,
+                    ))
+                }
+                Err(error) => Err(MsalError::GeneralFailure(format!("MsalError in auth_code_intercept_internal(), {}: {}", error, text))),
+                // It looks like pgid=KmsiInterrupt ("keep me signed in") can occur in some cases with a successful response, but no redirect
+                Ok(value) => Ok(format!("auth_code_intercept_internal() succeeded without redirect, pgid={:?}", value.pgid))
             }
         } else {
             Err(MsalError::GeneralFailure(
@@ -3195,7 +3326,7 @@ impl PublicClientApplication {
             if let Some((_, error_description)) =
                 params.iter().find(|(k, _)| k == "error_description")
             {
-                return Err(MsalError::GeneralFailure(error_description.to_string()));
+                return Err(MsalError::GeneralFailure(format!("Error found in redirect URL parameters for request_authorization_passwordless_internal() redirect: {}", error_description)));
             }
 
             let (_, code) =
@@ -3217,8 +3348,9 @@ impl PublicClientApplication {
         &self,
         username: &str,
         flow: &MFAAuthContinue,
+        selected_mfa_method: &MfaMethodInfo,
     ) -> Result<String, MsalError> {
-        let mfa_method = match flow.mfa_method.as_str() {
+        let mfa_method = match selected_mfa_method.auth_method_id.as_str() {
             // ConsolidatedTelephony simply means OneWaySMS internally to Azure,
             // it seems. If we don't swap them during the ProcessAuth though,
             // this request is rejected. I observed this odd behavior in a
@@ -3301,14 +3433,18 @@ impl PublicClientApplication {
             let token: UserToken = resp
                 .json()
                 .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                .map_err(|e| MsalError::InvalidJson(format!("Failed to parse UserToken: {}", e)))?;
 
             Ok(token)
         } else {
-            let json_resp: ErrorResponse = resp
-                .json()
+            let text = resp
+                .text()
                 .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                .map_err(|e| MsalError::RequestFailed(format!("Failed to read response text: {}", e)))?;
+
+            let json_resp: ErrorResponse = json_from_str(&text)
+                .map_err(|e| MsalError::InvalidJson(format!("Failed to parse ErrorResponse: {}. Raw response: {}", e, text)))?;
+            error!("exchange_authorization_code_for_access_token_internal: {}", json_resp.error_description);
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
@@ -3428,7 +3564,7 @@ impl PublicClientApplication {
                                 None
                             }
                         }) {
-                            return Err(MsalError::GeneralFailure(error));
+                            return Err(MsalError::GeneralFailure(format!("error_description found in parsed URL in exchange_fido_assertion_for_auth_code_internal(): {}", error)));
                         }
                     }
                 }
@@ -3439,6 +3575,7 @@ impl PublicClientApplication {
             )))
         }
     }
+
 
     /// Obtain token by a MFA flow object.
     ///
@@ -3455,6 +3592,9 @@ impl PublicClientApplication {
     /// * `flow` - A MFAAuthContinue previously generated by
     ///   initiate_acquire_token_by_mfa_flow.
     ///
+    /// * `selected_method` - Optional specific MFA method ID to use. If None, uses the default method.
+    ///   Only available when the `mfa_method_selection` feature is enabled.
+    ///
     /// # Returns
     ///
     /// * Success: A UserToken containing an access_token.
@@ -3465,6 +3605,8 @@ impl PublicClientApplication {
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
         flow: &mut MFAAuthContinue,
+        #[cfg(feature = "mfa_method_selection")]
+        selected_method: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         if let Some(dag_flow) = &flow.dag {
             // The initiate phase already fell back to a DAG
@@ -3490,15 +3632,55 @@ impl PublicClientApplication {
                         info!("Polling for acquire_token_by_device_flow");
                         return Err(MsalError::MFAPollContinue);
                     }
-                    error!("{}", resp.error_description);
+                    error!("acquire_token_by_mfa_flow_internal: {}", resp.error_description);
                     Err(MsalError::AcquireTokenFailed(resp.clone()))
                 }
                 Err(e) => Err(e),
             };
         }
+
+        #[cfg(feature = "mfa_method_selection")]
+        let mfa_method = selected_method;
+        #[cfg(not(feature = "mfa_method_selection"))]
+        let mfa_method: Option<&str> = None;
+
+        // Validate the selected method if provided
+        #[cfg(feature = "mfa_method_selection")]
+        if let Some(method) = mfa_method {
+            if !flow.has_mfa_method(method) {
+                return Err(MsalError::GeneralFailure(format!(
+                    "Requested MFA method '{}' is not available. Available methods: {:?}",
+                    method,
+                    flow.get_available_mfa_methods().join(", ")
+                )));
+            }
+        }
+
+        let selected_mfa_method = match mfa_method {
+            Some(method) => {
+                flow.get_mfa_method_by_id(method)
+            }
+            None => {
+                flow.get_default_mfa_method_details()
+            }
+        };
+
+        let selected_mfa_method = match selected_mfa_method {
+            Some(value) => {
+                value
+            }
+            None => {
+                #[cfg(feature = "mfa_method_selection")]
+                let method_desc = mfa_method.unwrap_or("default");
+                #[cfg(not(feature = "mfa_method_selection"))]
+                let method_desc = "default";
+                return Err(MsalError::GeneralFailure(format!("Unable to determine MFA method details - selected method was: {}", method_desc)))
+            }
+        };
+
         match auth_data {
             Some(auth_data) => {
-                if flow.mfa_method == "FidoKey" {
+                if selected_mfa_method.auth_method_id == "FidoKey" {
                     let auth_code = self
                         .exchange_fido_assertion_for_auth_code_internal(auth_data, flow)
                         .await?;
@@ -3508,7 +3690,7 @@ impl PublicClientApplication {
                         None,
                     )
                     .await
-                } else if flow.mfa_method == "AccessPass" {
+                } else if selected_mfa_method.auth_method_id == "AccessPass" {
                     let auth_code = self
                         .exchange_accesspass_for_auth_code_internal(username, auth_data, flow)
                         .await?;
@@ -3521,7 +3703,7 @@ impl PublicClientApplication {
                 } else {
                     let payload = json!({
                         "AdditionalAuthData": auth_data.trim(),
-                        "AuthMethodId": &flow.mfa_method,
+                        "AuthMethodId": &selected_mfa_method.auth_method_id,
                         "SessionId": &flow.session_id,
                         "FlowToken": &flow.flow_token,
                         "Ctx": &flow.ctx,
@@ -3545,17 +3727,17 @@ impl PublicClientApplication {
                         .json(&payload)
                         .send()
                         .await
-                        .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+                        .map_err(|e| MsalError::RequestFailed(format!("Request to {} failed: {}", url_end_auth, e)))?;
                     if resp.status().is_success() {
                         let text = resp
                             .text()
                             .await
-                            .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+                            .map_err(|e| MsalError::GeneralFailure(format!("Response decoding failed: {}", e)))?;
                         // Check for an error in an auth Config
                         if let Ok(auth_config) = self.parse_auth_config(&text, false, false) {
                             if let Some(service_exception_msg) = auth_config.service_exception_msg {
                                 return Err(MsalError::GeneralFailure(
-                                    service_exception_msg.to_string(),
+                                    format!("Service exception during acquire_token_by_mfa_flow_internal(): {}", service_exception_msg),
                                 ));
                             }
                         }
@@ -3566,7 +3748,7 @@ impl PublicClientApplication {
                             flow.ctx = auth_response.ctx;
                             flow.flow_token = auth_response.flow_token;
                             let auth_code =
-                                self.request_authorization_internal(username, flow).await?;
+                                self.request_authorization_internal(username, flow, &selected_mfa_method).await?;
                             self.exchange_authorization_code_for_access_token_internal(
                                 auth_code,
                                 flow.resource.as_deref(),
@@ -3574,7 +3756,7 @@ impl PublicClientApplication {
                             )
                             .await
                         } else if let Some(msg) = auth_response.message {
-                            Err(MsalError::GeneralFailure(msg))
+                            Err(MsalError::GeneralFailure(format!("AuthResponse indicates failure: {}", msg)))
                         } else {
                             Err(MsalError::GeneralFailure("EndAuth failed".to_string()))
                         }
@@ -3590,7 +3772,7 @@ impl PublicClientApplication {
                     let url = Url::parse_with_params(
                         url_end_auth,
                         [
-                            ("authMethodId", &flow.mfa_method),
+                            ("authMethodId", &selected_mfa_method.auth_method_id),
                             (
                                 "pollCount",
                                 &format!(
@@ -3637,13 +3819,13 @@ impl PublicClientApplication {
                     let text = resp
                         .text()
                         .await
-                        .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+                        .map_err(|e| MsalError::GeneralFailure(format!("Response decoding failed: {}", e)))?;
                     if flow.url_end_auth.is_some() {
                         // Check for an error in an auth Config
                         if let Ok(auth_config) = self.parse_auth_config(&text, false, false) {
                             if let Some(service_exception_msg) = auth_config.service_exception_msg {
                                 return Err(MsalError::GeneralFailure(
-                                    service_exception_msg.to_string(),
+                                    format!("Service exception: {}", service_exception_msg),
                                 ));
                             }
                         }
@@ -3654,7 +3836,7 @@ impl PublicClientApplication {
                             flow.ctx = auth_response.ctx;
                             flow.flow_token = auth_response.flow_token;
                             let auth_code =
-                                self.request_authorization_internal(username, flow).await?;
+                                self.request_authorization_internal(username, flow, &selected_mfa_method).await?;
                             return self
                                 .exchange_authorization_code_for_access_token_internal(
                                     auth_code,
@@ -3666,7 +3848,7 @@ impl PublicClientApplication {
                             "Auth response Retry missing".to_string(),
                         ))? {
                             if let Some(msg) = auth_response.message {
-                                return Err(MsalError::GeneralFailure(msg));
+                                return Err(MsalError::GeneralFailure(format!("AuthResponse did not indicate success: {}", msg)));
                             } else {
                                 return Err(MsalError::GeneralFailure(
                                     "EndAuth failed".to_string(),
@@ -3695,7 +3877,7 @@ impl PublicClientApplication {
                                 )
                                 .await;
                         } else {
-                            Err(MsalError::GeneralFailure(text))
+                            Err(MsalError::GeneralFailure(format!("Unexpected authorization_state in DeviceCodeStatus {}: {}", status.authorization_state, text)))
                         }
                     }
                 } else {
@@ -4291,6 +4473,9 @@ impl BrokerClientApplication {
     /// * `auth_init` - The result of `check_user_exists`, required if called
     ///   prior to `initiate_acquire_token_by_mfa_flow_for_device_enrollment`.
     ///
+    /// * `selected_method` - Optional specific MFA method ID to use. Only available when
+    ///   the `mfa_method_selection` feature is enabled.
+    ///
     /// # Returns
     /// * Success: A MFAAuthContinue containing the information needed to continue the
     ///   authentication flow.
@@ -4301,6 +4486,8 @@ impl BrokerClientApplication {
         password: Option<&str>,
         options: &[AuthOption],
         auth_init: Option<AuthInit>,
+        #[cfg(feature = "mfa_method_selection")]
+        selected_method: Option<&str>,
     ) -> Result<MFAAuthContinue, MsalError> {
         let drs_resource = "https://enrollment.manage.microsoft.com/";
         self.app
@@ -4311,6 +4498,8 @@ impl BrokerClientApplication {
                 Some(drs_resource),
                 options,
                 auth_init,
+                #[cfg(feature = "mfa_method_selection")]
+                selected_method,
             )
             .await
     }
@@ -4339,12 +4528,22 @@ impl BrokerClientApplication {
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
         flow: &mut MFAAuthContinue,
+        #[cfg(feature = "mfa_method_selection")]
+        selected_method: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         self.app
-            .acquire_token_by_mfa_flow(username, auth_data, poll_attempt, flow)
+            .acquire_token_by_mfa_flow(
+                username,
+                auth_data,
+                poll_attempt,
+                flow,
+                #[cfg(feature = "mfa_method_selection")]
+                selected_method,
+            )
             .await
     }
 
+    // TODO: add condition here to support v2 endpoints?
     async fn request_nonce(&self) -> Result<String, MsalError> {
         let resp = self
             .client()
@@ -4602,6 +4801,7 @@ impl BrokerClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
+        // TODO: add condition here to support v2 endpoints?
         let url = format!("{}/oauth2/token", self.authority()?);
 
         let mut debug_payload = params;
@@ -4833,6 +5033,7 @@ impl BrokerClientApplication {
             .collect::<Vec<String>>()
             .join("&");
 
+        // TODO: add condition here to support v2 endpoints?
         let url = format!("{}/oauth2/token", self.authority()?);
 
         let mut debug_payload = params.clone();

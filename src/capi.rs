@@ -49,7 +49,7 @@ use std::slice;
 use std::str::FromStr;
 #[cfg(feature = "broker")]
 use tokio::runtime;
-use tracing::{warn, Level};
+use tracing::{error, warn, Level};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::auth::*;
@@ -1081,6 +1081,8 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
             );
         }
     };
+    // Call with None for scopes to maintain backward compatibility
+    #[cfg(not(feature = "mfa_method_selection"))]
     let flow = match run_async!(
         client,
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
@@ -1088,6 +1090,19 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         Some(&password),
         &[],
         None,
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    #[cfg(feature = "mfa_method_selection")]
+    let flow = match run_async!(
+        client,
+        initiate_acquire_token_by_mfa_flow_for_device_enrollment,
+        &username,
+        Some(&password),
+        &[],
+        None,
+        None,  // No specific MFA method
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
@@ -1155,6 +1170,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
         None => Some(poll_attempt as u32),
     };
     let flow = unsafe { &mut *flow };
+    #[cfg(not(feature = "mfa_method_selection"))]
     let resp = match run_async!(
         client,
         acquire_token_by_mfa_flow,
@@ -1162,6 +1178,83 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
         auth_data.as_deref(),
         poll_attempt,
         flow,
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    #[cfg(feature = "mfa_method_selection")]
+    let resp = match run_async!(
+        client,
+        acquire_token_by_mfa_flow,
+        &username,
+        auth_data.as_deref(),
+        poll_attempt,
+        flow,
+        None,  // No specific method selected
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    unsafe {
+        *out = Box::into_raw(Box::new(resp));
+    }
+    no_error()
+}
+
+/// Obtain token by an MFA flow object, allowing selection of a specific MFA method.
+/// This function extends the standard MFA flow by enabling method selection.
+///
+/// * `out` - A UserToken containing an access_token.
+/// # Safety
+///
+/// The calling function should ensure that `client`, `username`, `auth_data`,
+/// `poll_attempt`, `flow`, and `selected_method` are valid pointers to their respective types.
+#[cfg(all(feature = "broker", feature = "mfa_method_selection"))]
+#[no_mangle]
+pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow_with_method(
+    client: *mut BrokerClientApplication,
+    username: *const c_char,
+    auth_data: *const c_char,
+    poll_attempt: c_int,
+    flow: *mut MFAAuthContinue,
+    selected_method: *const c_char,
+    out: *mut *mut UserToken,
+) -> *mut MSAL_ERROR {
+    // Ensure our out parameter is not NULL
+    if out.is_null() {
+        error!("Invalid output parameter!");
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter".to_string(),
+        );
+    }
+    let client = unsafe { &mut *client };
+    let username = match wrap_c_char(username) {
+        Some(username) => username,
+        None => {
+            error!("Invalid input username!");
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username".to_string(),
+            );
+        }
+    };
+    let auth_data = wrap_c_char(auth_data);
+    let poll_attempt = match auth_data {
+        Some(_) => None,
+        None => Some(poll_attempt as u32),
+    };
+    let selected_method = wrap_c_char(selected_method);
+    let flow = unsafe { &mut *flow };
+
+    let resp = match run_async!(
+        client,
+        acquire_token_by_mfa_flow,
+        &username,
+        auth_data.as_deref(),
+        poll_attempt,
+        flow,
+        selected_method.as_deref(),
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
@@ -1197,7 +1290,34 @@ pub unsafe extern "C" fn mfa_auth_continue_mfa_method(
     flow: *mut MFAAuthContinue,
     out: *mut *mut c_char,
 ) -> *mut MSAL_ERROR {
-    c_str_from_object_string!(flow, mfa_method, out)
+    if flow.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    let flow = unsafe { &mut *flow };
+    // Return the default MFA method ID if available
+    let method_id = flow.get_default_mfa_method_details()
+        .map(|info| info.auth_method_id)
+        .unwrap_or_else(|| {
+            // If no default, return the first available method
+            flow.get_available_mfa_methods()
+                .first()
+                .cloned()
+                .unwrap_or_else(String::new)
+        });
+    let c_str = wrap_string(&method_id);
+    if c_str.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::NO_MEMORY,
+            "Failed to allocate string".to_string(),
+        );
+    }
+    unsafe {
+        *out = c_str;
+    }
+    no_error()
 }
 
 /// Get the polling_interval from a MFAAuthContinue flow
@@ -2277,6 +2397,156 @@ pub unsafe extern "C" fn user_token_free(input: *mut UserToken) {
 #[no_mangle]
 pub unsafe extern "C" fn tpm_free(input: *mut BoxedDynTpm) {
     free_object!(input);
+}
+
+/// Get the count of available MFA methods from a MFAAuthContinue flow
+///
+/// # Safety
+///
+/// The calling function should ensure that `flow` is a valid MFAAuthContinue
+/// pointer.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_method_count(flow: *mut MFAAuthContinue) -> c_int {
+    let flow = unsafe { &mut *flow };
+    flow.mfa_method_count() as c_int
+}
+
+/// Get the available MFA methods from a MFAAuthContinue flow
+///
+/// Returns an array of C strings containing the available MFA method IDs.
+/// The caller is responsible for freeing the returned array and strings.
+///
+/// # Safety
+///
+/// The calling function should ensure that `flow` is a valid MFAAuthContinue
+/// pointer, and that `out_methods` and `out_count` are valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_available_methods(
+    flow: *mut MFAAuthContinue,
+    out_methods: *mut *mut *mut c_char,
+    out_count: *mut c_int,
+) -> *mut MSAL_ERROR {
+    if flow.is_null() || out_methods.is_null() || out_count.is_null() {
+        error!("Invalid pointers provided");
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid pointers provided".to_string(),
+        );
+    }
+
+    let flow = unsafe { &mut *flow };
+    let methods = flow.get_available_mfa_methods();
+    let count = methods.len();
+
+    if count == 0 {
+        unsafe {
+            *out_methods = std::ptr::null_mut();
+            *out_count = 0;
+        }
+        return no_error();
+    }
+
+    // Convert each method to C string and collect into a Vec
+    let mut c_strings: Vec<*mut c_char> = Vec::with_capacity(count);
+    for method in methods.iter() {
+        let c_str = wrap_string(method);
+        if c_str.is_null() {
+            // Clean up previously allocated strings
+            for prev_str in c_strings {
+                if !prev_str.is_null() {
+                    unsafe {
+                        let _ = CString::from_raw(prev_str);
+                    }
+                }
+            }
+            error!("Failed to convert method string");
+            return make_error(
+                MSAL_ERROR_CODE::NO_MEMORY,
+                "Failed to convert method string".to_string(),
+            );
+        }
+        c_strings.push(c_str);
+    }
+
+    // Convert Vec to boxed slice, then to raw pointer
+    let boxed_slice = c_strings.into_boxed_slice();
+    let raw_ptr: *mut [*mut c_char] = Box::into_raw(boxed_slice);
+
+    unsafe {
+        *out_methods = raw_ptr as *mut *mut c_char;
+        *out_count = count as c_int;
+    }
+
+    no_error()
+}
+
+/// Check if a specific MFA method is available in a MFAAuthContinue flow
+///
+/// Returns 1 if the method is available, 0 if not available, -1 on error.
+///
+/// # Safety
+///
+/// The calling function should ensure that `flow` is a valid MFAAuthContinue
+/// pointer, and that `method_id` is a valid C string pointer.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_has_method(
+    flow: *mut MFAAuthContinue,
+    method_id: *const c_char,
+) -> c_int {
+    if flow.is_null() || method_id.is_null() {
+        error!("Invalid pointers provided");
+        return -1;
+    }
+
+    let flow = unsafe { &mut *flow };
+    let method_id = match wrap_c_char(method_id) {
+        Some(method_id) => method_id,
+        None => {
+            error!("Invalid method_id string");
+            return -1;
+        }
+    };
+
+    if flow.has_mfa_method(&method_id) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Free an array of MFA method strings returned by mfa_auth_continue_available_methods
+///
+/// # Safety
+///
+/// The calling function should ensure that `methods` was returned by
+/// mfa_auth_continue_available_methods and that `count` matches the count returned.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_free_methods(
+    methods: *mut *mut c_char,
+    count: c_int,
+) {
+    if methods.is_null() || count <= 0 {
+        return;
+    }
+
+    // Reconstruct the boxed slice from the raw pointer
+    let slice = unsafe {
+        std::slice::from_raw_parts_mut(methods, count as usize)
+    };
+    let boxed_slice = unsafe {
+        Box::from_raw(slice)
+    };
+
+    // Free each string
+    for str_ptr in boxed_slice.iter() {
+        if !str_ptr.is_null() {
+            unsafe {
+                let _ = CString::from_raw(*str_ptr);
+            }
+        }
+    }
+
+    // The boxed_slice will be automatically dropped here, freeing the array
 }
 
 /// # Safety

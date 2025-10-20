@@ -103,3 +103,31 @@ let machine_key = tpm
 
 let app = BrokerClientApplication::new(Some(&authority), Some(&transport_key), Some(&cert_key)).expect("Failed creating app");
 ```
+
+Using the Python API
+--------------------
+
+An script that uses `PublicClientApplication` from Python can be found in the [examples](example/msal_public_example.py).
+
+This script uses a public client created via an [Azure App Registration](https://himmelblau-idm.org/docs/advanced/Creating-an-Entra-ID-Application-for-Himmelblau-GroupMember.Read.All-Permissions/). The URL `https://login.microsoftonline.com/common/oauth2/nativeclient` should be used as a "Mobile and desktop applications" Redirect URI under the Authentication settings for the App Registration. The script was tested with the following permissions for the application:
+
+* email
+* Group.Read.All
+* offline_access
+* openid
+* profile
+* User.Read
+
+The script needs the tenant ID and client ID for the App Registration, and allows logging in with a username and password.
+It also demonstrates explicitly choosing an MFA method for the login, rather than using the default MFA method.
+
+To build `libhimmelblau` and test it with this script using (uv)[https://docs.astral.sh/uv/]:
+
+```sh
+uv tool install maturin
+uv venv && uv pip install patchelf cffi
+# build the library with python bindings and install it into the virtual environment
+maturin build --features pyapi && uv pip install --force-reinstall target/wheels/libhimmelblau-*.whl
+
+python example/msal_public_example.py
+```
