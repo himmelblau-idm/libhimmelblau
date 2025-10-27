@@ -1927,7 +1927,7 @@ checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libhimmelblau"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64 0.22.1",
  "browser-window",
@@ -1949,6 +1949,7 @@ dependencies = [
  "reqwest",
  "reqwest_cookie_store",
  "scraper",
+ "semver",
  "serde",
  "serde_bytes",
  "serde_json",

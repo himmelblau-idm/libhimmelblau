@@ -28,13 +28,21 @@ use kanidm_hsm_crypto::{
     structures::{LoadableMsDeviceEnrolmentKey, StorageKey as MachineKey},
 };
 use openssl::x509::X509;
+#[cfg(feature = "intune_portal_vers_selection")]
+use regex::Regex;
 use reqwest::header;
 use reqwest::redirect::Policy;
 #[cfg(feature = "proxyable")]
 use reqwest::Proxy;
 use reqwest::Url;
+#[cfg(feature = "intune_portal_vers_selection")]
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(feature = "intune_portal_vers_selection")]
+use std::collections::BTreeSet;
+#[cfg(feature = "intune_portal_vers_selection")]
+use std::error::Error;
 use std::{fmt, time::Duration};
 
 #[derive(Debug, Deserialize)]
@@ -350,14 +358,73 @@ impl PolicyDetails {
 }
 pub struct IntuneForLinux {
     client: reqwest::Client,
+    app_vers: String,
     service_endpoints: IntuneServiceEndpoints,
 }
 
+#[cfg(feature = "intune_portal_vers_selection")]
+pub const DEFAULT_URL: &str =
+    "https://packages.microsoft.com/ubuntu/24.04/prod/pool/main/i/intune-portal/";
+
+/// Fetch and parse available `intune-portal` versions, sorted with semver.
+#[cfg(feature = "intune_portal_vers_selection")]
+pub async fn fetch_intune_portal_versions(
+    url: Option<&str>,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let url = url.unwrap_or(DEFAULT_URL);
+
+    #[allow(unused_mut)]
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(3))
+        .redirect(Policy::none())
+        .cookie_store(true);
+
+    #[cfg(feature = "proxyable")]
+    {
+        if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
+            .ok()
+            .or_else(|| std::env::var("ALL_PROXY").ok())
+        {
+            let proxy = Proxy::https(proxy_var)?;
+            builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+        }
+    }
+
+    let client = builder.build()?;
+
+    let body = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    let re = Regex::new(r#"intune-portal_(\d+\.\d+\.\d+)-[A-Za-z0-9._-]+\.deb"#)?;
+
+    let mut set: BTreeSet<Version> = BTreeSet::new();
+
+    for caps in re.captures_iter(&body) {
+        if let Some(m) = caps.get(1) {
+            if let Ok(v) = Version::parse(m.as_str()) {
+                set.insert(v);
+            }
+        }
+    }
+
+    // Map back to strings, already sorted ascending.
+    Ok(set.into_iter().map(|v| v.to_string()).collect())
+}
+
 // Microsoft requires that the app version match a version of their Intune Portal for Linux.
-static APP_VERSION: &str = "1.2405.17";
+static APP_VERSION: &str = "1.2511.7";
 
 impl IntuneForLinux {
-    pub fn new(service_endpoints: IntuneServiceEndpoints) -> Result<Self, MsalError> {
+    pub fn new(
+        service_endpoints: IntuneServiceEndpoints,
+        #[cfg(feature = "intune_portal_vers_selection")] app_vers: Option<&str>,
+    ) -> Result<Self, MsalError> {
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
@@ -381,8 +448,14 @@ impl IntuneForLinux {
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
 
+        #[cfg(feature = "intune_portal_vers_selection")]
+        let app_vers = app_vers.unwrap_or(APP_VERSION).to_string();
+        #[cfg(not(feature = "intune_portal_vers_selection"))]
+        let app_vers = APP_VERSION.to_string();
+
         Ok(IntuneForLinux {
             client,
+            app_vers,
             service_endpoints,
         })
     }
@@ -402,7 +475,7 @@ impl IntuneForLinux {
             ),
             &[
                 ("api-version", "1.0".to_string()),
-                ("client-version", APP_VERSION.to_string()),
+                ("client-version", self.app_vers.clone()),
             ],
         )
         .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
@@ -424,7 +497,7 @@ impl IntuneForLinux {
 
         let payload = json!({
             "CertificateSigningRequest": STANDARD.encode(csr_der),
-            "AppVersion": APP_VERSION,
+            "AppVersion": &self.app_vers,
             "DeviceName": &attrs.device_display_name,
         });
 
@@ -482,7 +555,7 @@ impl IntuneForLinux {
             ),
             &[
                 ("api-version", "1.0".to_string()),
-                ("client-version", APP_VERSION.to_string()),
+                ("client-version", self.app_vers.clone()),
             ],
         )
         .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
@@ -530,7 +603,7 @@ impl IntuneForLinux {
             ),
             &[
                 ("api-version", "1.0".to_string()),
-                ("client-version", APP_VERSION.to_string()),
+                ("client-version", self.app_vers.clone()),
             ],
         )
         .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
@@ -576,7 +649,7 @@ impl IntuneForLinux {
             ),
             &[
                 ("api-version", "1.0".to_string()),
-                ("client-version", APP_VERSION.to_string()),
+                ("client-version", self.app_vers.clone()),
             ],
         )
         .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
@@ -621,7 +694,7 @@ impl IntuneForLinux {
             &[
                 ("api-version", "16.4".to_string()),
                 ("ssp", "LinuxCP".to_string()),
-                ("ssp-version", APP_VERSION.to_string()),
+                ("ssp-version", self.app_vers.clone()),
                 ("os", "Linux".to_string()),
                 ("mgmt-agent", "mdm".to_string()),
             ],

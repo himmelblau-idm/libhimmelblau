@@ -3,24 +3,18 @@
 
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
-    AuthInit, AuthOption, BrokerClientApplication, PublicClientApplication, DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue,
-    MfaMethodInfo, UserToken,
+    AuthInit, AuthOption, BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs,
+    MFAAuthContinue, MfaMethodInfo, PublicClientApplication, UserToken,
 };
 
+use kanidm_hsm_crypto::provider::{BoxedDynTpm, SoftTpm};
+use kanidm_hsm_crypto::structures::{
+    LoadableMachineKey, LoadableMsDeviceEnrolmentKey, LoadableMsHelloKey, LoadableMsOapxbcRsaKey,
+    SealedData, StorageKey,
+};
 #[cfg(feature = "tpm")]
 use kanidm_hsm_crypto::tpm::TpmTss;
-use kanidm_hsm_crypto::{
-    AuthValue,
-};
-use kanidm_hsm_crypto::provider::{
-    BoxedDynTpm,
-    SoftTpm,
-};
-use kanidm_hsm_crypto::structures::{
-    LoadableMsHelloKey, LoadableMachineKey, LoadableMsOapxbcRsaKey,
-    LoadableMsDeviceEnrolmentKey,
-    SealedData, StorageKey
-};
+use kanidm_hsm_crypto::AuthValue;
 use paste::paste;
 // Kerberos support temporarily disabled
 // use picky_krb::messages::AsRep;
@@ -48,7 +42,7 @@ where
         Ok(runtime) => {
             // Run async code without holding the GIL
             Ok(runtime.block_on(f))
-        },
+        }
         Err(e) => Err(to_pyerr!(e)),
     }
 }
@@ -164,7 +158,11 @@ impl PyMfaMethodInfo {
             "{} ({}{})",
             self.info.auth_method_id,
             self.info.display,
-            if self.info.is_default { " - DEFAULT" } else { "" }
+            if self.info.is_default {
+                " - DEFAULT"
+            } else {
+                ""
+            }
         )
     }
 }
@@ -183,7 +181,10 @@ impl PyMFAAuthContinue {
 
     #[getter]
     fn mfa_method(&self) -> PyResult<String> {
-        Ok(self.flow.mfa_methods.first()
+        Ok(self
+            .flow
+            .mfa_methods
+            .first()
             .cloned()
             .unwrap_or_else(String::new))
     }
@@ -225,19 +226,26 @@ impl PyMFAAuthContinue {
     }
 
     fn get_default_mfa_method(&self) -> PyResult<String> {
-        self.flow.get_default_mfa_method_details()
+        self.flow
+            .get_default_mfa_method_details()
             .map(|info| info.auth_method_id.clone())
             .ok_or_else(|| general_py_err!("No default MFA method found"))
     }
 
     /// Get detailed information about the default MFA method
     fn get_default_mfa_method_details(&self) -> PyResult<Option<PyMfaMethodInfo>> {
-        Ok(self.flow.get_default_mfa_method_details().map(|info| PyMfaMethodInfo { info }))
+        Ok(self
+            .flow
+            .get_default_mfa_method_details()
+            .map(|info| PyMfaMethodInfo { info }))
     }
 
     /// Get detailed information about a specific MFA method by ID
     fn get_mfa_method_by_id(&self, method_id: &str) -> PyResult<Option<PyMfaMethodInfo>> {
-        Ok(self.flow.get_mfa_method_by_id(method_id).map(|info| PyMfaMethodInfo { info }))
+        Ok(self
+            .flow
+            .get_mfa_method_by_id(method_id)
+            .map(|info| PyMfaMethodInfo { info }))
     }
 }
 
@@ -522,13 +530,9 @@ pub struct PyPublicClientApplication {
 #[pymethods]
 impl PyPublicClientApplication {
     #[new]
-    pub fn new(
-        client_id: &str,
-        authority: Option<&str>,
-    ) -> PyResult<Self> {
+    pub fn new(client_id: &str, authority: Option<&str>) -> PyResult<Self> {
         Ok(PyPublicClientApplication {
-            client: PublicClientApplication::new(client_id, authority)
-                .map_err(|e| to_pyerr!(e))?,
+            client: PublicClientApplication::new(client_id, authority).map_err(|e| to_pyerr!(e))?,
         })
     }
 
@@ -537,15 +541,14 @@ impl PyPublicClientApplication {
         Ok(PyAuthInit { auth_init })
     }
 
-    #[allow(clippy::needless_pass_by_value)]  // PyO3 requires owned types
+    #[allow(clippy::needless_pass_by_value)] // PyO3 requires owned types
     pub fn initiate_acquire_token_by_mfa_flow(
         &self,
         username: &str,
         password: Option<&str>,
         scopes: Vec<String>,
         auth_init: Option<&PyAuthInit>,
-        #[cfg(feature = "mfa_method_selection")]
-        mfa_method: Option<&str>,
+        #[cfg(feature = "mfa_method_selection")] mfa_method: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<PyMFAAuthContinue> {
         let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
@@ -558,8 +561,8 @@ impl PyPublicClientApplication {
             username,
             password,
             scopes_ref,
-            None,  // resource
-            &[],   // options
+            None, // resource
+            &[],  // options
             rust_auth_init
         );
         #[cfg(feature = "mfa_method_selection")]
@@ -570,8 +573,8 @@ impl PyPublicClientApplication {
             username,
             password,
             scopes_ref,
-            None,  // resource
-            &[],   // options
+            None, // resource
+            &[],  // options
             rust_auth_init,
             mfa_method
         );
@@ -584,8 +587,7 @@ impl PyPublicClientApplication {
         flow: &mut PyMFAAuthContinue,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        #[cfg(feature = "mfa_method_selection")]
-        selected_method: Option<&str>,
+        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<PyUserToken> {
         #[cfg(not(feature = "mfa_method_selection"))]
@@ -646,7 +648,11 @@ impl PyBrokerClientApplication {
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
         py: Python,
-    ) -> PyResult<(PyLoadableMsOapxbcRsaKey, PyLoadableMsDeviceEnrolmentKey, String)> {
+    ) -> PyResult<(
+        PyLoadableMsOapxbcRsaKey,
+        PyLoadableMsDeviceEnrolmentKey,
+        String,
+    )> {
         let (transport_key, cert_key, device_id) = run_async!(
             py,
             self.client,
@@ -759,15 +765,14 @@ impl PyBrokerClientApplication {
         Ok(PyAuthInit { auth_init })
     }
 
-    #[allow(clippy::needless_pass_by_value)]  // PyO3 requires owned types
+    #[allow(clippy::needless_pass_by_value)] // PyO3 requires owned types
     pub fn initiate_acquire_token_by_mfa_flow_for_device_enrollment(
         &self,
         username: &str,
         password: Option<&str>,
         options: Vec<PyAuthOption>,
         auth_init: Option<&PyAuthInit>,
-        #[cfg(feature = "mfa_method_selection")]
-        selected_method: Option<&str>,
+        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
         py: Python,
     ) -> PyResult<PyMFAAuthContinue> {
         let rust_options: Vec<AuthOption> = options.into_iter().map(|o| o.into()).collect();
@@ -805,8 +810,7 @@ impl PyBrokerClientApplication {
         flow: &mut PyMFAAuthContinue,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        #[cfg(feature = "mfa_method_selection")]
-        selected_method: Option<&str>,
+        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
         py: Python,
     ) -> PyResult<PyUserToken> {
         #[cfg(not(feature = "mfa_method_selection"))]
