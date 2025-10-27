@@ -1102,7 +1102,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         Some(&password),
         &[],
         None,
-        None,  // No specific MFA method
+        None, // No specific MFA method
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
@@ -1190,7 +1190,7 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
         auth_data.as_deref(),
         poll_attempt,
         flow,
-        None,  // No specific method selected
+        None, // No specific method selected
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
@@ -1298,7 +1298,8 @@ pub unsafe extern "C" fn mfa_auth_continue_mfa_method(
     }
     let flow = unsafe { &mut *flow };
     // Return the default MFA method ID if available
-    let method_id = flow.get_default_mfa_method_details()
+    let method_id = flow
+        .get_default_mfa_method_details()
         .map(|info| info.auth_method_id)
         .unwrap_or_else(|| {
             // If no default, return the first available method
@@ -2521,21 +2522,14 @@ pub unsafe extern "C" fn mfa_auth_continue_has_method(
 /// The calling function should ensure that `methods` was returned by
 /// mfa_auth_continue_available_methods and that `count` matches the count returned.
 #[no_mangle]
-pub unsafe extern "C" fn mfa_auth_continue_free_methods(
-    methods: *mut *mut c_char,
-    count: c_int,
-) {
+pub unsafe extern "C" fn mfa_auth_continue_free_methods(methods: *mut *mut c_char, count: c_int) {
     if methods.is_null() || count <= 0 {
         return;
     }
 
     // Reconstruct the boxed slice from the raw pointer
-    let slice = unsafe {
-        std::slice::from_raw_parts_mut(methods, count as usize)
-    };
-    let boxed_slice = unsafe {
-        Box::from_raw(slice)
-    };
+    let slice = unsafe { std::slice::from_raw_parts_mut(methods, count as usize) };
+    let boxed_slice = unsafe { Box::from_raw(slice) };
 
     // Free each string
     for str_ptr in boxed_slice.iter() {

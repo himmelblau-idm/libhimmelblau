@@ -391,8 +391,7 @@ pub async fn fetch_intune_portal_versions(
         }
     }
 
-    let client = builder
-        .build()?;
+    let client = builder.build()?;
 
     let body = client
         .get(url)
