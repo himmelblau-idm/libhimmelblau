@@ -28,6 +28,7 @@ interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window
 changepassword = []
 on_behalf_of = ["broker"]
 mfa_method_selection = []
+intune_portal_vers_selection = []
 
 [dependencies]
 crypto-glue = { version = "0.1.6" }
@@ -59,6 +60,7 @@ browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], o
 serde_bytes = "0.11.17"
 serde_urlencoded = "0.7.1"
 reqwest_cookie_store = "0.9.0"
+semver = "1.0.27"
 
 [build-dependencies]
 cbindgen = "0.29.0"
