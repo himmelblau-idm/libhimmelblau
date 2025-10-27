@@ -26,6 +26,7 @@ proxyable = []
 interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window/threadsafe"]
 changepassword = []
 on_behalf_of = ["broker"]
+intune_portal_vers_selection = []
 
 [dependencies]
 base64 = "^0.22.0"
@@ -56,6 +57,7 @@ browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], o
 serde_bytes = "0.11.17"
 serde_urlencoded = "0.7.1"
 reqwest_cookie_store = "0.8.0"
+semver = "1.0.27"
 
 [build-dependencies]
 cbindgen = "0.29.0"
