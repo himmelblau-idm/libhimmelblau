@@ -333,11 +333,17 @@ impl MFAAuthContinue {
         self.get_available_mfa_methods().len()
     }
 
-    /// Get details of the first default MFA method
+    /// Get details of the first default MFA method - if no default is specified, return the first MFA method, or None
     pub fn get_default_mfa_method_details(&self) -> Option<MfaMethodInfo> {
-        self.get_mfa_method_details()
+        if let Some(details) = self.get_mfa_method_details()
             .into_iter()
-            .find(|method| method.is_default)
+            .find(|method| method.is_default) {
+                Some(details)
+        } else if !self.mfa_methods.is_empty() {
+            Some(self.mfa_method_details[0].clone())
+        } else {
+            None
+        }
     }
 
     /// Get detailed information about a specific MFA method by ID
