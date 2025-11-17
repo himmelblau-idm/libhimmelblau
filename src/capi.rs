@@ -1170,7 +1170,6 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
         None => Some(poll_attempt as u32),
     };
     let flow = unsafe { &mut *flow };
-    #[cfg(not(feature = "mfa_method_selection"))]
     let resp = match run_async!(
         client,
         acquire_token_by_mfa_flow,
@@ -1178,19 +1177,6 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
         auth_data.as_deref(),
         poll_attempt,
         flow,
-    ) {
-        Ok(resp) => resp,
-        Err(e) => return e,
-    };
-    #[cfg(feature = "mfa_method_selection")]
-    let resp = match run_async!(
-        client,
-        acquire_token_by_mfa_flow,
-        &username,
-        auth_data.as_deref(),
-        poll_attempt,
-        flow,
-        None, // No specific method selected
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
@@ -1201,69 +1187,6 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
     no_error()
 }
 
-/// Obtain token by an MFA flow object, allowing selection of a specific MFA method.
-/// This function extends the standard MFA flow by enabling method selection.
-///
-/// * `out` - A UserToken containing an access_token.
-/// # Safety
-///
-/// The calling function should ensure that `client`, `username`, `auth_data`,
-/// `poll_attempt`, `flow`, and `selected_method` are valid pointers to their respective types.
-#[cfg(all(feature = "broker", feature = "mfa_method_selection"))]
-#[no_mangle]
-pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow_with_method(
-    client: *mut BrokerClientApplication,
-    username: *const c_char,
-    auth_data: *const c_char,
-    poll_attempt: c_int,
-    flow: *mut MFAAuthContinue,
-    selected_method: *const c_char,
-    out: *mut *mut UserToken,
-) -> *mut MSAL_ERROR {
-    // Ensure our out parameter is not NULL
-    if out.is_null() {
-        error!("Invalid output parameter!");
-        return make_error(
-            MSAL_ERROR_CODE::INVALID_POINTER,
-            "Invalid output parameter".to_string(),
-        );
-    }
-    let client = unsafe { &mut *client };
-    let username = match wrap_c_char(username) {
-        Some(username) => username,
-        None => {
-            error!("Invalid input username!");
-            return make_error(
-                MSAL_ERROR_CODE::INVALID_POINTER,
-                "Invalid input username".to_string(),
-            );
-        }
-    };
-    let auth_data = wrap_c_char(auth_data);
-    let poll_attempt = match auth_data {
-        Some(_) => None,
-        None => Some(poll_attempt as u32),
-    };
-    let selected_method = wrap_c_char(selected_method);
-    let flow = unsafe { &mut *flow };
-
-    let resp = match run_async!(
-        client,
-        acquire_token_by_mfa_flow,
-        &username,
-        auth_data.as_deref(),
-        poll_attempt,
-        flow,
-        selected_method.as_deref(),
-    ) {
-        Ok(resp) => resp,
-        Err(e) => return e,
-    };
-    unsafe {
-        *out = Box::into_raw(Box::new(resp));
-    }
-    no_error()
-}
 
 /// Get the msg from a MFAAuthContinue flow
 ///

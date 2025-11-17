@@ -40,9 +40,17 @@ if SELECTED_MFA_METHOD not in MFA_METHODS:
     raise ValueError(f"{SELECTED_MFA_METHOD} is not in list of recognized MFA methods")
 
 try:
+    # Note: The selected method is passed to initiate_acquire_token_by_mfa_flow
+    # and stored in the flow object for later use
     if SELECTED_MFA_METHOD:
         print(f"Using MFA method: {SELECTED_MFA_METHOD}")
-        flow = client.initiate_acquire_token_by_mfa_flow_with_method(username, password, scopes, None, SELECTED_MFA_METHOD)
+        # Pass the selected MFA method if the feature is enabled
+        try:
+            flow = client.initiate_acquire_token_by_mfa_flow(username, password, scopes, None, SELECTED_MFA_METHOD)
+        except TypeError:
+            # If the method parameter is not supported (feature not enabled), fall back
+            print("MFA method selection not supported, using default method")
+            flow = client.initiate_acquire_token_by_mfa_flow(username, password, scopes, None)
     else:
         flow = client.initiate_acquire_token_by_mfa_flow(username, password, scopes, None)
 except Exception as e:
@@ -62,7 +70,8 @@ if flow.msg:
 for i in range(0, flow.max_poll_attempts):
     try:
         # poll for success while waiting for the selected MFA method to be evaluated
-        user_token = client.acquire_token_by_mfa_flow_with_method(username, flow, None, i, flow.mfa_method)
+        # The method is now stored in the flow object from initiate_acquire_token_by_mfa_flow
+        user_token = client.acquire_token_by_mfa_flow(username, flow, None, i)
     except Exception as e:
         print(e)
         if "MFAPollContinue" in str(e):
