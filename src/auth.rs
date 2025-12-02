@@ -439,6 +439,29 @@ struct CredType {
     if_exists_result: u8,
 }
 
+impl CredType {
+    /// Whether the user exists in the directory
+    pub fn account_exists(&self) -> bool {
+        /* `ifExistsResult` meanings:
+            — 0: the account exists and uses that domain for authentication (i.e., “normal” cloud account)
+            — 1: the account does not exist
+            — 2: response is being throttled (rate-limiting)
+            — 4: some server error
+            — 5: the account exists, but is set up to authenticate with a different identity provider (e.g. personal Microsoft account / consumer account / “other IdP”)
+            — 6: the account exists, and is set up to support both the domain and a different ID provider (i.e. dual mode)
+         */
+        if self.if_exists_result == 0 || self.if_exists_result == 5 || self.if_exists_result == 6 {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_personal_account(&self) -> bool {
+        self.if_exists_result == 5
+    }
+}
+
 #[derive(Default, Clone, Deserialize, Serialize)]
 pub struct IdToken {
     pub name: String,
@@ -1565,7 +1588,11 @@ pub struct AuthInit {
 impl AuthInit {
     /// Whether the user exists in the directory
     pub fn exists(&self) -> bool {
-        self.cred_type.if_exists_result == 0
+        self.cred_type.account_exists()
+    }
+
+    pub fn is_personal_account(&self) -> bool {
+        self.cred_type.is_personal_account()
     }
 
     /// Whether passwordless authentication was negotiated
@@ -1573,11 +1600,14 @@ impl AuthInit {
         // Just list whether any passwordless type is possible to negotiate. If
         // we attempt to pick the preferred method, that method might not even
         // be enabled or possible (facepalm MS).
+        // If it's a personal account, we skip the password prompt since we have
+        // to perform a DAG anyway.
         self.cred_type.credentials.has_access_pass.unwrap_or(false)
             || (self.cred_type.credentials.has_remote_ngc.unwrap_or(false)
                 && self.cred_type.credentials.remote_ngc_params.is_some())
             || (self.cred_type.credentials.has_fido.unwrap_or(false)
                 && self.cred_type.credentials.fido_params.is_some())
+            || self.cred_type.is_personal_account()
     }
 }
 
@@ -1757,6 +1787,45 @@ impl PublicClientApplication {
         }
     }
 
+    async fn initiate_personal_device_flow(
+        &self,
+        scopes: Vec<&str>,
+    ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        let mut all_scopes = vec!["openid", "profile", "offline_access"];
+        all_scopes.extend(scopes);
+        let scopes_str = all_scopes.join(" ");
+
+        let params = [("client_id", self.client_id()), ("scope", &scopes_str)];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let json_resp: DeviceAuthorizationResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Ok(json_resp)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
     /// Obtain token by a device flow object, with customizable polling effect.
     ///
     /// # Arguments
@@ -1786,6 +1855,46 @@ impl PublicClientApplication {
         let resp = self
             .client()
             .post(format!("{}/oauth2/v2.0/token", self.authority()?))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+        if resp.status().is_success() {
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+
+            Ok(token)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    async fn acquire_token_by_personal_device_flow(
+        &self,
+        flow: DeviceAuthorizationResponse,
+    ) -> Result<UserToken, MsalError> {
+        let params = [
+            ("client_id", self.client_id()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ("device_code", &flow.device_code),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let resp = self
+            .client()
+            .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
             .body(payload)
@@ -2401,6 +2510,16 @@ impl PublicClientApplication {
                 }
             };
         }
+        macro_rules! dag_personal_fallback {
+            () => {
+                let flow = self
+                    .initiate_personal_device_flow(scopes)
+                    .await?;
+                let mut flow: MFAAuthContinue = flow.into();
+                flow.resource = resource.map(|s| s.to_string());
+                return Ok(flow);
+            };
+        }
         let request_id = Uuid::new_v4().to_string();
         let (mut auth_config, cred_type) = if let Some(auth_init) = auth_init {
             (auth_init.auth_config, auth_init.cred_type)
@@ -2618,7 +2737,10 @@ impl PublicClientApplication {
                 "Authentication throttled. Wait a minute and try again.".to_string(),
             ));
         }
-        if cred_type.if_exists_result != 0 {
+        if cred_type.is_personal_account() {
+            dag_personal_fallback!();
+        }
+        if !cred_type.account_exists() {
             return Err(MsalError::GeneralFailure(
                 "An account with that name does not exist.".to_string(),
             ));
@@ -3639,37 +3761,73 @@ impl PublicClientApplication {
         flow: &mut MFAAuthContinue,
     ) -> Result<UserToken, MsalError> {
         if let Some(dag_flow) = &flow.dag {
-            // The initiate phase already fell back to a DAG
-            return match self.acquire_token_by_device_flow(dag_flow.clone()).await {
-                Ok(token) => {
-                    if token.spn()?.to_lowercase() != username.to_lowercase() {
-                        return Err(MsalError::GeneralFailure(
-                            "The authenticating user did not match".to_string(),
-                        ));
+            // This is a personal account DAG, not a work/school account DAG.
+            if dag_flow.verification_uri.contains("www.microsoft.com/link") {
+                return match self.acquire_token_by_personal_device_flow(dag_flow.clone()).await {
+                    Ok(token) => {
+                        if token.spn()?.to_lowercase() != username.to_lowercase() {
+                            return Err(MsalError::GeneralFailure(
+                                "The authenticating user did not match".to_string(),
+                            ));
+                        }
+                        // Exchange the Portal MFA token for the requested token
+                        // (unless the resource is enrollment.manage.microsoft.com,
+                        // which a personal account cannot request).
+                        if let Some(resource) = &flow.resource {
+                            if !resource.contains("enrollment.manage.microsoft.com") {
+                                let scope = format!("{}/.default", resource);
+                                return self.acquire_token_by_refresh_token(&token.refresh_token, vec![&scope])
+                                    .await;
+                            }
+                        }
+                        Ok(token)
                     }
-                    // Exchange the Portal MFA token for the requested token
-                    let token = if let Some(resource) = &flow.resource {
-                        let scope = format!("{}/.default", resource);
-                        self.acquire_token_by_refresh_token(&token.refresh_token, vec![&scope])
-                            .await?
-                    } else {
-                        token
-                    };
-                    Ok(token)
-                }
-                Err(MsalError::AcquireTokenFailed(ref resp)) => {
-                    if resp.error_codes.contains(&AUTH_PENDING) {
-                        info!("Polling for acquire_token_by_device_flow");
-                        return Err(MsalError::MFAPollContinue);
+                    Err(MsalError::AcquireTokenFailed(ref resp)) => {
+                        if resp.error_codes.contains(&AUTH_PENDING) {
+                            info!("Polling for acquire_token_by_personal_device_flow");
+                            return Err(MsalError::MFAPollContinue);
+                        }
+                        error!(
+                            "acquire_token_by_mfa_flow_internal: {}",
+                            resp.error_description
+                        );
+                        Err(MsalError::AcquireTokenFailed(resp.clone()))
                     }
-                    error!(
-                        "acquire_token_by_mfa_flow_internal: {}",
-                        resp.error_description
-                    );
-                    Err(MsalError::AcquireTokenFailed(resp.clone()))
-                }
-                Err(e) => Err(e),
-            };
+                    Err(e) => Err(e),
+                };
+            } else {
+                // The initiate phase already fell back to a DAG
+                return match self.acquire_token_by_device_flow(dag_flow.clone()).await {
+                    Ok(token) => {
+                        if token.spn()?.to_lowercase() != username.to_lowercase() {
+                            return Err(MsalError::GeneralFailure(
+                                "The authenticating user did not match".to_string(),
+                            ));
+                        }
+                        // Exchange the Portal MFA token for the requested token
+                        let token = if let Some(resource) = &flow.resource {
+                            let scope = format!("{}/.default", resource);
+                            self.acquire_token_by_refresh_token(&token.refresh_token, vec![&scope])
+                                .await?
+                        } else {
+                            token
+                        };
+                        Ok(token)
+                    }
+                    Err(MsalError::AcquireTokenFailed(ref resp)) => {
+                        if resp.error_codes.contains(&AUTH_PENDING) {
+                            info!("Polling for acquire_token_by_device_flow");
+                            return Err(MsalError::MFAPollContinue);
+                        }
+                        error!(
+                            "acquire_token_by_mfa_flow_internal: {}",
+                            resp.error_description
+                        );
+                        Err(MsalError::AcquireTokenFailed(resp.clone()))
+                    }
+                    Err(e) => Err(e),
+                };
+            }
         }
 
         // Use the method that was selected during initiate_acquire_token
