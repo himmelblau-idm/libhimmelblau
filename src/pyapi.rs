@@ -587,10 +587,8 @@ impl PyPublicClientApplication {
         flow: &mut PyMFAAuthContinue,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<PyUserToken> {
-        #[cfg(not(feature = "mfa_method_selection"))]
         let token = run_async!(
             py,
             self.client,
@@ -599,17 +597,6 @@ impl PyPublicClientApplication {
             auth_data,
             poll_attempt,
             &mut flow.flow
-        );
-        #[cfg(feature = "mfa_method_selection")]
-        let token = run_async!(
-            py,
-            self.client,
-            acquire_token_by_mfa_flow,
-            username,
-            auth_data,
-            poll_attempt,
-            &mut flow.flow,
-            selected_method
         );
         Ok(PyUserToken { token })
     }
@@ -810,10 +797,8 @@ impl PyBrokerClientApplication {
         flow: &mut PyMFAAuthContinue,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
         py: Python,
     ) -> PyResult<PyUserToken> {
-        #[cfg(not(feature = "mfa_method_selection"))]
         let token = run_async!(
             py,
             self.client,
@@ -822,17 +807,6 @@ impl PyBrokerClientApplication {
             auth_data,
             poll_attempt,
             &mut flow.flow,
-        );
-        #[cfg(feature = "mfa_method_selection")]
-        let token = run_async!(
-            py,
-            self.client,
-            acquire_token_by_mfa_flow,
-            username,
-            auth_data,
-            poll_attempt,
-            &mut flow.flow,
-            selected_method,
         );
         Ok(PyUserToken { token })
     }
