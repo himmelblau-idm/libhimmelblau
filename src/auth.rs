@@ -337,10 +337,12 @@ impl MFAAuthContinue {
 
     /// Get details of the first default MFA method - if no default is specified, return the first MFA method, or None
     pub fn get_default_mfa_method_details(&self) -> Option<MfaMethodInfo> {
-        if let Some(details) = self.get_mfa_method_details()
+        if let Some(details) = self
+            .get_mfa_method_details()
             .into_iter()
-            .find(|method| method.is_default) {
-                Some(details)
+            .find(|method| method.is_default)
+        {
+            Some(details)
         } else if !self.mfa_methods.is_empty() {
             Some(self.mfa_method_details[0].clone())
         } else {
@@ -443,18 +445,14 @@ impl CredType {
     /// Whether the user exists in the directory
     pub fn account_exists(&self) -> bool {
         /* `ifExistsResult` meanings:
-            — 0: the account exists and uses that domain for authentication (i.e., “normal” cloud account)
-            — 1: the account does not exist
-            — 2: response is being throttled (rate-limiting)
-            — 4: some server error
-            — 5: the account exists, but is set up to authenticate with a different identity provider (e.g. personal Microsoft account / consumer account / “other IdP”)
-            — 6: the account exists, and is set up to support both the domain and a different ID provider (i.e. dual mode)
-         */
-        if self.if_exists_result == 0 || self.if_exists_result == 5 || self.if_exists_result == 6 {
-            true
-        } else {
-            false
-        }
+           — 0: the account exists and uses that domain for authentication (i.e., “normal” cloud account)
+           — 1: the account does not exist
+           — 2: response is being throttled (rate-limiting)
+           — 4: some server error
+           — 5: the account exists, but is set up to authenticate with a different identity provider (e.g. personal Microsoft account / consumer account / “other IdP”)
+           — 6: the account exists, and is set up to support both the domain and a different ID provider (i.e. dual mode)
+        */
+        self.if_exists_result == 0 || self.if_exists_result == 5 || self.if_exists_result == 6
     }
 
     pub fn is_personal_account(&self) -> bool {
@@ -2512,9 +2510,7 @@ impl PublicClientApplication {
         }
         macro_rules! dag_personal_fallback {
             () => {
-                let flow = self
-                    .initiate_personal_device_flow(scopes)
-                    .await?;
+                let flow = self.initiate_personal_device_flow(scopes).await?;
                 let mut flow: MFAAuthContinue = flow.into();
                 flow.resource = resource.map(|s| s.to_string());
                 return Ok(flow);
@@ -3763,7 +3759,10 @@ impl PublicClientApplication {
         if let Some(dag_flow) = &flow.dag {
             // This is a personal account DAG, not a work/school account DAG.
             if dag_flow.verification_uri.contains("www.microsoft.com/link") {
-                return match self.acquire_token_by_personal_device_flow(dag_flow.clone()).await {
+                return match self
+                    .acquire_token_by_personal_device_flow(dag_flow.clone())
+                    .await
+                {
                     Ok(token) => {
                         if token.spn()?.to_lowercase() != username.to_lowercase() {
                             return Err(MsalError::GeneralFailure(
@@ -3776,7 +3775,11 @@ impl PublicClientApplication {
                         if let Some(resource) = &flow.resource {
                             if !resource.contains("enrollment.manage.microsoft.com") {
                                 let scope = format!("{}/.default", resource);
-                                return self.acquire_token_by_refresh_token(&token.refresh_token, vec![&scope])
+                                return self
+                                    .acquire_token_by_refresh_token(
+                                        &token.refresh_token,
+                                        vec![&scope],
+                                    )
                                     .await;
                             }
                         }
@@ -4734,12 +4737,7 @@ impl BrokerClientApplication {
         flow: &mut MFAAuthContinue,
     ) -> Result<UserToken, MsalError> {
         self.app
-            .acquire_token_by_mfa_flow(
-                username,
-                auth_data,
-                poll_attempt,
-                flow,
-            )
+            .acquire_token_by_mfa_flow(username, auth_data, poll_attempt, flow)
             .await
     }
 
