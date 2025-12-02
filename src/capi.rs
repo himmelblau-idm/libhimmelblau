@@ -1187,7 +1187,6 @@ pub unsafe extern "C" fn broker_acquire_token_by_mfa_flow(
     no_error()
 }
 
-
 /// Get the msg from a MFAAuthContinue flow
 ///
 /// # Safety
