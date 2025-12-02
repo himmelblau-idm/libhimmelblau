@@ -302,13 +302,14 @@ impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
 
 impl MFAAuthContinue {
     /// Get the default MFA method (for backwards compatibility)
-    pub fn mfa_method(&self) -> Option<String> {
+    pub fn mfa_method(&self) -> String {
         if let Some(method) = self.get_default_mfa_method_details() {
-            Some(method.auth_method_id)
+            method.auth_method_id
         } else if !self.mfa_methods.is_empty() {
-            Some(self.mfa_methods[0].clone())
+            self.mfa_methods[0].clone()
         } else {
-            None
+            // This happens with a DAG fallback
+            "".to_string()
         }
     }
 
