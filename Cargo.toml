@@ -61,6 +61,7 @@ serde_bytes = "0.11.17"
 serde_urlencoded = "0.7.1"
 reqwest_cookie_store = "0.9.0"
 semver = "1.0.27"
+libkrimes = { git = "https://github.com/kanidm/libkrimes.git", features = ["keyring"] }
 
 [build-dependencies]
 cbindgen = "0.29.0"
