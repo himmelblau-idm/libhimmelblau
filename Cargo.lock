@@ -2077,7 +2077,7 @@ checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libhimmelblau"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "base64 0.22.1",
  "browser-window",
