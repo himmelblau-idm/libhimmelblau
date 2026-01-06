@@ -266,6 +266,10 @@ pub struct MFAAuthContinue {
     pub mfa_methods: Vec<String>,
     pub mfa_method_details: Vec<MfaMethodInfo>,
     pub selected_mfa_method_id: Option<String>,
+    /// Authorization code received directly from login (when MFA not required).
+    /// When set, acquire_token_by_mfa_flow should skip polling and exchange
+    /// this code directly for an access token.
+    pub auth_code: Option<String>,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -1306,6 +1310,12 @@ pub enum AuthOption {
     Passwordless,
     PasswordlessFido,
     NoDAGFallback,
+    /// Demand ngcmfa in the amr_values, which forces MFA authentication.
+    /// This should be used for remote connections (SSH) where we want to ensure
+    /// MFA is enforced. For local terminal authentication (GDM, etc.), this
+    /// should NOT be set - let the natural passwordless auth flow happen without
+    /// prematurely triggering MFA notifications.
+    ForceMFA,
 }
 
 pub(crate) struct ClientApplication {
@@ -2343,6 +2353,48 @@ impl PublicClientApplication {
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
             self.parse_auth_config(&text, false, password_change)
+        } else if resp.status().is_redirection() {
+            let redirect = resp.headers()["location"]
+                .to_str()
+                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let url =
+                Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let params = url.query_pairs().collect::<Vec<_>>();
+
+            // Check for errors returned in the redirect URL parameters.
+            if let Some((_, error_description)) =
+                params.iter().find(|(k, _)| k == "error_description")
+            {
+                let error_code_regex = Regex::new(r"AADSTS(\d+):");
+
+                if let Ok(regex) = error_code_regex {
+                    if let Some(captures) = regex.captures(error_description) {
+                        if let Some(code_match) = captures.get(1) {
+                            if let Ok(code) = code_match.as_str().parse::<u32>() {
+                                return Err(MsalError::AADSTSError(AADSTSError::new(
+                                    code,
+                                    Some(error_description.to_string()),
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                return Err(MsalError::GeneralFailure(format!(
+                    "Unknown error in request to {}: {}",
+                    url, error_description
+                )));
+            }
+
+            let (_, code) =
+                params
+                    .iter()
+                    .find(|(k, _)| k == "code")
+                    .ok_or(MsalError::InvalidParse(
+                        "Authorization code missing from redirect".to_string(),
+                    ))?;
+            debug!("Received auth code directly from login redirect");
+            Err(MsalError::AuthCodeReceived(code.to_string()))
         } else {
             Err(MsalError::GeneralFailure(resp.text().await.map_err(
                 |e| {
@@ -2377,8 +2429,12 @@ impl PublicClientApplication {
         options: &[AuthOption],
     ) -> Result<AuthInit, MsalError> {
         let request_id = Uuid::new_v4().to_string();
+        // Only demand ngcmfa if ForceMFA option is set. This allows callers to
+        // decide based on context (local terminal vs remote connection) whether
+        // to trigger MFA notifications during the user existence check.
+        let force_mfa = options.contains(&AuthOption::ForceMFA);
         let auth_config = self
-            .request_auth_config_internal(vec![], &request_id, resource, true)
+            .request_auth_config_internal(vec![], &request_id, resource, force_mfa)
             .await?;
         let cred_type = self
             .get_cred_type(username, &auth_config, &request_id, options)
@@ -2562,6 +2618,7 @@ impl PublicClientApplication {
                             is_default: true,
                         }],
                         selected_mfa_method_id: Some("AccessPass".to_string()),
+                        auth_code: None,
                     });
                 }
             };
@@ -2617,6 +2674,7 @@ impl PublicClientApplication {
                                     is_default: true
                                 }],
                                 selected_mfa_method_id: Some("PhoneAppNotification".to_string()),
+                                auth_code: None,
                             });
                         }
                     }
@@ -2677,6 +2735,7 @@ impl PublicClientApplication {
                                     is_default: true,
                                 }],
                                 selected_mfa_method_id: Some("FidoKey".to_string()),
+                                auth_code: None,
                             });
                         }
                     }
@@ -2988,11 +3047,39 @@ impl PublicClientApplication {
                             .map(|proof| proof.into())
                             .collect(),
                         selected_mfa_method_id: Some(selected_auth_method.auth_method_id.clone()),
+                        auth_code: None,
                     })
                 } else {
                     info!("No MFA methods found");
                     dag_fallback!();
                 }
+            }
+            Err(MsalError::AuthCodeReceived(auth_code)) => {
+                // We received an auth code directly from the login response.
+                // Create a flow that tells PAM to poll once, and we'll exchange
+                // the auth code for tokens.
+                Ok(MFAAuthContinue {
+                    msg: "".to_string(),
+                    entropy: None,
+                    max_poll_attempts: Some(1),
+                    polling_interval: Some(0),
+                    session_id: String::new(),
+                    flow_token: String::new(),
+                    ctx: String::new(),
+                    canary: String::new(),
+                    url_end_auth: None,
+                    url_post: String::new(),
+                    url_session_state: None,
+                    resource: resource.map(|s| s.to_string()),
+                    dag: None,
+                    fido_challenge: None,
+                    fido_allow_list: None,
+                    cross_domain_canary: None,
+                    mfa_methods: vec![],
+                    mfa_method_details: vec![],
+                    selected_mfa_method_id: None,
+                    auth_code: Some(auth_code),
+                })
             }
             Err(e) => {
                 error!("{:?}", e);
@@ -3730,6 +3817,18 @@ impl PublicClientApplication {
         poll_attempt: Option<u32>,
         flow: &mut MFAAuthContinue,
     ) -> Result<UserToken, MsalError> {
+        // If we received an auth code directly from login (no MFA required),
+        // exchange it for tokens immediately.
+        if let Some(auth_code) = flow.auth_code.take() {
+            return self
+                .exchange_authorization_code_for_access_token_internal(
+                    auth_code,
+                    flow.resource.as_deref(),
+                    None,
+                )
+                .await;
+        }
+
         if let Some(dag_flow) = &flow.dag {
             // This is a personal account DAG, not a work/school account DAG.
             if dag_flow.verification_uri.contains("www.microsoft.com/link") {

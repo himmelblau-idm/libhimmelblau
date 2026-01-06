@@ -83,6 +83,9 @@ pub enum MsalError {
     SkipMfaRegistration(String, Option<String>, String),
     /// ConvergedConsent
     ConsentRequested(String),
+    /// An authorization code was received directly from login (no MFA required).
+    /// The String contains the auth code to exchange for tokens.
+    AuthCodeReceived(String),
 }
 
 impl fmt::Display for MsalError {
@@ -115,6 +118,9 @@ impl fmt::Display for MsalError {
             | MsalError::PasswordRequired
             | MsalError::SkipMfaRegistration(..) => write!(f, "Unexpected error"),
             MsalError::ConsentRequested(msg) => write!(f, "{}", msg),
+            MsalError::AuthCodeReceived(_) => {
+                write!(f, "Authorization code received directly from login")
+            }
         }
     }
 }

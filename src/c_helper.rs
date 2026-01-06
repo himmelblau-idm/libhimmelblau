@@ -207,6 +207,7 @@ pub enum MSAL_ERROR_CODE {
     PASSWORD_REQUIRED,
     SKIP_MFA_REGISTRATION,
     CONSENT_REQUESTED,
+    AUTH_CODE_RECEIVED,
 }
 
 #[repr(C)]
@@ -245,6 +246,7 @@ impl From<MsalError> for MSAL_ERROR_CODE {
             MsalError::PasswordRequired => MSAL_ERROR_CODE::PASSWORD_REQUIRED,
             MsalError::SkipMfaRegistration(_, _, _) => MSAL_ERROR_CODE::SKIP_MFA_REGISTRATION,
             MsalError::ConsentRequested(_) => MSAL_ERROR_CODE::CONSENT_REQUESTED,
+            MsalError::AuthCodeReceived(_) => MSAL_ERROR_CODE::AUTH_CODE_RECEIVED,
         }
     }
 }
