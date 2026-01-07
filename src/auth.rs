@@ -266,6 +266,13 @@ pub struct MFAAuthContinue {
     pub mfa_methods: Vec<String>,
     pub mfa_method_details: Vec<MfaMethodInfo>,
     pub selected_mfa_method_id: Option<String>,
+    /// Authorization code received directly from login (when MFA not required).
+    /// When set, acquire_token_by_mfa_flow should skip polling and exchange
+    /// this code directly for an access token.
+    pub auth_code: Option<String>,
+    /// Whether the FIDO method is a passkey (cross-device capable).
+    /// Used to filter out passkeys from default MFA method selection.
+    pub fido_is_passkey: bool,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -298,7 +305,12 @@ impl MFAAuthContinue {
         if let Some(method) = self.get_default_mfa_method_details() {
             method.auth_method_id
         } else if !self.mfa_methods.is_empty() {
-            self.mfa_methods[0].clone()
+            for method in self.get_mfa_method_details() {
+                if !self.mfa_method_is_passkey(&method) {
+                    return method.auth_method_id.clone();
+                }
+            }
+            "".to_string()
         } else {
             // This happens with a DAG fallback
             "".to_string()
@@ -327,16 +339,29 @@ impl MFAAuthContinue {
         self.get_available_mfa_methods().len()
     }
 
+    fn mfa_method_is_passkey(&self, method: &MfaMethodInfo) -> bool {
+        if method.display.to_lowercase() == "fidokey" {
+            self.fido_is_passkey
+        } else {
+            false
+        }
+    }
+
     /// Get details of the first default MFA method - if no default is specified, return the first MFA method, or None
     pub fn get_default_mfa_method_details(&self) -> Option<MfaMethodInfo> {
         if let Some(details) = self
             .get_mfa_method_details()
             .into_iter()
-            .find(|method| method.is_default)
+            .find(|method| method.is_default && !self.mfa_method_is_passkey(method))
         {
             Some(details)
         } else if !self.mfa_methods.is_empty() {
-            Some(self.mfa_method_details[0].clone())
+            for method in self.get_mfa_method_details() {
+                if !self.mfa_method_is_passkey(&method) {
+                    return Some(method);
+                }
+            }
+            None
         } else {
             None
         }
@@ -1306,6 +1331,13 @@ pub enum AuthOption {
     Passwordless,
     PasswordlessFido,
     NoDAGFallback,
+    /// Demand ngcmfa in the amr_values, which forces MFA authentication.
+    /// This should be used for remote connections (SSH) where we want to ensure
+    /// MFA is enforced. For local terminal authentication (GDM, etc.), this
+    /// should NOT be set - let the natural passwordless auth flow happen without
+    /// prematurely triggering MFA notifications.
+    #[cfg(feature = "optional_mfa")]
+    ForceMFA,
 }
 
 pub(crate) struct ClientApplication {
@@ -2343,6 +2375,48 @@ impl PublicClientApplication {
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
             self.parse_auth_config(&text, false, password_change)
+        } else if resp.status().is_redirection() {
+            let redirect = resp.headers()["location"]
+                .to_str()
+                .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let url =
+                Url::parse(redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+            let params = url.query_pairs().collect::<Vec<_>>();
+
+            // Check for errors returned in the redirect URL parameters.
+            if let Some((_, error_description)) =
+                params.iter().find(|(k, _)| k == "error_description")
+            {
+                let error_code_regex = Regex::new(r"AADSTS(\d+):");
+
+                if let Ok(regex) = error_code_regex {
+                    if let Some(captures) = regex.captures(error_description) {
+                        if let Some(code_match) = captures.get(1) {
+                            if let Ok(code) = code_match.as_str().parse::<u32>() {
+                                return Err(MsalError::AADSTSError(AADSTSError::new(
+                                    code,
+                                    Some(error_description.to_string()),
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                return Err(MsalError::GeneralFailure(format!(
+                    "Unknown error in request to {}: {}",
+                    url, error_description
+                )));
+            }
+
+            let (_, code) =
+                params
+                    .iter()
+                    .find(|(k, _)| k == "code")
+                    .ok_or(MsalError::InvalidParse(
+                        "Authorization code missing from redirect".to_string(),
+                    ))?;
+            debug!("Received auth code directly from login redirect");
+            Err(MsalError::AuthCodeReceived(code.to_string()))
         } else {
             Err(MsalError::GeneralFailure(resp.text().await.map_err(
                 |e| {
@@ -2377,8 +2451,15 @@ impl PublicClientApplication {
         options: &[AuthOption],
     ) -> Result<AuthInit, MsalError> {
         let request_id = Uuid::new_v4().to_string();
+        // Only demand ngcmfa if ForceMFA option is set. This allows callers to
+        // decide based on context (local terminal vs remote connection) whether
+        // to trigger MFA notifications during the user existence check.
+        #[cfg(feature = "optional_mfa")]
+        let force_mfa = options.contains(&AuthOption::ForceMFA);
+        #[cfg(not(feature = "optional_mfa"))]
+        let force_mfa = true;
         let auth_config = self
-            .request_auth_config_internal(vec![], &request_id, resource, true)
+            .request_auth_config_internal(vec![], &request_id, resource, force_mfa)
             .await?;
         let cred_type = self
             .get_cred_type(username, &auth_config, &request_id, options)
@@ -2424,13 +2505,20 @@ impl PublicClientApplication {
         #[cfg(not(feature = "mfa_method_selection"))]
         let mfa_method: Option<&str> = None;
 
+        #[cfg(feature = "optional_mfa")]
+        let force_mfa = options.contains(&AuthOption::ForceMFA);
+        #[cfg(not(feature = "optional_mfa"))]
+        let force_mfa = true;
+
         macro_rules! dag_fallback {
             () => {
                 if !options.contains(&AuthOption::NoDAGFallback) {
                     let mut dag_scopes: Vec<String> =
                         scopes.into_iter().map(|s| s.to_string()).collect();
                     // Enforce MFA via the azure portal
-                    dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    if force_mfa {
+                        dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    }
                     info!("MFA auth failed, falling back to Device Authorization Grant.");
                     let flow = self
                         .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
@@ -2469,7 +2557,9 @@ impl PublicClientApplication {
                     let mut dag_scopes: Vec<String> =
                         scopes.into_iter().map(|s| s.to_string()).collect();
                     // Enforce MFA via the azure portal
-                    dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    if force_mfa {
+                        dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    }
                     info!("MFA auth failed, falling back to Device Authorization Grant.");
                     let flow = self
                         .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
@@ -2495,7 +2585,7 @@ impl PublicClientApplication {
             (auth_init.auth_config, auth_init.cred_type)
         } else {
             let auth_config = match self
-                .request_auth_config_internal(scopes.clone(), &request_id, resource, true)
+                .request_auth_config_internal(scopes.clone(), &request_id, resource, force_mfa)
                 .await
             {
                 Ok(auth_config) => auth_config,
@@ -2562,6 +2652,8 @@ impl PublicClientApplication {
                             is_default: true,
                         }],
                         selected_mfa_method_id: Some("AccessPass".to_string()),
+                        auth_code: None,
+                        fido_is_passkey: false,
                     });
                 }
             };
@@ -2617,6 +2709,8 @@ impl PublicClientApplication {
                                     is_default: true
                                 }],
                                 selected_mfa_method_id: Some("PhoneAppNotification".to_string()),
+                                auth_code: None,
+                                fido_is_passkey: false,
                             });
                         }
                     }
@@ -2677,6 +2771,8 @@ impl PublicClientApplication {
                                     is_default: true,
                                 }],
                                 selected_mfa_method_id: Some("FidoKey".to_string()),
+                                auth_code: None,
+                                fido_is_passkey: false,
                             });
                         }
                     }
@@ -2988,11 +3084,41 @@ impl PublicClientApplication {
                             .map(|proof| proof.into())
                             .collect(),
                         selected_mfa_method_id: Some(selected_auth_method.auth_method_id.clone()),
+                        auth_code: None,
+                        fido_is_passkey: fido_is_a_passkey,
                     })
                 } else {
                     info!("No MFA methods found");
                     dag_fallback!();
                 }
+            }
+            Err(MsalError::AuthCodeReceived(auth_code)) => {
+                // We received an auth code directly from the login response.
+                // Create a flow that tells PAM to poll once, and we'll exchange
+                // the auth code for tokens.
+                Ok(MFAAuthContinue {
+                    msg: "".to_string(),
+                    entropy: None,
+                    max_poll_attempts: Some(1),
+                    polling_interval: Some(0),
+                    session_id: String::new(),
+                    flow_token: String::new(),
+                    ctx: String::new(),
+                    canary: String::new(),
+                    url_end_auth: None,
+                    url_post: String::new(),
+                    url_session_state: None,
+                    resource: resource.map(|s| s.to_string()),
+                    dag: None,
+                    fido_challenge: None,
+                    fido_allow_list: None,
+                    cross_domain_canary: None,
+                    mfa_methods: vec![],
+                    mfa_method_details: vec![],
+                    selected_mfa_method_id: None,
+                    auth_code: Some(auth_code),
+                    fido_is_passkey: false,
+                })
             }
             Err(e) => {
                 error!("{:?}", e);
@@ -3730,6 +3856,18 @@ impl PublicClientApplication {
         poll_attempt: Option<u32>,
         flow: &mut MFAAuthContinue,
     ) -> Result<UserToken, MsalError> {
+        // If we received an auth code directly from login (no MFA required),
+        // exchange it for tokens immediately.
+        if let Some(auth_code) = flow.auth_code.take() {
+            return self
+                .exchange_authorization_code_for_access_token_internal(
+                    auth_code,
+                    flow.resource.as_deref(),
+                    None,
+                )
+                .await;
+        }
+
         if let Some(dag_flow) = &flow.dag {
             // This is a personal account DAG, not a work/school account DAG.
             if dag_flow.verification_uri.contains("www.microsoft.com/link") {
@@ -4591,7 +4729,15 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub async fn initiate_device_flow_for_device_enrollment(
         &self,
+        #[cfg(feature = "optional_mfa")] options: &[AuthOption],
     ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        #[cfg(feature = "optional_mfa")]
+        let portal_scope = if options.contains(&AuthOption::ForceMFA) {
+            format!("{}/.default", AZURE_PORTAL_APP_ID)
+        } else {
+            format!("{}/.default", DRS_APP_ID)
+        };
+        #[cfg(not(feature = "optional_mfa"))]
         let portal_scope = format!("{}/.default", AZURE_PORTAL_APP_ID);
         self.app.initiate_device_flow(vec![&portal_scope]).await
     }
