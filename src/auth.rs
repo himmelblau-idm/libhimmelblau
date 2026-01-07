@@ -270,6 +270,9 @@ pub struct MFAAuthContinue {
     /// When set, acquire_token_by_mfa_flow should skip polling and exchange
     /// this code directly for an access token.
     pub auth_code: Option<String>,
+    /// Whether the FIDO method is a passkey (cross-device capable).
+    /// Used to filter out passkeys from default MFA method selection.
+    pub fido_is_passkey: bool,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -302,7 +305,12 @@ impl MFAAuthContinue {
         if let Some(method) = self.get_default_mfa_method_details() {
             method.auth_method_id
         } else if !self.mfa_methods.is_empty() {
-            self.mfa_methods[0].clone()
+            for method in self.get_mfa_method_details() {
+                if !self.mfa_method_is_passkey(&method) {
+                    return method.auth_method_id.clone();
+                }
+            }
+            "".to_string()
         } else {
             // This happens with a DAG fallback
             "".to_string()
@@ -331,16 +339,29 @@ impl MFAAuthContinue {
         self.get_available_mfa_methods().len()
     }
 
+    fn mfa_method_is_passkey(&self, method: &MfaMethodInfo) -> bool {
+        if method.display.to_lowercase() == "fidokey" {
+            self.fido_is_passkey
+        } else {
+            false
+        }
+    }
+
     /// Get details of the first default MFA method - if no default is specified, return the first MFA method, or None
     pub fn get_default_mfa_method_details(&self) -> Option<MfaMethodInfo> {
         if let Some(details) = self
             .get_mfa_method_details()
             .into_iter()
-            .find(|method| method.is_default)
+            .find(|method| method.is_default && !self.mfa_method_is_passkey(method))
         {
             Some(details)
         } else if !self.mfa_methods.is_empty() {
-            Some(self.mfa_method_details[0].clone())
+            for method in self.get_mfa_method_details() {
+                if !self.mfa_method_is_passkey(&method) {
+                    return Some(method);
+                }
+            }
+            None
         } else {
             None
         }
@@ -2632,6 +2653,7 @@ impl PublicClientApplication {
                         }],
                         selected_mfa_method_id: Some("AccessPass".to_string()),
                         auth_code: None,
+                        fido_is_passkey: false,
                     });
                 }
             };
@@ -2688,6 +2710,7 @@ impl PublicClientApplication {
                                 }],
                                 selected_mfa_method_id: Some("PhoneAppNotification".to_string()),
                                 auth_code: None,
+                                fido_is_passkey: false,
                             });
                         }
                     }
@@ -2749,6 +2772,7 @@ impl PublicClientApplication {
                                 }],
                                 selected_mfa_method_id: Some("FidoKey".to_string()),
                                 auth_code: None,
+                                fido_is_passkey: false,
                             });
                         }
                     }
@@ -3061,6 +3085,7 @@ impl PublicClientApplication {
                             .collect(),
                         selected_mfa_method_id: Some(selected_auth_method.auth_method_id.clone()),
                         auth_code: None,
+                        fido_is_passkey: fido_is_a_passkey,
                     })
                 } else {
                     info!("No MFA methods found");
@@ -3092,6 +3117,7 @@ impl PublicClientApplication {
                     mfa_method_details: vec![],
                     selected_mfa_method_id: None,
                     auth_code: Some(auth_code),
+                    fido_is_passkey: false,
                 })
             }
             Err(e) => {
