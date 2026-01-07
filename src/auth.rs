@@ -340,7 +340,7 @@ impl MFAAuthContinue {
     }
 
     fn mfa_method_is_passkey(&self, method: &MfaMethodInfo) -> bool {
-        if method.display.to_lowercase() == "fidokey" {
+        if method.auth_method_id == "FidoKey" {
             self.fido_is_passkey
         } else {
             false
