@@ -1315,6 +1315,7 @@ pub enum AuthOption {
     /// MFA is enforced. For local terminal authentication (GDM, etc.), this
     /// should NOT be set - let the natural passwordless auth flow happen without
     /// prematurely triggering MFA notifications.
+    #[cfg(feature = "optional_mfa")]
     ForceMFA,
 }
 
@@ -2432,7 +2433,10 @@ impl PublicClientApplication {
         // Only demand ngcmfa if ForceMFA option is set. This allows callers to
         // decide based on context (local terminal vs remote connection) whether
         // to trigger MFA notifications during the user existence check.
+        #[cfg(feature = "optional_mfa")]
         let force_mfa = options.contains(&AuthOption::ForceMFA);
+        #[cfg(not(feature = "optional_mfa"))]
+        let force_mfa = true;
         let auth_config = self
             .request_auth_config_internal(vec![], &request_id, resource, force_mfa)
             .await?;
@@ -2480,13 +2484,20 @@ impl PublicClientApplication {
         #[cfg(not(feature = "mfa_method_selection"))]
         let mfa_method: Option<&str> = None;
 
+        #[cfg(feature = "optional_mfa")]
+        let force_mfa = options.contains(&AuthOption::ForceMFA);
+        #[cfg(not(feature = "optional_mfa"))]
+        let force_mfa = true;
+
         macro_rules! dag_fallback {
             () => {
                 if !options.contains(&AuthOption::NoDAGFallback) {
                     let mut dag_scopes: Vec<String> =
                         scopes.into_iter().map(|s| s.to_string()).collect();
                     // Enforce MFA via the azure portal
-                    dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    if force_mfa {
+                        dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    }
                     info!("MFA auth failed, falling back to Device Authorization Grant.");
                     let flow = self
                         .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
@@ -2525,7 +2536,9 @@ impl PublicClientApplication {
                     let mut dag_scopes: Vec<String> =
                         scopes.into_iter().map(|s| s.to_string()).collect();
                     // Enforce MFA via the azure portal
-                    dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    if force_mfa {
+                        dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
+                    }
                     info!("MFA auth failed, falling back to Device Authorization Grant.");
                     let flow = self
                         .initiate_device_flow(dag_scopes.iter().map(|i| i.as_str()).collect())
@@ -2551,7 +2564,7 @@ impl PublicClientApplication {
             (auth_init.auth_config, auth_init.cred_type)
         } else {
             let auth_config = match self
-                .request_auth_config_internal(scopes.clone(), &request_id, resource, true)
+                .request_auth_config_internal(scopes.clone(), &request_id, resource, force_mfa)
                 .await
             {
                 Ok(auth_config) => auth_config,
@@ -4690,7 +4703,15 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub async fn initiate_device_flow_for_device_enrollment(
         &self,
+        #[cfg(feature = "optional_mfa")] options: &[AuthOption],
     ) -> Result<DeviceAuthorizationResponse, MsalError> {
+        #[cfg(feature = "optional_mfa")]
+        let portal_scope = if options.contains(&AuthOption::ForceMFA) {
+            format!("{}/.default", AZURE_PORTAL_APP_ID)
+        } else {
+            format!("{}/.default", DRS_APP_ID)
+        };
+        #[cfg(not(feature = "optional_mfa"))]
         let portal_scope = format!("{}/.default", AZURE_PORTAL_APP_ID);
         self.app.initiate_device_flow(vec![&portal_scope]).await
     }

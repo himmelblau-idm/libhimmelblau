@@ -29,6 +29,7 @@ changepassword = []
 on_behalf_of = ["broker"]
 mfa_method_selection = []
 intune_portal_vers_selection = []
+optional_mfa = []
 
 [dependencies]
 crypto-glue = { version = "0.1.6" }

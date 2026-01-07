@@ -915,7 +915,12 @@ pub unsafe extern "C" fn broker_initiate_device_flow_for_device_enrollment(
     }
 
     let client = unsafe { &mut *client };
-    let resp = match run_async!(client, initiate_device_flow_for_device_enrollment) {
+    let resp = match run_async!(
+        client,
+        initiate_device_flow_for_device_enrollment,
+        #[cfg(feature = "optional_mfa")]
+        &[],
+    ) {
         Ok(resp) => resp,
         Err(e) => return e,
     };
