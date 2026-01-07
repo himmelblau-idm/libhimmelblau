@@ -58,11 +58,4 @@ pub mod serializer;
 
 pub mod aadsts_err_gen;
 
-// FIXME(licensing): Kerberos ccache injection is temporarily disabled.
-// The prior implementation pulled in an AGPL-3.0 dependency; distributing it
-// would compel the combined work to be AGPL. This will be resolved in a future
-// release by integrating with libkrimes.
-//#[cfg(feature = "broker")]
-//mod krb5;
-
 pub mod intune;
