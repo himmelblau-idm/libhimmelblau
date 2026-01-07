@@ -18,6 +18,7 @@
 
 #![deny(warnings)]
 #![warn(unused_extern_crates)]
+#![allow(unused_assignments)]
 #![deny(clippy::todo)]
 #![deny(clippy::unimplemented)]
 #![deny(clippy::unwrap_used)]
