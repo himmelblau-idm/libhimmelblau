@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::thread::sleep;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -6037,17 +6037,39 @@ impl BrokerClientApplication {
             }
         }
 
-        self.exchange_prt_for_auth_code_internal(
-            scope,
-            request_id,
-            resource,
-            v2_endpoint,
-            Some(signed_prt_payload),
-            Some(signed_device_payload),
-            #[cfg(feature = "on_behalf_of")]
-            on_behalf_of_client_id,
-        )
-        .await
+        let result = self
+            .exchange_prt_for_auth_code_internal(
+                scope.clone(),
+                request_id,
+                resource,
+                v2_endpoint,
+                Some(signed_prt_payload.clone()),
+                Some(signed_device_payload.clone()),
+                #[cfg(feature = "on_behalf_of")]
+                on_behalf_of_client_id,
+            )
+            .await;
+
+        // AADSTS16000 (InteractionRequired) can occur due to stale session
+        // cookies. Clear cookies and retry once.
+        match result {
+            Err(MsalError::AADSTSError(ref e)) if e.code == 16000 => {
+                warn!("PRT exchange failed with AADSTS16000, clearing cookies and retrying");
+                self.clear_cookies();
+                self.exchange_prt_for_auth_code_internal(
+                    scope,
+                    request_id,
+                    resource,
+                    v2_endpoint,
+                    Some(signed_prt_payload),
+                    Some(signed_device_payload),
+                    #[cfg(feature = "on_behalf_of")]
+                    on_behalf_of_client_id,
+                )
+                .await
+            }
+            other => other,
+        }
     }
 
     async fn exchange_auth_code_for_access_token_internal(
