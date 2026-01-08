@@ -1338,6 +1338,12 @@ pub enum AuthOption {
     /// prematurely triggering MFA notifications.
     #[cfg(feature = "optional_mfa")]
     ForceMFA,
+    /// Indicates this is a remote session (e.g., SSH). When set, if the user
+    /// has not enrolled in MFA, authentication will be denied rather than
+    /// falling back to DAG. Users must enroll in MFA before remote
+    /// authentication is permitted.
+    #[cfg(feature = "optional_mfa")]
+    RemoteSession,
 }
 
 pub(crate) struct ClientApplication {
@@ -2543,9 +2549,26 @@ impl PublicClientApplication {
                     // If we got an AADSTSError, then we don't want to perform a
                     // fallback, since the authentication legitimately failed.
                     if let MsalError::AADSTSError(ref e) = $err {
+                        // For remote sessions, if the user hasn't enrolled in MFA,
+                        // deny authentication. DAG cannot reliably enforce MFA for
+                        // unenrolled users, so we require MFA enrollment before
+                        // permitting remote access.
+                        // AADSTS50072: UserStrongAuthEnrollmentRequiredInterrupt
+                        // AADSTS50203: User has not registered the authenticator app
+                        #[cfg(feature = "optional_mfa")]
+                        if options.contains(&AuthOption::RemoteSession)
+                            && [50072, 50203].contains(&e.code)
+                        {
+                            error!(
+                                "Remote session with unenrolled MFA user denied. \
+                                 User must enroll in MFA before remote authentication is permitted."
+                            );
+                            return Err($err);
+                        }
                         // There are a couple of exceptions to the rule. If
                         // interaction is required, or MFA enrollment is required,
-                        // continue with the fallback.
+                        // continue with the fallback (for local sessions or when
+                        // optional_mfa feature is not enabled).
                         // AADSTS16000: InteractionRequired
                         // AADSTS50072: UserStrongAuthEnrollmentRequiredInterrupt
                         // AADSTS50203: User has not registered the authenticator app
