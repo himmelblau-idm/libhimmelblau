@@ -96,7 +96,13 @@ use crate::discovery::Services;
 use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 
 #[cfg(feature = "broker")]
+use libkrimes::ccache::resolve as ccache_resolve;
+#[cfg(feature = "broker")]
 use libkrimes::proto::{AuthenticationReply, DerivedKey, KerberosCredentials, KerberosReply};
+#[cfg(feature = "broker")]
+use std::fs;
+#[cfg(feature = "broker")]
+use std::io::Read;
 
 #[cfg(feature = "broker")]
 use base64::engine::general_purpose::STANDARD;
@@ -1082,16 +1088,29 @@ impl TGT {
     ) -> Result<DerivedKey, MsalError> {
         let client_key = match self.client_key.as_deref() {
             Some(k) => {
-                let jwe = JweCompact::from_str(k)
-                    .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
-                session_key
-                    .decipher_tgt_client_key(tpm, transport_key, storage_key, &jwe)
-                    .map_err(|e| {
+                // Check if the client_key is a JWE compact serialization (5 parts separated by dots)
+                // or a raw base64-encoded key (no dots)
+                if k.contains('.') {
+                    // JWE format - decrypt it
+                    let jwe = JweCompact::from_str(k)
+                        .map_err(|e| MsalError::InvalidParse(format!("{:?}", e)))?;
+                    session_key
+                        .decipher_tgt_client_key(tpm, transport_key, storage_key, &jwe)
+                        .map_err(|e| {
+                            MsalError::CryptoFail(format!(
+                                "Failed to unwrap the TGT session key: {:?}",
+                                e
+                            ))
+                        })?
+                } else {
+                    // Raw base64-encoded key - just decode it
+                    Zeroizing::new(STANDARD.decode(k).map_err(|e| {
                         MsalError::CryptoFail(format!(
-                            "Failed to unwrap the TGT session key: {:?}",
+                            "Failed to decode base64 client key: {:?}",
                             e
                         ))
-                    })?
+                    })?)
+                }
             }
             None => {
                 return Err(MsalError::CryptoFail(
@@ -6353,6 +6372,51 @@ impl BrokerClientApplication {
         Err(MsalError::NotImplemented)
     }
 
+    /// Converts KerberosCredentials to MIT ccache file format bytes
+    fn kerberos_credentials_to_ccache_bytes(
+        credentials: &KerberosCredentials,
+    ) -> Result<Vec<u8>, MsalError> {
+        // Generate a unique temp file path
+        let temp_path = format!(
+            "/tmp/himmelblau_ccache_{}",
+            Uuid::new_v4().as_hyphenated()
+        );
+        let ccache_name = format!("FILE:{}", temp_path);
+
+        // Create and initialize the ccache
+        let mut ccache = ccache_resolve(Some(&ccache_name)).map_err(|e| {
+            error!("Failed to resolve ccache: {:?}", e);
+            MsalError::CryptoFail("Failed to resolve ccache".to_string())
+        })?;
+
+        ccache.init(credentials.name(), None).map_err(|e| {
+            error!("Failed to init ccache: {:?}", e);
+            MsalError::CryptoFail("Failed to init ccache".to_string())
+        })?;
+
+        ccache.store(credentials).map_err(|e| {
+            error!("Failed to store credentials in ccache: {:?}", e);
+            MsalError::CryptoFail("Failed to store credentials in ccache".to_string())
+        })?;
+
+        // Read the file bytes
+        let mut file = fs::File::open(&temp_path).map_err(|e| {
+            error!("Failed to open ccache file: {:?}", e);
+            MsalError::CryptoFail("Failed to open ccache file".to_string())
+        })?;
+
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|e| {
+            error!("Failed to read ccache file: {:?}", e);
+            MsalError::CryptoFail("Failed to read ccache file".to_string())
+        })?;
+
+        // Clean up the temp file
+        let _ = fs::remove_file(&temp_path);
+
+        Ok(bytes)
+    }
+
     /// Gets the Cloud TGT from a sealed PRT and returns it in a Kerberos CCache
     ///
     /// # Arguments
@@ -6369,11 +6433,12 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub fn fetch_cloud_ccache(
         &self,
-        _sealed_prt: &SealedData,
-        _tpm: &mut BoxedDynTpm,
-        _storage_key: &StorageKey,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
     ) -> Result<Vec<u8>, MsalError> {
-        Err(MsalError::NotImplemented)
+        let credentials = self.fetch_cloud_tgt(sealed_prt, tpm, storage_key)?;
+        Self::kerberos_credentials_to_ccache_bytes(&credentials)
     }
 
     /// Gets the AD TGT from a sealed PRT and returns it in a Kerberos CCache
@@ -6392,11 +6457,12 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating the failure.
     pub fn fetch_ad_ccache(
         &self,
-        _sealed_prt: &SealedData,
-        _tpm: &mut BoxedDynTpm,
-        _storage_key: &StorageKey,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
     ) -> Result<Vec<u8>, MsalError> {
-        Err(MsalError::NotImplemented)
+        let credentials = self.fetch_ad_tgt(sealed_prt, tpm, storage_key)?;
+        Self::kerberos_credentials_to_ccache_bytes(&credentials)
     }
 
     /// Gets the Cloud TGT from a sealed PRT and returns it
