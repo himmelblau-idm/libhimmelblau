@@ -6401,10 +6401,7 @@ impl BrokerClientApplication {
         credentials: &KerberosCredentials,
     ) -> Result<Vec<u8>, MsalError> {
         // Generate a unique temp file path
-        let temp_path = format!(
-            "/tmp/himmelblau_ccache_{}",
-            Uuid::new_v4().as_hyphenated()
-        );
+        let temp_path = format!("/tmp/himmelblau_ccache_{}", Uuid::new_v4().as_hyphenated());
         let ccache_name = format!("FILE:{}", temp_path);
 
         // Create and initialize the ccache
