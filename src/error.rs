@@ -86,6 +86,9 @@ pub enum MsalError {
     /// An authorization code was received directly from login (no MFA required).
     /// The String contains the auth code to exchange for tokens.
     AuthCodeReceived(String),
+    /// MFA is required to complete authentication (e.g., when Hello for Business
+    /// auth gets an MFA challenge page instead of an auth code)
+    MFARequired,
 }
 
 impl fmt::Display for MsalError {
@@ -120,6 +123,9 @@ impl fmt::Display for MsalError {
             MsalError::ConsentRequested(msg) => write!(f, "{}", msg),
             MsalError::AuthCodeReceived(_) => {
                 write!(f, "Authorization code received directly from login")
+            }
+            MsalError::MFARequired => {
+                write!(f, "MFA is required to complete authentication")
             }
         }
     }

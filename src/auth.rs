@@ -5897,12 +5897,15 @@ impl BrokerClientApplication {
 
             // MS may have returned an AuthConfig here with an error attached.
             // Return the error from that AuthConfig if possible. If a required
-            // password change is indicated, raise an error.
+            // password change or MFA is indicated, raise an error.
             match self.app.parse_auth_config(&text, false, false) {
                 #[cfg(feature = "changepassword")]
                 Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
                 Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
                 Err(MsalError::ConsentRequested(e)) => return Err(MsalError::ConsentRequested(e)),
+                Ok(auth_config) if auth_config.pgid.as_deref() == Some("ConvergedTFA") => {
+                    return Err(MsalError::MFARequired);
+                }
                 _ => {}
             }
 
@@ -5930,12 +5933,15 @@ impl BrokerClientApplication {
 
             // MS may have returned an AuthConfig here with an error attached.
             // Return the error from that AuthConfig if possible. If a required
-            // password change is indicated, raise an error.
+            // password change or MFA is indicated, raise an error.
             match self.app.parse_auth_config(&text, false, false) {
                 #[cfg(feature = "changepassword")]
                 Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
                 Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
                 Err(MsalError::ConsentRequested(e)) => return Err(MsalError::ConsentRequested(e)),
+                Ok(auth_config) if auth_config.pgid.as_deref() == Some("ConvergedTFA") => {
+                    return Err(MsalError::MFARequired);
+                }
                 _ => {}
             }
 
@@ -6069,8 +6075,8 @@ impl BrokerClientApplication {
             )
             .await;
 
-        // AADSTS16000 (InteractionRequired) can occur due to stale session
-        // cookies. Clear cookies and retry once.
+        // AADSTS16000 (InteractionRequired) or MFARequired (ConvergedTFA) can
+        // occur due to stale session cookies. Clear cookies and retry once.
         match result {
             Err(MsalError::AADSTSError(ref e)) if e.code == 16000 => {
                 warn!("PRT exchange failed with AADSTS16000, clearing cookies and retrying");
@@ -6086,6 +6092,24 @@ impl BrokerClientApplication {
                     on_behalf_of_client_id,
                 )
                 .await
+            }
+            Err(MsalError::MFARequired) => {
+                warn!("PRT exchange failed with MFARequired (ConvergedTFA), clearing cookies and retrying");
+                self.clear_cookies();
+                let retry_result = self
+                    .exchange_prt_for_auth_code_internal(
+                        scope,
+                        request_id,
+                        resource,
+                        v2_endpoint,
+                        Some(signed_prt_payload),
+                        Some(signed_device_payload),
+                        #[cfg(feature = "on_behalf_of")]
+                        on_behalf_of_client_id,
+                    )
+                    .await;
+                // If retry still fails with MFARequired, propagate it
+                retry_result
             }
             other => other,
         }
