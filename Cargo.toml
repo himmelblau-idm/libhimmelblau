@@ -34,38 +34,38 @@ optional_mfa = []
 [dependencies]
 crypto-glue = { version = "0.1.6" }
 base64 = "^0.22.0"
-reqwest = { version = "^0.12.2", features = ["json", "cookies"] }
+reqwest = { version = "^0.13.1", features = ["json", "cookies"] }
 serde = { version = "^1.0.180", features = ["derive"] }
-serde_json = "^1.0.96"
-tracing = "^0.1.37"
+serde_json = "^1.0.149"
+tracing = "^0.1.44"
 urlencoding = "2.1.3"
-uuid = { version = "^1.4.1", features = [ "v4", "serde" ] }
+uuid = { version = "^1.20.0", features = [ "v4", "serde" ] }
 os-release = "^0.1.0"
-hostname = "^0.4.0"
-openssl = "^0.10.55"
+hostname = "^0.4.2"
+openssl = "^0.10.75"
 compact_jwt = { version = "0.5.3-dev", optional = true }
-kanidm-hsm-crypto = { version = "^0.3.4", optional = true }
+kanidm-hsm-crypto = { version = "^0.3.5", optional = true }
 regex = "^1.10.3"
 zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
-scraper = "0.24.0"
-tokio = { version = "1.37.0", features = ["full"] }
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-pyo3 = { version = "0.26.0", features = ["extension-module"], optional = true }
+scraper = "0.25.0"
+tokio = { version = "1.49.0", features = ["full"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+pyo3 = { version = "0.27.2", features = ["extension-module"], optional = true }
 paste = "1.0.15"
-picky-krb = "0.11.0"
-picky-asn1-der = "0.5.2"
+picky-krb = "0.12.0"
+picky-asn1-der = "0.5.4"
 picky-asn1 = "0.10.1"
-chrono = "0.4.38"
+chrono = "0.4.43"
 percent-encoding = "2.3.1"
 browser-window = { version = "0.12.3", features = ["webkitgtk", "threadsafe"], optional = true }
 serde_bytes = "0.11.17"
 serde_urlencoded = "0.7.1"
-reqwest_cookie_store = "0.9.0"
+reqwest_cookie_store = "0.10.0"
 semver = "1.0.27"
 libkrimes = { version = "0.1.0", features = ["keyring"] }
 
 [build-dependencies]
-cbindgen = "0.29.0"
+cbindgen = "0.29.2"
 
 [package.metadata.capi.library]
 version_suffix_components = 1
