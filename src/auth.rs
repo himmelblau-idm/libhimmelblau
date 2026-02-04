@@ -35,7 +35,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::thread::sleep;
 use std::time::Duration;
@@ -2702,13 +2701,20 @@ impl PublicClientApplication {
         }
 
         // `get_one_time_code` might fail, and we don't want this tried twice
-        // if it's failing. Just move on to other mechanizms.
-        static PASSWORDLESS_REMOTE_NGC_CALLED: AtomicBool = AtomicBool::new(false);
+        // if it's failing. Just move on to other mechanisms.
+        // Note: This is a per-request flag, NOT a static, so each authentication
+        // attempt gets a fresh chance to try passwordless auth.
+        let mut passwordless_remote_ngc_called = false;
+        // Track if a push notification was potentially sent via remote NGC, so we
+        // don't send a duplicate push via mfa_begin_auth_internal later.
+        let mut remote_ngc_push_attempted = false;
         macro_rules! passwordless_remote_ngc {
             () => {
-                if !PASSWORDLESS_REMOTE_NGC_CALLED.load(Ordering::Relaxed) {
-                    PASSWORDLESS_REMOTE_NGC_CALLED.store(true, Ordering::Relaxed);
+                if !passwordless_remote_ngc_called {
+                    passwordless_remote_ngc_called = true;
                     if let Some(ref remote_ngc_params) = cred_type.credentials.remote_ngc_params {
+                        // Mark that we're about to attempt a push via remote NGC
+                        remote_ngc_push_attempted = true;
                         // Ensure the one time code didn't fail, if it did, we need to continue
                         if let Ok(remote_ngc_params) = self
                             .get_one_time_code(&auth_config, &remote_ngc_params, &request_id)
@@ -3057,6 +3063,20 @@ impl PublicClientApplication {
                         (sft, sctx, "".to_string())
                     } else if selected_auth_method.auth_method_id == "AccessPass" {
                         (sft, sctx, "Enter Temporary Access Pass: ".to_string())
+                    } else if remote_ngc_push_attempted
+                        && (selected_auth_method.auth_method_id == "PhoneAppNotification"
+                            || selected_auth_method.auth_method_id == "CompanionAppsNotification")
+                    {
+                        // We already tried to send a push via get_one_time_code (remote NGC).
+                        // If it failed, we might have sent a push but didn't get the entropy.
+                        // Calling mfa_begin_auth_internal would send a SECOND push, causing
+                        // the user to see two prompts on their phone.
+                        // Fall back to Device Authorization Grant instead.
+                        info!(
+                            "Remote NGC push was attempted but failed. Avoiding duplicate push for {}. Falling back to DAG.",
+                            selected_auth_method.auth_method_id
+                        );
+                        dag_fallback!();
                     } else {
                         let auth_response = match self
                             .mfa_begin_auth_internal(
