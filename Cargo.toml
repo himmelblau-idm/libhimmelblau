@@ -45,12 +45,12 @@ hostname = "^0.4.2"
 openssl = "^0.10.75"
 compact_jwt = { version = "0.5.3-dev", optional = true }
 kanidm-hsm-crypto = { version = "^0.3.5", optional = true }
-regex = "^1.10.3"
+regex = "^1.12.3"
 zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
 scraper = "0.25.0"
 tokio = { version = "1.49.0", features = ["full"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-pyo3 = { version = "0.27.2", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.28.0", features = ["extension-module"], optional = true }
 paste = "1.0.15"
 picky-krb = "0.12.0"
 picky-asn1-der = "0.5.4"
