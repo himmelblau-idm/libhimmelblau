@@ -279,7 +279,7 @@ impl From<Vec<IntunePolicy>> for IntuneStatus {
 pub struct IntuneStatus {
     #[serde(rename = "DeviceId")]
     pub device_id: Option<String>,
-    #[serde(rename = "policyStatuses")]
+    #[serde(rename = "PolicyStatuses")]
     pub policy_statuses: Vec<PolicyStatus>,
 }
 
@@ -290,10 +290,10 @@ impl IntuneStatus {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
 pub struct PolicyStatus {
-    #[serde(rename = "policyId")]
+    #[serde(rename = "PolicyId")]
     pub policy_id: String,
-    #[serde(rename = "lastStatusDateTime")]
     pub last_status_date_time: String,
     pub details: Vec<PolicyDetails>,
 }
@@ -321,22 +321,17 @@ impl fmt::Display for ComplianceState {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
 pub struct PolicyDetails {
-    #[serde(rename = "ruleId")]
     pub rule_id: String,
-    #[serde(rename = "settingDefinitionItemId")]
     pub setting_definition_item_id: String,
-    #[serde(rename = "expectedValue")]
     pub expected_value: String,
-    #[serde(rename = "actualValue")]
     pub actual_value: String,
-    #[serde(rename = "errorType", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_type: Option<i32>,
-    #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<i32>,
-    #[serde(rename = "newComplianceState")]
     pub new_compliance_state: String,
-    #[serde(rename = "oldComplianceState")]
     pub old_compliance_state: String,
 }
 
