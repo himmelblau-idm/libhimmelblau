@@ -280,7 +280,7 @@ impl From<Vec<IntunePolicy>> for IntuneStatus {
 pub struct IntuneStatus {
     #[serde(rename = "DeviceId")]
     pub device_id: Option<String>,
-    #[serde(rename = "PolicyStatuses")]
+    #[serde(rename = "PolicyStatuses", default)]
     pub policy_statuses: Vec<PolicyStatus>,
 }
 
