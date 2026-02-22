@@ -263,6 +263,7 @@ impl From<Vec<IntunePolicy>> for IntuneStatus {
                         error_code: None,
                         new_compliance_state: ComplianceState::NonCompliant.to_string(),
                         old_compliance_state: ComplianceState::Unknown.to_string(),
+                        csp_path: setting.csp_path,
                     })
                     .collect(),
             })
@@ -333,6 +334,8 @@ pub struct PolicyDetails {
     pub error_code: Option<i32>,
     pub new_compliance_state: String,
     pub old_compliance_state: String,
+    #[serde(skip)]
+    pub csp_path: String,
 }
 
 impl PolicyDetails {
