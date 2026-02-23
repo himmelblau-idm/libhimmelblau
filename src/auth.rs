@@ -4844,9 +4844,16 @@ impl BrokerClientApplication {
         username: &str,
         options: &[AuthOption],
     ) -> Result<AuthInit, MsalError> {
-        let drs_resource = "https://enrollment.manage.microsoft.com/";
+        // Use the Intune service principal as the resource for the initial
+        // auth config request. This avoids Conditional Access policies that
+        // block access to enrollment.manage.microsoft.com from non-compliant
+        // devices, since CA exclusions for "Microsoft Intune" and "Microsoft
+        // Intune Company Portal for Linux" will match this resource+client
+        // combination. This app id is documented at:
+        // https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership
+        let intune_resource = "0000000a-0000-0000-c000-000000000000";
         self.app
-            .check_user_exists(username, Some(drs_resource), options)
+            .check_user_exists(username, Some(intune_resource), options)
             .await
     }
 
@@ -4878,13 +4885,19 @@ impl BrokerClientApplication {
         auth_init: Option<AuthInit>,
         #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
     ) -> Result<MFAAuthContinue, MsalError> {
-        let drs_resource = "https://enrollment.manage.microsoft.com/";
+        // Use the Intune service principal as the resource, as per documentation
+        // https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership
+        // This avoids Conditional Access policies that block non-compliant
+        // devices from accessing enrollment.manage.microsoft.com during
+        // the initial authentication. The enrollment-specific token is
+        // obtained later via refresh_token exchange in enroll_device().
+        let intune_resource = "0000000a-0000-0000-c000-000000000000";
         self.app
             .initiate_acquire_token_by_mfa_flow(
                 username,
                 password,
                 vec![],
-                Some(drs_resource),
+                Some(intune_resource),
                 options,
                 auth_init,
                 #[cfg(feature = "mfa_method_selection")]
