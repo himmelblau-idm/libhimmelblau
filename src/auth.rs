@@ -621,6 +621,9 @@ where
 pub struct AccessTokenPayload {
     amr: Vec<String>,
     tid: String,
+    // Some Entra token types (e.g. Authenticator number-match MFA flow) use
+    // `unique_name` instead of `upn` in the JWT payload. Accept both.
+    #[serde(alias = "unique_name")]
     upn: String,
 }
 
