@@ -623,8 +623,8 @@ pub struct AccessTokenPayload {
     tid: String,
     // Some Entra token types (e.g. Authenticator number-match MFA flow) use
     // `unique_name` instead of `upn` in the JWT payload. Accept both.
-    #[serde(alias = "unique_name")]
-    upn: String,
+    unique_name: Option<String>,
+    upn: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -717,7 +717,15 @@ impl UserToken {
                         .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
                     )
                     .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-                    Ok(payload.upn.clone())
+                    if let Some(upn) = &payload.upn {
+                        Ok(upn.clone())
+                    } else if let Some(unique_name) = &payload.unique_name {
+                        Ok(unique_name.clone())
+                    } else {
+                        Err(MsalError::GeneralFailure(
+                            "No spn available for UserToken".to_string(),
+                        ))
+                    }
                 }
                 None => Err(MsalError::GeneralFailure(
                     "No spn available for UserToken".to_string(),
