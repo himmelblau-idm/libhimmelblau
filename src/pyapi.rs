@@ -1,6 +1,10 @@
 // Kerberos support temporarily disabled due to licensing issues
 // use crate::krb5::FileCredentialCache as CCache;
 
+#[cfg(feature = "on_behalf_of")]
+use crate::confidential_client::{ClientCredential, ConfidentialClientApplication, OboToken};
+#[cfg(feature = "on_behalf_of")]
+use crate::error::MsalError;
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
     AuthInit, AuthOption, BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs,
@@ -18,6 +22,8 @@ use kanidm_hsm_crypto::AuthValue;
 use paste::paste;
 // Kerberos support temporarily disabled
 // use picky_krb::messages::AsRep;
+#[cfg(feature = "on_behalf_of")]
+use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyType};
@@ -64,6 +70,28 @@ macro_rules! run_async {
         let future = $client.$func($($arg),*);
         wait($py, future)?.map_err(|e| to_pyerr!(e))?
     }}
+}
+
+#[cfg(feature = "on_behalf_of")]
+create_exception!(himmelblau, OboInteractionRequiredError, PyException);
+
+#[cfg(feature = "on_behalf_of")]
+fn to_obo_pyerr(
+    py: Python<'_>,
+    error: crate::error::ErrorResponse,
+    claims: Option<String>,
+) -> PyErr {
+    let py_err = PyErr::new::<OboInteractionRequiredError, _>(format!(
+        "OBO interaction required: {} ({})",
+        error.error, error.error_description
+    ));
+    let py_err_value = py_err.value(py);
+    let _ = py_err_value.setattr("claims", claims);
+    let _ = py_err_value.setattr("error", error.error);
+    let _ = py_err_value.setattr("error_description", error.error_description);
+    let _ = py_err_value.setattr("error_codes", error.error_codes);
+    let _ = py_err_value.setattr("suberror", error.suberror);
+    py_err
 }
 
 macro_rules! serialize_impl {
@@ -1059,6 +1087,169 @@ impl PyBrokerClientApplication {
     }
 }
 
+// =========================================================================
+// ConfidentialClientApplication (OBO flow)
+// =========================================================================
+
+#[cfg(feature = "on_behalf_of")]
+#[pyclass(name = "OboToken", module = "himmelblau", subclass)]
+pub struct PyOboToken {
+    token: OboToken,
+}
+
+#[cfg(feature = "on_behalf_of")]
+#[pymethods]
+impl PyOboToken {
+    #[getter]
+    fn access_token(&self) -> PyResult<String> {
+        Ok(self.token.access_token.clone())
+    }
+
+    #[getter]
+    fn refresh_token(&self) -> PyResult<Option<String>> {
+        Ok(self.token.refresh_token.clone())
+    }
+
+    #[getter]
+    fn scope(&self) -> PyResult<Option<String>> {
+        Ok(self.token.scope.clone())
+    }
+
+    #[getter]
+    fn expires_in(&self) -> PyResult<u32> {
+        Ok(self.token.expires_in)
+    }
+
+    #[getter]
+    fn token_type(&self) -> PyResult<String> {
+        Ok(self.token.token_type.clone())
+    }
+
+    #[getter]
+    fn ext_expires_in(&self) -> PyResult<u32> {
+        Ok(self.token.ext_expires_in)
+    }
+}
+
+#[cfg(feature = "on_behalf_of")]
+#[pyclass(
+    name = "ConfidentialClientApplication",
+    module = "himmelblau",
+    subclass
+)]
+pub struct PyConfidentialClientApplication {
+    client: ConfidentialClientApplication,
+}
+
+#[cfg(feature = "on_behalf_of")]
+#[pymethods]
+impl PyConfidentialClientApplication {
+    /// Create a new ConfidentialClientApplication with a client secret.
+    ///
+    /// Args:
+    ///     client_id: The application (client) ID registered in Entra ID.
+    ///     authority: A URL identifying the token authority, e.g.
+    ///         ``https://login.microsoftonline.com/<tenant>``.
+    ///     client_secret: The client secret string.
+    #[new]
+    pub fn new(client_id: &str, authority: Option<&str>, client_secret: &str) -> PyResult<Self> {
+        let credential = ClientCredential::from_secret(client_secret.to_string());
+        Ok(PyConfidentialClientApplication {
+            client: ConfidentialClientApplication::new(client_id, authority, credential)
+                .map_err(|e| to_pyerr!(e))?,
+        })
+    }
+
+    /// Acquire a token using client credentials (client_credentials grant).
+    ///
+    /// Args:
+    ///     scopes: List of scope strings for the target API.
+    ///
+    /// Returns:
+    ///     A ClientToken (dict-like) with an ``access_token``.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn acquire_token_silent(
+        &self,
+        scopes: Vec<String>,
+        py: Python<'_>,
+    ) -> PyResult<PyClientToken> {
+        let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
+        let token = run_async!(py, self.client, acquire_token_silent, scopes_ref, None);
+        Ok(PyClientToken { token })
+    }
+
+    /// Acquire a token on behalf of a user (OBO flow).
+    ///
+    /// Exchanges an incoming user access token for a new token targeting
+    /// a downstream API, preserving the user's identity.
+    ///
+    /// Args:
+    ///     user_assertion: The access token received by the middle-tier API.
+    ///     scopes: List of scope strings for the downstream API.
+    ///
+    /// Returns:
+    ///     An OboToken with ``access_token``, optional ``refresh_token``, etc.
+    ///
+    /// Raises:
+    ///     OboInteractionRequiredError: Conditional Access claims challenge.
+    ///     Exception: Other failures.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn acquire_token_on_behalf_of(
+        &self,
+        user_assertion: &str,
+        scopes: Vec<String>,
+        py: Python<'_>,
+    ) -> PyResult<PyOboToken> {
+        let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
+        let future = self
+            .client
+            .acquire_token_on_behalf_of(user_assertion, scopes_ref, None);
+        let result = wait(py, future)?;
+        match result {
+            Ok(token) => Ok(PyOboToken { token }),
+            Err(MsalError::OboInteractionRequired { error, claims }) => {
+                Err(to_obo_pyerr(py, error, claims))
+            }
+            Err(e) => Err(to_pyerr!(e)),
+        }
+    }
+}
+
+#[cfg(feature = "on_behalf_of")]
+#[pyclass(name = "ClientToken", module = "himmelblau", subclass)]
+pub struct PyClientToken {
+    token: crate::confidential_client::ClientToken,
+}
+
+#[cfg(feature = "on_behalf_of")]
+#[pymethods]
+impl PyClientToken {
+    #[getter]
+    fn access_token(&self) -> PyResult<String> {
+        Ok(self.token.access_token.clone())
+    }
+
+    #[getter]
+    fn token_type(&self) -> PyResult<String> {
+        Ok(self.token.token_type.clone())
+    }
+
+    #[getter]
+    fn expires_in(&self) -> PyResult<u32> {
+        Ok(self.token.expires_in)
+    }
+
+    #[getter]
+    fn ext_expires_in(&self) -> PyResult<u32> {
+        Ok(self.token.ext_expires_in)
+    }
+
+    #[getter]
+    fn get_tenant_id(&self) -> PyResult<String> {
+        self.token.tenant_id().map_err(|e| to_pyerr!(e))
+    }
+}
+
 // Kerberos support temporarily disabled
 // #[pyclass(name = "CCache", module = "himmelblau", subclass)]
 // pub struct PyCCache {
@@ -1085,6 +1276,8 @@ impl PyBrokerClientApplication {
 fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPublicClientApplication>()?;
     m.add_class::<PyBrokerClientApplication>()?;
+    #[cfg(feature = "on_behalf_of")]
+    m.add_class::<PyConfidentialClientApplication>()?;
     m.add_class::<PyBoxedDynTpm>()?;
     m.add_class::<PyLoadableMachineKey>()?;
     m.add_class::<PyStorageKey>()?;
@@ -1095,6 +1288,15 @@ fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMfaMethodInfo>()?;
     m.add_class::<PyMFAAuthContinue>()?;
     m.add_class::<PyUserToken>()?;
+    #[cfg(feature = "on_behalf_of")]
+    m.add_class::<PyOboToken>()?;
+    #[cfg(feature = "on_behalf_of")]
+    m.add_class::<PyClientToken>()?;
+    #[cfg(feature = "on_behalf_of")]
+    m.add(
+        "OboInteractionRequiredError",
+        m.py().get_type::<OboInteractionRequiredError>(),
+    )?;
     m.add_class::<PySealedData>()?;
     m.add_class::<PyAuthOption>()?;
     m.add_class::<PyAuthInit>()?;

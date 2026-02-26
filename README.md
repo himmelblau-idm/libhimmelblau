@@ -104,10 +104,81 @@ let machine_key = tpm
 let app = BrokerClientApplication::new(Some(&authority), Some(&transport_key), Some(&cert_key)).expect("Failed creating app");
 ```
 
+Using the On-Behalf-Of (OBO) flow
+---------------------------------
+
+The OBO flow is available when built with the `on_behalf_of` feature.
+
+Rust (confidential middle-tier service):
+
+```Rust
+use msal::{ClientCredential, ConfidentialClientApplication, MsalError};
+
+let authority = format!("https://login.microsoftonline.com/{}", tenant_id);
+let credential = ClientCredential::from_secret(client_secret.to_string());
+let app = ConfidentialClientApplication::new(client_id, Some(&authority), credential)?;
+
+match app
+    .acquire_token_on_behalf_of(
+        user_access_token, // incoming bearer token
+        vec!["https://graph.microsoft.com/User.Read"],
+        None,
+    )
+    .await
+{
+    Ok(token) => {
+        println!("access_token={}", token.access_token);
+    }
+    Err(MsalError::OboInteractionRequired { claims, .. }) => {
+        // Return this claims challenge to the original client so it can
+        // re-authenticate and satisfy Conditional Access.
+        println!("claims_challenge={:?}", claims);
+    }
+    Err(e) => return Err(e),
+}
+```
+
+C API:
+
+* Initialize with `confidential_client_init_with_secret`. Note: only client secret
+  credentials are currently supported in the C API; certificate-based credentials
+  are available from Rust only.
+* Exchange the incoming user token with `confidential_acquire_token_on_behalf_of`.
+* Compile OBO C callers with `-DON_BEHALF_OF` so OBO declarations are visible in
+  the generated header.
+* Read token fields with:
+  * `obo_token_access_token`
+  * `obo_token_token_type`
+  * `obo_token_expires_in`
+  * `obo_token_ext_expires_in`
+  * `obo_token_scope` (returns `NULL` when not present)
+  * `obo_token_refresh_token` (returns `NULL` when not present)
+* On Conditional Access claims challenge, check `MSAL_ERROR.code == OBO_INTERACTION_REQUIRED`
+  and read `MSAL_ERROR.claims`.
+
+Python API:
+
+* Create `ConfidentialClientApplication(client_id, authority, client_secret)`. Note:
+  only client secret credentials are currently supported in the Python API;
+  certificate-based credentials are available from Rust only.
+* Call `acquire_token_on_behalf_of(user_assertion, scopes)`.
+* Catch `OboInteractionRequiredError` and inspect:
+  * `claims`
+  * `error`
+  * `error_description`
+  * `error_codes`
+  * `suberror`
+
+Reference examples:
+
+* `example/msal_obo_example.c`
+* `example/msal_obo_example.py`
+* `example/msal_obo_end_to_end_test.py` (full functional validation: upstream token -> OBO -> Graph `/me`)
+
 Using the Python API
 --------------------
 
-An script that uses `PublicClientApplication` from Python can be found in the [examples](example/msal_public_example.py).
+A script that uses `PublicClientApplication` from Python can be found in the [examples](example/msal_public_example.py).
 
 This script uses a public client created via an [Azure App Registration](https://himmelblau-idm.org/docs/advanced/Creating-an-Entra-ID-Application-for-Himmelblau-GroupMember.Read.All-Permissions/). The URL `https://login.microsoftonline.com/common/oauth2/nativeclient` should be used as a "Mobile and desktop applications" Redirect URI under the Authentication settings for the App Registration. The script was tested with the following permissions for the application:
 
@@ -127,7 +198,7 @@ To build `libhimmelblau` and test it with this script using (uv)[https://docs.as
 uv tool install maturin
 uv venv && uv pip install patchelf cffi
 # build the library with python bindings and install it into the virtual environment
-maturin build --features pyapi && uv pip install --force-reinstall target/wheels/libhimmelblau-*.whl
+maturin build --features "pyapi,on_behalf_of" && uv pip install --force-reinstall target/wheels/libhimmelblau-*.whl
 
 python example/msal_public_example.py
 ```

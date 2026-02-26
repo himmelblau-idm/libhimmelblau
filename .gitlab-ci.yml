@@ -19,6 +19,18 @@ build:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
 
+feature_matrix:
+  <<: *rust_build_setup
+  stage: build
+  script:
+    - cargo check --no-default-features --features broker --all-targets
+    - cargo check --no-default-features --features "broker,on_behalf_of" --all-targets
+    - cargo check --no-default-features --features "broker,capi,on_behalf_of" --all-targets
+    - cargo check --no-default-features --features "broker,pyapi,on_behalf_of" --all-targets
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+
 build_c_example:
   <<: *rust_build_setup
   stage: build
@@ -29,7 +41,7 @@ build_c_example:
     - cp -a "target/${TARGET_TRIPLE}/debug/include/himmelblau" .
     - cp "target/${TARGET_TRIPLE}/debug/libhimmelblau.so" .
     - ln -sf libhimmelblau.so libhimmelblau.so.0
-    - CFLAGS="-I.. -o msal_example" LDFLAGS="-L.." make -C example all
+    - CFLAGS="-I.." LDFLAGS="-L.." make -C example all
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
