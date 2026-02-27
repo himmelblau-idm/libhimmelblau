@@ -163,6 +163,9 @@ struct AssertionPreflightClaims {
     exp: Option<u64>,
     #[serde(default)]
     aud: Option<AssertionAudience>,
+    /// Tenant ID of the user — used to build a tenant-specific OBO authority.
+    #[serde(default)]
+    tid: Option<String>,
 }
 
 #[cfg(feature = "on_behalf_of")]
@@ -171,6 +174,18 @@ struct AssertionPreflightClaims {
 enum AssertionAudience {
     Single(String),
     Multiple(Vec<String>),
+}
+
+/// Decode the payload of a JWT assertion and return the pre-flight claims.
+/// Only the base64url-decoded payload is examined; signature verification
+/// is left to Azure. Returns `None` if the token cannot be decoded.
+#[cfg(feature = "on_behalf_of")]
+fn decode_assertion_preflight_claims(assertion: &str) -> Option<AssertionPreflightClaims> {
+    let mut parts = assertion.splitn(3, '.');
+    parts.next(); // Skip header
+    let payload_b64 = parts.next()?;
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    serde_json::from_slice(&payload_bytes).ok()
 }
 
 pub struct ConfidentialClientApplication {
@@ -321,21 +336,9 @@ impl ConfidentialClientApplication {
     /// If decoding fails, diagnostics are skipped and Azure provides definitive errors.
     #[cfg(feature = "on_behalf_of")]
     fn validate_assertion_preflight(&self, assertion: &str) {
-        let mut parts = assertion.splitn(3, '.');
-        parts.next(); // Skip header
-        let payload_b64 = match parts.next() {
-            Some(payload_b64) => payload_b64,
+        let claims = match decode_assertion_preflight_claims(assertion) {
+            Some(c) => c,
             None => return,
-        };
-
-        let payload_bytes = match URL_SAFE_NO_PAD.decode(payload_b64) {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-
-        let claims: AssertionPreflightClaims = match serde_json::from_slice(&payload_bytes) {
-            Ok(c) => c,
-            Err(_) => return,
         };
 
         if let Some(exp) = claims.exp {
@@ -352,10 +355,17 @@ impl ConfidentialClientApplication {
 
         if let Some(aud) = claims.aud {
             let target = self.client_id();
+            // The aud claim may be the bare client_id GUID or an App ID URI
+            // such as `api://<client_id>` — both are valid and accepted by Azure.
+            let aud_matches_target = |candidate: &str| {
+                candidate == target
+                    || candidate == format!("api://{}", target)
+                    || candidate.ends_with(&format!("/{}", target))
+            };
             let aud_matches = match aud {
-                AssertionAudience::Single(single_aud) => single_aud == target,
+                AssertionAudience::Single(single_aud) => aud_matches_target(&single_aud),
                 AssertionAudience::Multiple(multi_aud) => {
-                    multi_aud.iter().any(|candidate| candidate == target)
+                    multi_aud.iter().any(|candidate| aud_matches_target(candidate))
                 }
             };
             if !aud_matches {
@@ -386,7 +396,7 @@ impl ConfidentialClientApplication {
         scopes: Vec<&str>,
         tpm: Option<&mut BoxedDynTpm>,
     ) -> Result<ClientToken, MsalError> {
-        let url = format!("{}/oAuth2/v2.0/token", self.authority()?);
+        let url = format!("{}/oauth2/v2.0/token", self.authority()?);
         let mut params = HashMap::new();
         let mut signed_jwt = String::new();
 
@@ -461,7 +471,35 @@ impl ConfidentialClientApplication {
 
         self.validate_assertion_preflight(user_assertion);
 
-        let url = format!("{}/oAuth2/v2.0/token", self.authority()?);
+        // Per MSAL guidance, OBO should target the user's specific tenant rather
+        // than a multi-tenant endpoint. Extract the tid from the assertion and, if
+        // the configured authority is /common or /organizations, override it with
+        // the tenant-specific authority so the token is issued for the correct
+        // home tenant (important for guest users).
+        let base_authority = self.authority()?;
+        let normalized = base_authority.trim_end_matches('/');
+        let obo_authority = match decode_assertion_preflight_claims(user_assertion)
+            .and_then(|c| c.tid)
+        {
+            Some(tid) => {
+                if let Some(pos) = normalized.rfind('/') {
+                    let suffix = &normalized[pos + 1..];
+                    if suffix == "common" || suffix == "organizations" {
+                        debug!(
+                            "OBO: overriding multi-tenant authority with tenant-specific authority (tid={})",
+                            tid
+                        );
+                        format!("{}/{}", &normalized[..pos], tid)
+                    } else {
+                        normalized.to_string()
+                    }
+                } else {
+                    normalized.to_string()
+                }
+            }
+            None => normalized.to_string(),
+        };
+        let url = format!("{}/oauth2/v2.0/token", obo_authority);
         let mut params = HashMap::new();
         let mut signed_jwt = String::new();
 
@@ -535,6 +573,7 @@ impl ConfidentialClientApplication {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     #[cfg(feature = "on_behalf_of")]
@@ -546,6 +585,7 @@ mod tests {
 
     /// Helper: build a minimal ConfidentialClientApplication for testing
     /// private methods.
+    #[cfg(feature = "on_behalf_of")]
     fn test_app(client_id: &str) -> ConfidentialClientApplication {
         let credential = ClientCredential::from_secret("test-secret".to_string());
         ConfidentialClientApplication::new(client_id, None, credential)
@@ -587,6 +627,22 @@ mod tests {
         let jwt = make_jwt(&json!({
             "aud": "my-client-id",
             "exp": 1000, // far in the past
+        }));
+        app.validate_assertion_preflight(&jwt);
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn preflight_app_id_uri_audience_passes() {
+        // aud = api://<client_id> is a valid App ID URI audience — should not warn
+        let app = test_app("my-client-id");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let jwt = make_jwt(&json!({
+            "aud": "api://my-client-id",
+            "exp": now + 3600,
         }));
         app.validate_assertion_preflight(&jwt);
     }
@@ -652,6 +708,126 @@ mod tests {
         // Valid JWT with no exp and no aud — both checks skipped
         let jwt = make_jwt(&json!({"sub": "user"}));
         app.validate_assertion_preflight(&jwt);
+    }
+
+    // ---------------------------------------------------------------
+    // OBO tenant-specific authority override
+    // ---------------------------------------------------------------
+
+    /// Helper: build an app with a specific authority URL.
+    #[cfg(feature = "on_behalf_of")]
+    fn test_app_with_authority(
+        client_id: &str,
+        authority: &str,
+    ) -> ConfidentialClientApplication {
+        let credential = ClientCredential::from_secret("test-secret".to_string());
+        ConfidentialClientApplication::new(client_id, Some(authority), credential)
+            .expect("Failed to create test app with authority")
+    }
+
+    /// Helper: compute the OBO authority the same way `acquire_token_on_behalf_of`
+    /// does, without making a network call.
+    #[cfg(feature = "on_behalf_of")]
+    fn compute_obo_authority(app: &ConfidentialClientApplication, jwt: &str) -> String {
+        let base_authority = app.authority().unwrap();
+        let normalized = base_authority.trim_end_matches('/');
+        match decode_assertion_preflight_claims(jwt).and_then(|c| c.tid) {
+            Some(tid) => {
+                if let Some(pos) = normalized.rfind('/') {
+                    let suffix = &normalized[pos + 1..];
+                    if suffix == "common" || suffix == "organizations" {
+                        format!("{}/{}", &normalized[..pos], tid)
+                    } else {
+                        normalized.to_string()
+                    }
+                } else {
+                    normalized.to_string()
+                }
+            }
+            None => normalized.to_string(),
+        }
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_authority_override_common_with_tid() {
+        let app =
+            test_app_with_authority("cid", "https://login.microsoftonline.com/common");
+        let jwt = make_jwt(&json!({"tid": "tenant-abc-123"}));
+        let authority = compute_obo_authority(&app, &jwt);
+        assert_eq!(
+            authority,
+            "https://login.microsoftonline.com/tenant-abc-123"
+        );
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_authority_override_organizations_with_tid() {
+        let app = test_app_with_authority(
+            "cid",
+            "https://login.microsoftonline.com/organizations",
+        );
+        let jwt = make_jwt(&json!({"tid": "tenant-xyz"}));
+        let authority = compute_obo_authority(&app, &jwt);
+        assert_eq!(
+            authority,
+            "https://login.microsoftonline.com/tenant-xyz"
+        );
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_authority_keeps_specific_tenant() {
+        let app = test_app_with_authority(
+            "cid",
+            "https://login.microsoftonline.com/my-tenant-id",
+        );
+        let jwt = make_jwt(&json!({"tid": "other-tenant"}));
+        let authority = compute_obo_authority(&app, &jwt);
+        assert_eq!(
+            authority,
+            "https://login.microsoftonline.com/my-tenant-id"
+        );
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_authority_override_common_trailing_slash() {
+        let app =
+            test_app_with_authority("cid", "https://login.microsoftonline.com/common/");
+        let jwt = make_jwt(&json!({"tid": "tenant-trailing"}));
+        let authority = compute_obo_authority(&app, &jwt);
+        assert_eq!(
+            authority,
+            "https://login.microsoftonline.com/tenant-trailing"
+        );
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_authority_gcch_override_common() {
+        let app =
+            test_app_with_authority("cid", "https://login.microsoftonline.us/common");
+        let jwt = make_jwt(&json!({"tid": "gcch-tenant"}));
+        let authority = compute_obo_authority(&app, &jwt);
+        assert_eq!(
+            authority,
+            "https://login.microsoftonline.us/gcch-tenant"
+        );
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_authority_no_tid_in_assertion() {
+        let app =
+            test_app_with_authority("cid", "https://login.microsoftonline.com/common");
+        let jwt = make_jwt(&json!({"sub": "user"}));
+        let authority = compute_obo_authority(&app, &jwt);
+        assert_eq!(
+            authority,
+            "https://login.microsoftonline.com/common"
+        );
     }
 
     // ---------------------------------------------------------------

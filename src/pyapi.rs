@@ -39,16 +39,13 @@ macro_rules! to_pyerr {
     };
 }
 
-fn wait<F>(_py: Python, f: F) -> PyResult<F::Output>
+fn wait<F>(f: F) -> PyResult<F::Output>
 where
     F: Future + Send,
     F::Output: Send,
 {
     match Runtime::new() {
-        Ok(runtime) => {
-            // Run async code without holding the GIL
-            Ok(runtime.block_on(f))
-        }
+        Ok(runtime) => Ok(runtime.block_on(f)),
         Err(e) => Err(to_pyerr!(e)),
     }
 }
@@ -66,9 +63,9 @@ macro_rules! str_vec_ref {
 }
 
 macro_rules! run_async {
-    ($py:ident, $client:expr, $func:ident $(, $arg:expr)* $(,)?) => {{
+    ($client:expr, $func:ident $(, $arg:expr)* $(,)?) => {{
         let future = $client.$func($($arg),*);
-        wait($py, future)?.map_err(|e| to_pyerr!(e))?
+        wait(future)?.map_err(|e| to_pyerr!(e))?
     }}
 }
 
@@ -99,10 +96,10 @@ macro_rules! serialize_impl {
         paste! {
             #[pymethods]
             impl [<Py $type>] {
-                fn to_bytes(&self, py: Python) -> PyResult<Py<PyAny>> {
+                fn to_bytes(&self) -> PyResult<Py<PyAny>> {
                     let bytes = serialize_obj(&self.$inner)
                         .map_err(|e| to_pyerr!(e))?;
-                    Ok(PyBytes::new(py, &bytes).into())
+                    Python::attach(|py| Ok(PyBytes::new(py, &bytes).into()))
                 }
 
                 #[classmethod]
@@ -568,26 +565,27 @@ impl PyPublicClientApplication {
         })
     }
 
-    pub fn check_user_exists(&self, username: &str, py: Python<'_>) -> PyResult<PyAuthInit> {
-        let auth_init = run_async!(py, self.client, check_user_exists, username, None, &[]);
+    pub fn check_user_exists(&self, username: &str) -> PyResult<PyAuthInit> {
+        let auth_init = run_async!(self.client, check_user_exists, username, None, &[]);
         Ok(PyAuthInit { auth_init })
     }
 
     #[allow(clippy::needless_pass_by_value)] // PyO3 requires owned types
+    #[pyo3(signature = (username, password, scopes, auth_init, mfa_method=None))]
     pub fn initiate_acquire_token_by_mfa_flow(
         &self,
         username: &str,
         password: Option<&str>,
         scopes: Vec<String>,
         auth_init: Option<&PyAuthInit>,
-        #[cfg(feature = "mfa_method_selection")] mfa_method: Option<&str>,
-        py: Python<'_>,
+        mfa_method: Option<&str>,
     ) -> PyResult<PyMFAAuthContinue> {
         let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
         let rust_auth_init = auth_init.map(|a| a.auth_init.clone());
         #[cfg(not(feature = "mfa_method_selection"))]
+        let _ = mfa_method;
+        #[cfg(not(feature = "mfa_method_selection"))]
         let flow = run_async!(
-            py,
             self.client,
             initiate_acquire_token_by_mfa_flow,
             username,
@@ -599,7 +597,6 @@ impl PyPublicClientApplication {
         );
         #[cfg(feature = "mfa_method_selection")]
         let flow = run_async!(
-            py,
             self.client,
             initiate_acquire_token_by_mfa_flow,
             username,
@@ -619,10 +616,8 @@ impl PyPublicClientApplication {
         flow: &mut PyMFAAuthContinue,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        py: Python<'_>,
     ) -> PyResult<PyUserToken> {
         let token = run_async!(
-            py,
             self.client,
             acquire_token_by_mfa_flow,
             username,
@@ -631,6 +626,24 @@ impl PyPublicClientApplication {
             &mut flow.flow
         );
         Ok(PyUserToken { token })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn acquire_token_by_username_password(
+        &self,
+        username: &str,
+        password: &str,
+        scopes: Vec<String>,
+    ) -> PyResult<PyUserToken> {
+        Ok(PyUserToken {
+            token: run_async!(
+                self.client,
+                acquire_token_by_username_password,
+                username,
+                password,
+                str_vec_ref!(scopes)
+            ),
+        })
     }
 }
 
@@ -647,7 +660,6 @@ impl PyBrokerClientApplication {
         client_id: Option<&str>,
         transport_key: Option<&PyLoadableMsOapxbcRsaKey>,
         cert_key: Option<&PyLoadableMsDeviceEnrolmentKey>,
-        _py: Python,
     ) -> PyResult<Self> {
         Ok(PyBrokerClientApplication {
             client: BrokerClientApplication::new(
@@ -666,14 +678,12 @@ impl PyBrokerClientApplication {
         attrs: &PyEnrollAttrs,
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
-        py: Python,
     ) -> PyResult<(
         PyLoadableMsOapxbcRsaKey,
         PyLoadableMsDeviceEnrolmentKey,
         String,
     )> {
         let (transport_key, cert_key, device_id) = run_async!(
-            py,
             self.client,
             enroll_device,
             refresh_token,
@@ -697,17 +707,16 @@ impl PyBrokerClientApplication {
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
         request_resource: Option<String>,
-        py: Python,
     ) -> PyResult<PyUserToken> {
         Ok(PyUserToken {
             token: run_async!(
-                py,
                 self.client,
                 acquire_token_by_username_password,
                 username,
                 password,
                 str_vec_ref!(scopes),
                 request_resource,
+                None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
             ),
@@ -722,16 +731,15 @@ impl PyBrokerClientApplication {
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
         request_resource: Option<String>,
-        py: Python,
     ) -> PyResult<PyUserToken> {
         Ok(PyUserToken {
             token: run_async!(
-                py,
                 self.client,
                 acquire_token_by_refresh_token,
                 refresh_token,
                 str_vec_ref!(scopes),
                 request_resource,
+                None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
             ),
@@ -742,11 +750,9 @@ impl PyBrokerClientApplication {
         &self,
         username: &str,
         password: &str,
-        py: Python,
     ) -> PyResult<PyUserToken> {
         Ok(PyUserToken {
             token: run_async!(
-                py,
                 self.client,
                 acquire_token_by_username_password_for_device_enrollment,
                 username,
@@ -757,21 +763,18 @@ impl PyBrokerClientApplication {
 
     pub fn initiate_device_flow_for_device_enrollment(
         &self,
-        py: Python,
     ) -> PyResult<PyDeviceAuthorizationResponse> {
         Ok(PyDeviceAuthorizationResponse {
-            flow: run_async!(py, self.client, initiate_device_flow_for_device_enrollment,),
+            flow: run_async!(self.client, initiate_device_flow_for_device_enrollment,),
         })
     }
 
     pub fn acquire_token_by_device_flow(
         &self,
         flow: &PyDeviceAuthorizationResponse,
-        py: Python,
     ) -> PyResult<PyUserToken> {
         Ok(PyUserToken {
             token: run_async!(
-                py,
                 self.client,
                 acquire_token_by_device_flow,
                 flow.flow.clone(),
@@ -779,27 +782,28 @@ impl PyBrokerClientApplication {
         })
     }
 
-    pub fn check_user_exists(&self, username: &str, py: Python) -> PyResult<PyAuthInit> {
-        let auth_init = run_async!(py, self.client, check_user_exists, username, &[]);
+    pub fn check_user_exists(&self, username: &str) -> PyResult<PyAuthInit> {
+        let auth_init = run_async!(self.client, check_user_exists, username, &[]);
         Ok(PyAuthInit { auth_init })
     }
 
     #[allow(clippy::needless_pass_by_value)] // PyO3 requires owned types
+    #[pyo3(signature = (username, password, options, auth_init, selected_method=None))]
     pub fn initiate_acquire_token_by_mfa_flow_for_device_enrollment(
         &self,
         username: &str,
         password: Option<&str>,
         options: Vec<PyAuthOption>,
         auth_init: Option<&PyAuthInit>,
-        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
-        py: Python,
+        selected_method: Option<&str>,
     ) -> PyResult<PyMFAAuthContinue> {
         let rust_options: Vec<AuthOption> = options.into_iter().map(|o| o.into()).collect();
         let rust_auth_init = auth_init.map(|a| a.auth_init.clone());
 
         #[cfg(not(feature = "mfa_method_selection"))]
+        let _ = selected_method;
+        #[cfg(not(feature = "mfa_method_selection"))]
         let flow = run_async!(
-            py,
             self.client,
             initiate_acquire_token_by_mfa_flow_for_device_enrollment,
             username,
@@ -810,7 +814,6 @@ impl PyBrokerClientApplication {
 
         #[cfg(feature = "mfa_method_selection")]
         let flow = run_async!(
-            py,
             self.client,
             initiate_acquire_token_by_mfa_flow_for_device_enrollment,
             username,
@@ -829,10 +832,8 @@ impl PyBrokerClientApplication {
         flow: &mut PyMFAAuthContinue,
         auth_data: Option<&str>,
         poll_attempt: Option<u32>,
-        py: Python,
     ) -> PyResult<PyUserToken> {
         let token = run_async!(
-            py,
             self.client,
             acquire_token_by_mfa_flow,
             username,
@@ -849,11 +850,9 @@ impl PyBrokerClientApplication {
         password: &str,
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
-        py: Python,
     ) -> PyResult<PySealedData> {
         Ok(PySealedData {
             data: run_async!(
-                py,
                 self.client,
                 acquire_user_prt_by_username_password,
                 username,
@@ -869,11 +868,9 @@ impl PyBrokerClientApplication {
         refresh_token: &str,
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
-        py: Python,
     ) -> PyResult<PySealedData> {
         Ok(PySealedData {
             data: run_async!(
-                py,
                 self.client,
                 acquire_user_prt_by_refresh_token,
                 refresh_token,
@@ -891,16 +888,15 @@ impl PyBrokerClientApplication {
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
         request_resource: Option<String>,
-        py: Python,
     ) -> PyResult<PyUserToken> {
         Ok(PyUserToken {
             token: run_async!(
-                py,
                 self.client,
                 exchange_prt_for_access_token,
                 &sealed_prt.data,
                 str_vec_ref!(scope),
                 request_resource,
+                None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
                 #[cfg(feature = "redirect_uri")]
@@ -946,11 +942,9 @@ impl PyBrokerClientApplication {
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
         request_tgt: bool,
-        py: Python,
     ) -> PyResult<PySealedData> {
         Ok(PySealedData {
             data: run_async!(
-                py,
                 self.client,
                 exchange_prt_for_prt,
                 &sealed_prt.data,
@@ -967,11 +961,9 @@ impl PyBrokerClientApplication {
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
         pin: &str,
-        py: Python,
     ) -> PyResult<PyLoadableMsHelloKey> {
         Ok(PyLoadableMsHelloKey {
             key: run_async!(
-                py,
                 self.client,
                 provision_hello_for_business_key,
                 &token.token,
@@ -993,17 +985,16 @@ impl PyBrokerClientApplication {
         machine_key: &PyStorageKey,
         pin: &str,
         request_resource: Option<String>,
-        py: Python,
     ) -> PyResult<PyUserToken> {
         Ok(PyUserToken {
             token: run_async!(
-                py,
                 self.client,
                 acquire_token_by_hello_for_business_key,
                 username,
                 &key.key,
                 str_vec_ref!(scopes),
                 request_resource,
+                None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
                 pin,
@@ -1018,11 +1009,9 @@ impl PyBrokerClientApplication {
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
         pin: &str,
-        py: Python,
     ) -> PyResult<PySealedData> {
         Ok(PySealedData {
             data: run_async!(
-                py,
                 self.client,
                 acquire_user_prt_by_hello_for_business_key,
                 username,
@@ -1039,10 +1028,8 @@ impl PyBrokerClientApplication {
         prt: &PySealedData,
         tpm: &mut PyBoxedDynTpm,
         machine_key: &PyStorageKey,
-        py: Python,
     ) -> PyResult<String> {
         Ok(run_async!(
-            py,
             self.client,
             acquire_prt_sso_cookie,
             &prt.data,
@@ -1171,10 +1158,9 @@ impl PyConfidentialClientApplication {
     pub fn acquire_token_silent(
         &self,
         scopes: Vec<String>,
-        py: Python<'_>,
     ) -> PyResult<PyClientToken> {
         let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
-        let token = run_async!(py, self.client, acquire_token_silent, scopes_ref, None);
+        let token = run_async!(self.client, acquire_token_silent, scopes_ref, None);
         Ok(PyClientToken { token })
     }
 
@@ -1198,17 +1184,16 @@ impl PyConfidentialClientApplication {
         &self,
         user_assertion: &str,
         scopes: Vec<String>,
-        py: Python<'_>,
     ) -> PyResult<PyOboToken> {
         let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
         let future = self
             .client
             .acquire_token_on_behalf_of(user_assertion, scopes_ref, None);
-        let result = wait(py, future)?;
+        let result = wait(future)?;
         match result {
             Ok(token) => Ok(PyOboToken { token }),
             Err(MsalError::OboInteractionRequired { error, claims }) => {
-                Err(to_obo_pyerr(py, error, claims))
+                Python::attach(|py| Err(to_obo_pyerr(py, error, claims)))
             }
             Err(e) => Err(to_pyerr!(e)),
         }

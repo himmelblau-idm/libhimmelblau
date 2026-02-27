@@ -51,6 +51,7 @@ int main() {
 	ConfidentialClientApplication *app = NULL;
 	OboToken *obo_token = NULL;
 	MSAL_ERROR *err = NULL;
+	int rc = 0;
 	char *client_id = NULL;
 	char *client_secret = NULL;
 	char *authority = NULL;
@@ -67,7 +68,7 @@ int main() {
 	err = set_global_tracing_level(DEBUG);
 	if (err != NULL) {
 		printf("Failed setting the tracing level: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 
 	/* Collect configuration */
@@ -99,7 +100,7 @@ int main() {
 		&app);
 	if (err != NULL) {
 		printf("Failed to initialize confidential client: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 	printf("Confidential client initialized.\n");
 
@@ -120,42 +121,42 @@ int main() {
 				printf("  -> claims: %s\n", err->claims);
 			}
 		}
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 
 	/* Display the acquired token */
 	err = obo_token_access_token(obo_token, &access_token);
 	if (err != NULL) {
 		printf("Failed fetching access token: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 	printf("OBO access token: %s\n", access_token);
 
 	err = obo_token_token_type(obo_token, &token_type);
 	if (err != NULL) {
 		printf("Failed fetching token type: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 	printf("Token type: %s\n", token_type);
 
 	err = obo_token_expires_in(obo_token, &expires_in);
 	if (err != NULL) {
 		printf("Failed fetching expires_in: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 	printf("Expires in: %u\n", expires_in);
 
 	err = obo_token_ext_expires_in(obo_token, &ext_expires_in);
 	if (err != NULL) {
 		printf("Failed fetching ext_expires_in: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 	printf("Ext expires in: %u\n", ext_expires_in);
 
 	err = obo_token_scope(obo_token, &token_scope);
 	if (err != NULL) {
 		printf("Failed fetching scope: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 	if (token_scope != NULL) {
 		printf("Scope:        %s\n", token_scope);
@@ -166,7 +167,7 @@ int main() {
 	err = obo_token_refresh_token(obo_token, &refresh_token);
 	if (err != NULL) {
 		printf("Failed fetching refresh token: %s\n", err->msg);
-		goto OUT;
+		rc = 1; goto OUT;
 	}
 	if (refresh_token != NULL) {
 		printf("Refresh token: (present)\n");
@@ -189,5 +190,5 @@ OUT:
 	string_free(refresh_token);
 	string_free(token_scope);
 	string_free(token_type);
-	return 0;
+	return rc;
 }

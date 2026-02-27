@@ -47,18 +47,18 @@ use std::os::raw::{c_char, c_int};
 use std::slice;
 #[cfg(feature = "broker")]
 use std::str::FromStr;
-#[cfg(feature = "on_behalf_of")]
+#[cfg(feature = "broker")]
 use tokio::runtime;
 use tracing::{error, warn, Level};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::auth::*;
-#[cfg(feature = "on_behalf_of")]
-use crate::c_helper::make_error_from_msal_error;
 use crate::c_helper::*;
 use crate::c_helper::{make_error, no_error, MSAL_ERROR, MSAL_ERROR_CODE};
 #[cfg(feature = "on_behalf_of")]
-use crate::confidential_client::{ClientCredential, ConfidentialClientApplication, OboToken};
+use crate::confidential_client::{
+    ClientCredential, ClientToken, ConfidentialClientApplication, OboToken,
+};
 use crate::serializer::{deserialize_obj, serialize_obj};
 #[cfg(feature = "broker")]
 use crate::EnrollAttrs;
@@ -189,21 +189,13 @@ pub extern "C" fn set_global_tracing_level(level: TracingLevel) -> *mut MSAL_ERR
 /// See https://docs.rs/env_logger/latest/env_logger/#enabling-logging for more details.
 #[no_mangle]
 pub extern "C" fn set_module_tracing_filter(filter: *const c_char) -> *mut MSAL_ERROR {
-    let filter_str = unsafe {
-        if filter.is_null() {
+    let filter_str = match wrap_c_char(filter) {
+        Some(s) => s,
+        None => {
             return make_error(
                 MSAL_ERROR_CODE::INVALID_POINTER,
-                "Null filter string".to_string(),
+                "Invalid filter string".to_string(),
             );
-        }
-        match CString::from_raw(filter as *mut c_char).into_string() {
-            Ok(s) => s,
-            Err(_) => {
-                return make_error(
-                    MSAL_ERROR_CODE::INVALID_POINTER,
-                    "Invalid filter string".to_string(),
-                )
-            }
         }
     };
     let subscriber = FmtSubscriber::builder()
@@ -2942,6 +2934,195 @@ pub unsafe extern "C" fn confidential_client_free(input: *mut ConfidentialClient
     free_object!(input);
 }
 
+/// Acquire a token using client credentials (client_credentials grant).
+///
+/// # Arguments
+///
+/// * `app` - A ConfidentialClientApplication created by
+///   `confidential_client_init_with_secret`.
+///
+/// * `scopes` - An array of scope strings for the target API.
+///
+/// * `scopes_len` - The number of elements in `scopes`.
+///
+/// * `out` - An output parameter which will contain the ClientToken.
+///
+/// # Safety
+///
+/// The calling function must ensure that `app`, `scopes`, and `out` are
+/// valid pointers to their respective types.
+#[cfg(feature = "on_behalf_of")]
+#[no_mangle]
+pub unsafe extern "C" fn confidential_acquire_token_silent(
+    app: *mut ConfidentialClientApplication,
+    scopes: *const *const c_char,
+    scopes_len: c_int,
+    out: *mut *mut ClientToken,
+) -> *mut MSAL_ERROR {
+    if app.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid app parameter!".to_string(),
+        );
+    }
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+
+    let app = unsafe { &mut *app };
+    let scopes_vec = match str_array_to_vec(scopes, scopes_len) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let scopes_ref: Vec<&str> = scopes_vec.iter().map(|s| s.as_str()).collect();
+
+    match runtime::Runtime::new() {
+        Ok(rt) => {
+            match rt.block_on(async { app.acquire_token_silent(scopes_ref, None).await }) {
+                Ok(token) => {
+                    unsafe {
+                        *out = Box::into_raw(Box::new(token));
+                    }
+                    no_error()
+                }
+                Err(e) => make_error_from_msal_error(e),
+            }
+        }
+        Err(e) => make_error(MSAL_ERROR_CODE::NO_MEMORY, e.to_string()),
+    }
+}
+
+/// Get the access_token from a ClientToken.
+///
+/// # Safety
+///
+/// The calling function must ensure that `token` is a valid ClientToken pointer
+/// and that `out` is a valid double c_char pointer.
+#[cfg(feature = "on_behalf_of")]
+#[no_mangle]
+pub unsafe extern "C" fn client_token_access_token(
+    token: *mut ClientToken,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if token.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid token parameter!".to_string(),
+        );
+    }
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+    c_str_from_object_string!(token, access_token, out)
+}
+
+/// Get the token_type from a ClientToken.
+///
+/// # Safety
+///
+/// The calling function must ensure that `token` is a valid ClientToken pointer
+/// and that `out` is a valid double c_char pointer.
+#[cfg(feature = "on_behalf_of")]
+#[no_mangle]
+pub unsafe extern "C" fn client_token_token_type(
+    token: *mut ClientToken,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if token.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid token parameter!".to_string(),
+        );
+    }
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+    c_str_from_object_string!(token, token_type, out)
+}
+
+/// Get the expires_in from a ClientToken.
+///
+/// # Safety
+///
+/// The calling function must ensure that `token` is a valid ClientToken pointer
+/// and that `out` is a valid u32 pointer.
+#[cfg(feature = "on_behalf_of")]
+#[no_mangle]
+pub unsafe extern "C" fn client_token_expires_in(
+    token: *mut ClientToken,
+    out: *mut u32,
+) -> *mut MSAL_ERROR {
+    if token.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid token parameter!".to_string(),
+        );
+    }
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+    let token = unsafe { &*token };
+    unsafe {
+        *out = token.expires_in;
+    }
+    no_error()
+}
+
+/// Get the ext_expires_in from a ClientToken.
+///
+/// # Safety
+///
+/// The calling function must ensure that `token` is a valid ClientToken pointer
+/// and that `out` is a valid u32 pointer.
+#[cfg(feature = "on_behalf_of")]
+#[no_mangle]
+pub unsafe extern "C" fn client_token_ext_expires_in(
+    token: *mut ClientToken,
+    out: *mut u32,
+) -> *mut MSAL_ERROR {
+    if token.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid token parameter!".to_string(),
+        );
+    }
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+    let token = unsafe { &*token };
+    unsafe {
+        *out = token.ext_expires_in;
+    }
+    no_error()
+}
+
+/// Free a ClientToken.
+///
+/// # Safety
+///
+/// The calling function must ensure that the `input` raw pointer is valid and
+/// can be dereferenced.
+#[cfg(feature = "on_behalf_of")]
+#[no_mangle]
+pub unsafe extern "C" fn client_token_free(input: *mut ClientToken) {
+    free_object!(input);
+}
+
 /// # Safety
 ///
 /// The calling function must ensure that the `input` raw pointer is valid and
@@ -2953,10 +3134,11 @@ pub unsafe extern "C" fn sealed_data_free(input: *mut SealedData) {
 }
 
 #[cfg(all(test, feature = "on_behalf_of"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::error::{ErrorResponse, MsalError};
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
 
     fn test_obo_token() -> OboToken {
         OboToken {
@@ -3084,6 +3266,99 @@ mod tests {
                 &mut token_out,
             )
         });
+    }
+
+    fn test_client_token() -> ClientToken {
+        ClientToken {
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            ext_expires_in: 7200,
+            access_token: "eyJ0eXAi...".to_string(),
+        }
+    }
+
+    #[test]
+    fn client_token_getters_return_correct_values() {
+        let mut token = test_client_token();
+        let mut str_out: *mut c_char = std::ptr::null_mut();
+        let mut u32_out: u32 = 0;
+
+        let err = unsafe { client_token_access_token(&mut token, &mut str_out) };
+        assert!(err.is_null());
+        assert!(!str_out.is_null());
+        let access = unsafe { CStr::from_ptr(str_out) }.to_str().unwrap();
+        assert_eq!(access, "eyJ0eXAi...");
+        unsafe {
+            let _ = CString::from_raw(str_out);
+        }
+
+        str_out = std::ptr::null_mut();
+        let err = unsafe { client_token_token_type(&mut token, &mut str_out) };
+        assert!(err.is_null());
+        assert!(!str_out.is_null());
+        let tt = unsafe { CStr::from_ptr(str_out) }.to_str().unwrap();
+        assert_eq!(tt, "Bearer");
+        unsafe {
+            let _ = CString::from_raw(str_out);
+        }
+
+        let err = unsafe { client_token_expires_in(&mut token, &mut u32_out) };
+        assert!(err.is_null());
+        assert_eq!(u32_out, 3600);
+
+        let err = unsafe { client_token_ext_expires_in(&mut token, &mut u32_out) };
+        assert!(err.is_null());
+        assert_eq!(u32_out, 7200);
+    }
+
+    #[test]
+    fn client_token_getters_reject_invalid_pointers() {
+        let mut out: *mut c_char = std::ptr::null_mut();
+        assert_invalid_pointer(unsafe {
+            client_token_access_token(std::ptr::null_mut(), &mut out)
+        });
+        assert_invalid_pointer(unsafe {
+            client_token_token_type(std::ptr::null_mut(), &mut out)
+        });
+        let mut u32_out: u32 = 0;
+        assert_invalid_pointer(unsafe {
+            client_token_expires_in(std::ptr::null_mut(), &mut u32_out)
+        });
+        assert_invalid_pointer(unsafe {
+            client_token_ext_expires_in(std::ptr::null_mut(), &mut u32_out)
+        });
+    }
+
+    #[test]
+    fn confidential_acquire_token_silent_rejects_invalid_pointers() {
+        let mut app = test_confidential_client();
+        let mut token_out: *mut ClientToken = std::ptr::null_mut();
+
+        assert_invalid_pointer(unsafe {
+            confidential_acquire_token_silent(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                0,
+                &mut token_out,
+            )
+        });
+
+        assert_invalid_pointer(unsafe {
+            confidential_acquire_token_silent(
+                &mut app,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+            )
+        });
+    }
+
+    #[test]
+    fn client_token_free_accepts_valid_pointer() {
+        let token = Box::into_raw(Box::new(test_client_token()));
+        unsafe {
+            client_token_free(token);
+        }
     }
 
     #[test]

@@ -194,6 +194,7 @@ macro_rules! c_str_from_object_func {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum MSAL_ERROR_CODE {
@@ -353,6 +354,7 @@ pub fn make_error_from_msal_error(error: MsalError) -> *mut MSAL_ERROR {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::error::ErrorResponse;

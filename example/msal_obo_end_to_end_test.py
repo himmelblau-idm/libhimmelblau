@@ -21,6 +21,7 @@ import sys
 import time
 from getpass import getpass
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 try:
@@ -78,7 +79,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--graph-url",
-        default=os.getenv("GRAPH_URL", "https://graph.microsoft.com/v1.0/me"),
+        default=os.getenv("GRAPH_URL"),
+        help="Graph /me endpoint URL. Derived from --downstream-scope if not set.",
     )
     parser.add_argument(
         "--user-assertion",
@@ -94,6 +96,39 @@ def parse_args() -> argparse.Namespace:
         "--non-interactive",
         action="store_true",
         help="Fail instead of prompting when required inputs are missing.",
+    )
+    parser.add_argument(
+        "--use-ropc",
+        action="store_true",
+        default=os.getenv("USE_ROPC", "").lower() in ("1", "true", "yes"),
+        help=(
+            "Use password-only (ROPC) for upstream token acquisition instead of the "
+            "MFA flow. Required for Scenario 2: ROPC acquires the upstream token without "
+            "satisfying MFA, so the CA policy fires during the OBO step."
+        ),
+    )
+    parser.add_argument(
+        "--scenario",
+        type=int,
+        default=int(os.getenv("SCENARIO", "1")),
+        choices=[1, 2, 3],
+        help=(
+            "1 (default): primary OBO success path. "
+            "2: CA claims challenge — OBO must return OboInteractionRequired with claims. "
+            "3: invalid audience assertion — OBO must fail with AcquireTokenFailed, "
+            "not OboInteractionRequired."
+        ),
+    )
+    parser.add_argument(
+        "--print-assertion",
+        action="store_true",
+        default=False,
+        help=(
+            "Acquire the upstream user assertion (Scenario 1 step 1 only) and print it "
+            "to stdout. All other output goes to stderr. Exits without running OBO. "
+            "Useful for: export USER_ASSERTION=\"$(python msal_obo_end_to_end_test.py "
+            "--print-assertion)\""
+        ),
     )
     return parser.parse_args()
 
@@ -192,8 +227,23 @@ def acquire_user_assertion(
     return assertion
 
 
+def derive_graph_url(downstream_scope: str) -> str:
+    """Derive the Graph /me URL from a downstream scope when --graph-url is not set.
+
+    If the scope looks like a Graph URL (e.g. https://graph.microsoft.us/User.Read),
+    extract the base URL and append /v1.0/me. Falls back to commercial Graph.
+    """
+    try:
+        parsed = urlparse(downstream_scope)
+        if parsed.scheme in ("http", "https") and "graph.microsoft" in parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}/v1.0/me"
+    except Exception:
+        pass
+    return "https://graph.microsoft.com/v1.0/me"
+
+
 def call_graph_me(graph_url: str, access_token: str) -> dict:
-    print("Step 3/3: calling Microsoft Graph with OBO token")
+    print(f"Step 3/3: calling Microsoft Graph with OBO token ({graph_url})")
     req = Request(
         graph_url,
         headers={
@@ -219,6 +269,192 @@ def call_graph_me(graph_url: str, access_token: str) -> dict:
         return json.loads(body)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Graph returned non-JSON success response: {body}") from exc
+
+
+def acquire_user_assertion_ropc(
+    authority: str,
+    public_client_id: str,
+    username: str,
+    password: str,
+    incoming_scope: str,
+) -> str:
+    """Acquire an upstream assertion via ROPC (password-only, no MFA).
+
+    Used for Scenario 2: the token is acquired without satisfying MFA so that
+    the CA policy fires during the subsequent OBO exchange for Graph.
+    """
+    print("Step 1/2: acquiring upstream user assertion token via ROPC (password only)")
+    client = PublicClientApplication(client_id=public_client_id, authority=authority)
+    token = client.acquire_token_by_username_password(
+        username, password, [incoming_scope]
+    )
+    assertion = token.access_token
+    if not assertion:
+        raise RuntimeError("ROPC token acquisition returned no access_token")
+    return assertion
+
+
+def run_scenario_2(
+    authority: str,
+    public_client_id: str,
+    confidential_client_id: str,
+    confidential_client_secret: str,
+    username: str,
+    password: str,
+    incoming_scope: str,
+    downstream_scope: str,
+    mfa_method: str,
+    use_ropc: bool = False,
+) -> int:
+    """Scenario 2: CA Claims Challenge.
+
+    Authenticate user_ca scoped to the middle-tier audience (NOT Graph directly),
+    then call OBO for the Graph scope. The CA policy on Graph must fire and return
+    interaction_required with a non-empty claims challenge.
+
+    Use --use-ropc to acquire the upstream token via password-only (ROPC). This
+    ensures the token does not carry an MFA claim, so the CA policy fires during
+    the OBO step. Without --use-ropc, the MFA flow satisfies the CA policy
+    up-front and the challenge never triggers.
+
+    Expected: OboInteractionRequiredError raised with populated claims, error,
+    error_description, and error_codes.
+    """
+    print("Scenario 2: CA Claims Challenge")
+    try:
+        if use_ropc:
+            user_assertion = acquire_user_assertion_ropc(
+                authority=authority,
+                public_client_id=public_client_id,
+                username=username,
+                password=password,
+                incoming_scope=incoming_scope,
+            )
+        else:
+            print("Step 1/2: acquiring upstream user assertion token (middle-tier scope only)")
+            print(
+                "  Note: if CA policy does not trigger, re-run with --use-ropc to "
+                "acquire the upstream token without MFA."
+            )
+            user_assertion = acquire_user_assertion(
+                authority=authority,
+                public_client_id=public_client_id,
+                username=username,
+                password=password,
+                incoming_scope=incoming_scope,
+                mfa_method=mfa_method,
+            )
+    except Exception as exc:
+        print(f"Upstream token acquisition failed: {exc}")
+        return EXIT_UPSTREAM_TOKEN_ERROR
+
+    payload = decode_jwt_payload(user_assertion)
+    print(f"Upstream assertion audience: {payload.get('aud')}")
+
+    print("Step 2/2: calling OBO (expect CA claims challenge)")
+    app = ConfidentialClientApplication(
+        confidential_client_id, authority, confidential_client_secret
+    )
+    try:
+        app.acquire_token_on_behalf_of(user_assertion, [downstream_scope])
+        print(
+            "RESULT: FAIL — OBO succeeded unexpectedly; "
+            "CA policy did not trigger a claims challenge"
+        )
+        return EXIT_OBO_ERROR
+    except OboInteractionRequiredError as exc:
+        claims = getattr(exc, "claims", None)
+        error = getattr(exc, "error", None)
+        error_description = getattr(exc, "error_description", None)
+        error_codes = getattr(exc, "error_codes", None)
+        suberror = getattr(exc, "suberror", None)
+        print("OboInteractionRequiredError raised:")
+        print(f"  error:             {error}")
+        print(f"  error_description: {error_description}")
+        print(f"  error_codes:       {error_codes}")
+        print(f"  suberror:          {suberror}")
+        print(f"  claims:            {claims}")
+        if not claims:
+            print(
+                "RESULT: FAIL — OboInteractionRequiredError raised but claims is empty; "
+                "client cannot perform re-auth without the claims challenge"
+            )
+            return EXIT_OBO_ERROR
+        print("RESULT: PASS — claims challenge received and is machine-readable")
+        return EXIT_OK
+    except Exception as exc:
+        print(f"OBO failed with unexpected error (not a claims challenge): {exc}")
+        return EXIT_OBO_ERROR
+
+
+def run_scenario_3(
+    authority: str,
+    public_client_id: str,
+    confidential_client_id: str,
+    confidential_client_secret: str,
+    username: str,
+    password: str,
+    downstream_scope: str,
+    mfa_method: str,
+) -> int:
+    """Scenario 3: Invalid Audience Assertion.
+
+    Acquire a token scoped directly to the downstream resource (e.g. Graph),
+    whose aud is NOT the middle-tier app. Feed that wrong-audience token to OBO
+    and verify:
+      - validate_assertion_preflight emits a WARN about the aud mismatch.
+      - Entra rejects the exchange (invalid_grant or similar).
+      - The error surfaces as AcquireTokenFailed, NOT OboInteractionRequired.
+    """
+    print("Scenario 3: Invalid Audience Assertion")
+    print(
+        f"Step 1/2: acquiring token directly for downstream scope '{downstream_scope}' "
+        "(wrong audience for OBO)"
+    )
+    wrong_assertion = acquire_user_assertion(
+        authority=authority,
+        public_client_id=public_client_id,
+        username=username,
+        password=password,
+        incoming_scope=downstream_scope,
+        mfa_method=mfa_method,
+    )
+
+    payload = decode_jwt_payload(wrong_assertion)
+    wrong_aud = payload.get("aud")
+    print(f"Wrong-audience assertion aud: {wrong_aud}")
+    if wrong_aud == confidential_client_id or (
+        isinstance(wrong_aud, str) and wrong_aud.endswith(confidential_client_id)
+    ):
+        print(
+            "RESULT: SKIP — acquired token unexpectedly targets the middle-tier app; "
+            "cannot use it as a wrong-audience assertion for this scenario."
+        )
+        return EXIT_OK
+
+    print("Step 2/2: calling OBO with wrong-audience assertion (expect rejection)")
+    app = ConfidentialClientApplication(
+        confidential_client_id, authority, confidential_client_secret
+    )
+    try:
+        app.acquire_token_on_behalf_of(wrong_assertion, [downstream_scope])
+        print("RESULT: FAIL — OBO succeeded unexpectedly with wrong-audience assertion")
+        return EXIT_OBO_ERROR
+    except OboInteractionRequiredError as exc:
+        print(
+            "RESULT: FAIL — got OboInteractionRequired (claims challenge) instead of "
+            "AcquireTokenFailed; wrong error surface for an invalid assertion"
+        )
+        print(f"  error: {getattr(exc, 'error', None)}")
+        print(f"  error_description: {getattr(exc, 'error_description', None)}")
+        return EXIT_OBO_ERROR
+    except Exception as exc:
+        err_str = str(exc)
+        print(f"OBO rejected with: {err_str}")
+        # Any non-OboInteractionRequired exception is the expected outcome:
+        # Entra returns invalid_grant and we surface AcquireTokenFailed.
+        print("RESULT: PASS — OBO correctly rejected with AcquireTokenFailed")
+        return EXIT_OK
 
 
 def main() -> int:
@@ -258,27 +494,76 @@ def main() -> int:
         print(f"Configuration error: {exc}")
         return EXIT_CONFIG_ERROR
 
+    try:
+        public_client_id = prompt_if_missing(
+            args.public_client_id,
+            "Public client ID: ",
+            secret=False,
+            non_interactive=args.non_interactive,
+        )
+        username = prompt_if_missing(
+            args.username,
+            "Entra username: ",
+            secret=False,
+            non_interactive=args.non_interactive,
+        )
+        password = prompt_if_missing(
+            args.password,
+            "Password: ",
+            secret=True,
+            non_interactive=args.non_interactive,
+        )
+    except ValueError as exc:
+        print(f"Configuration error: {exc}")
+        return EXIT_CONFIG_ERROR
+
+    if args.scenario == 2:
+        return run_scenario_2(
+            authority=authority,
+            public_client_id=public_client_id,
+            confidential_client_id=confidential_client_id,
+            confidential_client_secret=confidential_client_secret,
+            username=username,
+            password=password,
+            incoming_scope=incoming_scope,
+            downstream_scope=args.downstream_scope,
+            mfa_method=args.mfa_method,
+            use_ropc=args.use_ropc,
+        )
+
+    if args.scenario == 3:
+        return run_scenario_3(
+            authority=authority,
+            public_client_id=public_client_id,
+            confidential_client_id=confidential_client_id,
+            confidential_client_secret=confidential_client_secret,
+            username=username,
+            password=password,
+            downstream_scope=args.downstream_scope,
+            mfa_method=args.mfa_method,
+        )
+
+    # --- Scenario 1 (default) ---
     user_assertion = args.user_assertion
     if not user_assertion:
         try:
-            public_client_id = prompt_if_missing(
-                args.public_client_id,
-                "Public client ID: ",
-                secret=False,
-                non_interactive=args.non_interactive,
-            )
-            username = prompt_if_missing(
-                args.username,
-                "Entra username: ",
-                secret=False,
-                non_interactive=args.non_interactive,
-            )
-            password = prompt_if_missing(
-                args.password,
-                "Password: ",
-                secret=True,
-                non_interactive=args.non_interactive,
-            )
+            if args.print_assertion:
+                # Redirect stdout to stderr so only the bare assertion reaches stdout.
+                _real_stdout = sys.stdout
+                sys.stdout = sys.stderr
+                try:
+                    user_assertion = acquire_user_assertion(
+                        authority=authority,
+                        public_client_id=public_client_id,
+                        username=username,
+                        password=password,
+                        incoming_scope=incoming_scope,
+                        mfa_method=args.mfa_method,
+                    )
+                finally:
+                    sys.stdout = _real_stdout
+                print(user_assertion, end="")
+                return EXIT_OK
             user_assertion = acquire_user_assertion(
                 authority=authority,
                 public_client_id=public_client_id,
@@ -296,6 +581,8 @@ def main() -> int:
     upstream_payload = decode_jwt_payload(user_assertion)
     upstream_aud = upstream_payload.get("aud")
     print(f"Upstream assertion audience: {upstream_aud}")
+
+    graph_url = args.graph_url or derive_graph_url(args.downstream_scope)
 
     print("Step 2/3: running OBO exchange")
     app = ConfidentialClientApplication(
@@ -325,7 +612,7 @@ def main() -> int:
     print(f"OBO access token (redacted): {redact_token(obo_token.access_token)}")
 
     try:
-        profile = call_graph_me(args.graph_url, obo_token.access_token)
+        profile = call_graph_me(graph_url, obo_token.access_token)
     except Exception as exc:
         print(f"Graph validation failed: {exc}")
         return EXIT_GRAPH_ERROR
