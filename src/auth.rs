@@ -978,9 +978,11 @@ impl ExchangePRTPayload {
 #[cfg(feature = "broker")]
 #[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct RefreshTokenCredentialPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
     iat: Option<i64>,
     refresh_token: String,
-    request_nonce: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_nonce: Option<String>,
     ua_client_id: Option<String>,
     ua_redirect_uri: Option<String>,
     x_client_platform: Option<String>,
@@ -990,13 +992,7 @@ struct RefreshTokenCredentialPayload {
 
 #[cfg(feature = "broker")]
 impl RefreshTokenCredentialPayload {
-    fn new(prt: &PrimaryRefreshToken, nonce: &str) -> Result<Self, MsalError> {
-        let iat: i64 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
-            .as_secs()
-            .try_into()
-            .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?;
+    fn new(prt: &PrimaryRefreshToken, nonce: Option<&str>) -> Result<Self, MsalError> {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
                 "{} {}",
@@ -1004,10 +1000,29 @@ impl RefreshTokenCredentialPayload {
             )),
             Err(_) => None,
         };
+        // When a nonce is provided (from the sso_nonce URL parameter),
+        // use it as request_nonce and omit iat.
+        // When no nonce is provided (proactive SSO flow), use iat only.
+        let (iat, request_nonce) = match nonce {
+            Some(n) => (None, Some(n.to_string())),
+            None => {
+                let iat: i64 = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| {
+                        MsalError::GeneralFailure(format!("Failed choosing iat: {}", e))
+                    })?
+                    .as_secs()
+                    .try_into()
+                    .map_err(|e| {
+                        MsalError::GeneralFailure(format!("Failed choosing iat: {}", e))
+                    })?;
+                (Some(iat), None)
+            }
+        };
         Ok(RefreshTokenCredentialPayload {
-            iat: Some(iat),
+            iat,
             refresh_token: prt.refresh_token.clone(),
-            request_nonce: nonce.to_string(),
+            request_nonce,
             ua_client_id: None,
             ua_redirect_uri: None,
             x_client_platform: None,
@@ -6020,9 +6035,49 @@ impl BrokerClientApplication {
     /// * Success: A JWT (as a String) that can be used for single sign-on
     ///   (SSO) authentication.
     /// * Failure: An MsalError, indicating the failure.
+    ///
+    /// Given the primary refresh token, this method creates a PRT SSO
+    /// cookie that can be used for browser single sign-on (SSO).
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` - An encrypted primary refresh token.
+    ///
+    /// * `sso_nonce` - An optional SSO nonce extracted from a login URL's
+    ///   `sso_nonce` query parameter. When `None`, the cookie is generated
+    ///   with an `iat` (issued-at) claim instead, suitable for proactive
+    ///   SSO where the cookie is set as a static header. When `Some`, the
+    ///   provided nonce is included as `request_nonce` in the cookie.
+    ///
+    /// * `tpm` - The TPM object.
+    ///
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: A JWT (as a String) that can be used for single sign-on
+    ///   (SSO) authentication.
+    /// * Failure: An MsalError, indicating the failure.
     pub async fn acquire_prt_sso_cookie(
         &self,
         prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<String, MsalError> {
+        self.acquire_prt_sso_cookie_with_nonce(prt, None, tpm, storage_key)
+            .await
+    }
+
+    /// Like [`acquire_prt_sso_cookie`](Self::acquire_prt_sso_cookie), but
+    /// accepts an optional SSO nonce.
+    ///
+    /// When `sso_nonce` is `None`, the cookie uses an `iat` (issued-at)
+    /// claim, making it suitable for proactive SSO (e.g., the linux-entra-sso
+    /// extension's static header injection). When `Some`, the provided
+    /// nonce is included as `request_nonce`.
+    pub async fn acquire_prt_sso_cookie_with_nonce(
+        &self,
+        prt: &SealedData,
+        sso_nonce: Option<&str>,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
@@ -6039,10 +6094,8 @@ impl BrokerClientApplication {
         let prt = self.unseal_user_prt(prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
 
-        let nonce = self.request_nonce().await?;
-
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&RefreshTokenCredentialPayload::new(&prt, &nonce)?).map_err(
+            serde_json::to_vec(&RefreshTokenCredentialPayload::new(&prt, sso_nonce)?).map_err(
                 |e| MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e)),
             )?,
         )
@@ -6071,7 +6124,7 @@ impl BrokerClientApplication {
         let nonce = self.request_nonce().await?;
 
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, &nonce)?).map_err(|e| {
+            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, Some(&nonce))?).map_err(|e| {
                 MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e))
             })?,
         )
