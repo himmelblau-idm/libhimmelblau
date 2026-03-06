@@ -275,9 +275,8 @@ pub struct MFAAuthContinue {
     /// When set, acquire_token_by_mfa_flow should skip polling and exchange
     /// this code directly for an access token.
     pub auth_code: Option<String>,
-    /// Whether the FIDO method is a passkey (cross-device capable).
-    /// Used to filter out passkeys from default MFA method selection.
-    pub fido_is_passkey: bool,
+    /// Whether to skip FidoKey in MFA method selection.
+    pub skip_fido_for_mfa: bool,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -311,7 +310,7 @@ impl MFAAuthContinue {
             method.auth_method_id
         } else if !self.mfa_methods.is_empty() {
             for method in self.get_mfa_method_details() {
-                if !self.mfa_method_is_passkey(&method) {
+                if !self.should_skip_fido_method(&method) {
                     return method.auth_method_id.clone();
                 }
             }
@@ -344,9 +343,9 @@ impl MFAAuthContinue {
         self.get_available_mfa_methods().len()
     }
 
-    fn mfa_method_is_passkey(&self, method: &MfaMethodInfo) -> bool {
+    fn should_skip_fido_method(&self, method: &MfaMethodInfo) -> bool {
         if method.auth_method_id == "FidoKey" {
-            self.fido_is_passkey
+            self.skip_fido_for_mfa
         } else {
             false
         }
@@ -357,12 +356,12 @@ impl MFAAuthContinue {
         if let Some(details) = self
             .get_mfa_method_details()
             .into_iter()
-            .find(|method| method.is_default && !self.mfa_method_is_passkey(method))
+            .find(|method| method.is_default && !self.should_skip_fido_method(method))
         {
             Some(details)
         } else if !self.mfa_methods.is_empty() {
             for method in self.get_mfa_method_details() {
-                if !self.mfa_method_is_passkey(&method) {
+                if !self.should_skip_fido_method(&method) {
                     return Some(method);
                 }
             }
@@ -1008,9 +1007,7 @@ impl RefreshTokenCredentialPayload {
             None => {
                 let iat: i64 = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map_err(|e| {
-                        MsalError::GeneralFailure(format!("Failed choosing iat: {}", e))
-                    })?
+                    .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
                     .as_secs()
                     .try_into()
                     .map_err(|e| {
@@ -2720,7 +2717,7 @@ impl PublicClientApplication {
                         }],
                         selected_mfa_method_id: Some("AccessPass".to_string()),
                         auth_code: None,
-                        fido_is_passkey: false,
+                        skip_fido_for_mfa: false,
                     });
                 }
             };
@@ -2784,7 +2781,7 @@ impl PublicClientApplication {
                                 }],
                                 selected_mfa_method_id: Some("PhoneAppNotification".to_string()),
                                 auth_code: None,
-                                fido_is_passkey: false,
+                                skip_fido_for_mfa: false,
                             });
                         }
                     }
@@ -2792,7 +2789,23 @@ impl PublicClientApplication {
             };
         }
 
-        let fido_is_a_passkey = cred_type
+        debug!("Credential type: pref_credential={}, has_password={}, has_fido={:?}, has_remote_ngc={:?}, has_access_pass={:?}, is_passkey_support_enabled={:?}",
+            cred_type.credentials.pref_credential,
+            cred_type.credentials.has_password,
+            cred_type.credentials.has_fido,
+            cred_type.credentials.has_remote_ngc,
+            cred_type.credentials.has_access_pass,
+            auth_config.is_passkey_support_enabled,
+        );
+        if let Some(ref fido_params) = cred_type.credentials.fido_params {
+            debug!(
+                "FIDO params: has_cross_device_capable_passkey={:?}, allow_list_count={}",
+                fido_params.has_cross_device_capable_passkey,
+                fido_params.fido_allow_list.len(),
+            );
+        }
+
+        let user_has_any_cross_device_fido = cred_type
             .credentials
             .fido_params
             .as_ref()
@@ -2806,49 +2819,45 @@ impl PublicClientApplication {
             () => {
                 if options.contains(&AuthOption::PasswordlessFido) {
                     if let Some(ref fido_params) = cred_type.credentials.fido_params {
-                        // If this is a Passkey, bail out. We don't support passkey auth
-                        if !fido_is_a_passkey {
-                            // Passwordless fido is enabled, we can drop out here
-                            let url_post = match &auth_config.url_post {
-                                Some(url_post) => url_post.clone(),
-                                None => {
-                                    return Err(MsalError::GeneralFailure(
-                                        "urlBeginAuth is missing".to_string(),
-                                    ))
-                                }
-                            };
-                            auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
-                            let fido_auth_config = self
-                                .handle_auth_config_fido_get(username, &auth_config, &request_id)
-                                .await?;
-                            return Ok(MFAAuthContinue {
-                                msg: "".to_string(),
-                                entropy: None,
-                                max_poll_attempts: auth_config.max_poll_attempts,
-                                polling_interval: Some(5000),
-                                session_id: fido_auth_config.session_id,
-                                flow_token: sft,
-                                ctx: sctx,
-                                canary: auth_config.canary,
-                                url_end_auth: auth_config.url_end_auth,
-                                url_post,
-                                resource: resource.map(|s| s.to_string()),
-                                dag: None,
-                                fido_challenge: fido_auth_config.fido_challenge,
-                                fido_allow_list: Some(fido_params.fido_allow_list.clone()),
-                                cross_domain_canary: fido_auth_config.cross_domain_canary,
-                                url_session_state: auth_config.url_session_state,
-                                mfa_methods: vec!["FidoKey".to_string()].into(),
-                                mfa_method_details: vec![MfaMethodInfo {
-                                    auth_method_id: "FidoKey".to_string(),
-                                    display: "FidoKey".to_string(),
-                                    is_default: true,
-                                }],
-                                selected_mfa_method_id: Some("FidoKey".to_string()),
-                                auth_code: None,
-                                fido_is_passkey: false,
-                            });
-                        }
+                        let url_post = match &auth_config.url_post {
+                            Some(url_post) => url_post.clone(),
+                            None => {
+                                return Err(MsalError::GeneralFailure(
+                                    "urlBeginAuth is missing".to_string(),
+                                ))
+                            }
+                        };
+                        auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
+                        let fido_auth_config = self
+                            .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                            .await?;
+                        return Ok(MFAAuthContinue {
+                            msg: "".to_string(),
+                            entropy: None,
+                            max_poll_attempts: auth_config.max_poll_attempts,
+                            polling_interval: Some(5000),
+                            session_id: fido_auth_config.session_id,
+                            flow_token: sft,
+                            ctx: sctx,
+                            canary: auth_config.canary,
+                            url_end_auth: auth_config.url_end_auth,
+                            url_post,
+                            resource: resource.map(|s| s.to_string()),
+                            dag: None,
+                            fido_challenge: fido_auth_config.fido_challenge,
+                            fido_allow_list: Some(fido_params.fido_allow_list.clone()),
+                            cross_domain_canary: fido_auth_config.cross_domain_canary,
+                            url_session_state: auth_config.url_session_state,
+                            mfa_methods: vec!["FidoKey".to_string()].into(),
+                            mfa_method_details: vec![MfaMethodInfo {
+                                auth_method_id: "FidoKey".to_string(),
+                                display: "FidoKey".to_string(),
+                                is_default: true,
+                            }],
+                            selected_mfa_method_id: Some("FidoKey".to_string()),
+                            auth_code: None,
+                            skip_fido_for_mfa: false,
+                        });
                     }
                 }
             };
@@ -2862,7 +2871,7 @@ impl PublicClientApplication {
             _ => {}
         }
 
-        // Now attempt to emulate the old behavior, attempting passwordless MFA
+        // Now attempt to emulate the old behavior, attempting passwordless
         // auth even if it isn't the preferred method.
         passwordless_tap!();
         passwordless_remote_ngc!();
@@ -2999,7 +3008,8 @@ impl PublicClientApplication {
                     }
                 }
                 if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
-                    let fido_is_a_passkey = fido_is_a_passkey
+                    debug!("MFA methods available: {:?}", arr_user_proofs);
+                    let skip_fido_for_mfa = user_has_any_cross_device_fido
                         || auth_config.is_passkey_support_enabled.unwrap_or(false);
 
                     // Try to use provided MFA method if available
@@ -3008,7 +3018,7 @@ impl PublicClientApplication {
                             .iter()
                             .find(|proof| {
                                 proof.auth_method_id == requested_method
-                                    && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                                    && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
                             })
                             .ok_or_else(|| {
                                 let available = arr_user_proofs
@@ -3022,10 +3032,10 @@ impl PublicClientApplication {
                             })?
                     } else if let Some(method) = arr_user_proofs.iter().find(|proof| {
                         proof.is_default
-                            && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                            && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
                     }) {
                         method
-                    } else if fido_is_a_passkey {
+                    } else if skip_fido_for_mfa {
                         // Skip FidoKey methods entirely if we can't use them
                         match arr_user_proofs
                             .iter()
@@ -3037,7 +3047,7 @@ impl PublicClientApplication {
                             }) {
                             Some(method) => method,
                             None => {
-                                info!("No usable MFA methods found (FIDO was passkey)");
+                                info!("No usable MFA methods found (FIDO was cross-device)");
                                 dag_fallback!();
                             }
                         }
@@ -3173,7 +3183,7 @@ impl PublicClientApplication {
                             .collect(),
                         selected_mfa_method_id: Some(selected_auth_method.auth_method_id.clone()),
                         auth_code: None,
-                        fido_is_passkey: fido_is_a_passkey,
+                        skip_fido_for_mfa: skip_fido_for_mfa,
                     })
                 } else {
                     info!("No MFA methods found");
@@ -3205,7 +3215,7 @@ impl PublicClientApplication {
                     mfa_method_details: vec![],
                     selected_mfa_method_id: None,
                     auth_code: Some(auth_code),
-                    fido_is_passkey: false,
+                    skip_fido_for_mfa: false,
                 })
             }
             Err(e) => {
@@ -6124,9 +6134,9 @@ impl BrokerClientApplication {
         let nonce = self.request_nonce().await?;
 
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, Some(&nonce))?).map_err(|e| {
-                MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e))
-            })?,
+            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, Some(&nonce))?).map_err(
+                |e| MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e)),
+            )?,
         )
         .set_typ(Some("JWT"))
         .build();
