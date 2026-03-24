@@ -871,6 +871,8 @@ impl PyBrokerClientApplication {
                 request_resource,
                 &mut tpm.tpm,
                 &machine_key.key,
+                #[cfg(feature = "redirect_uri")]
+                None,
             ),
         })
     }

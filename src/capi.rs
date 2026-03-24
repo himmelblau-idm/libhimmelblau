@@ -1509,6 +1509,8 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
         on_behalf_of_client_id.as_deref(),
         &mut tpm.0,
         &machine_key.0,
+        #[cfg(feature = "redirect_uri")]
+        None,
     ) {
         Ok(resp) => resp,
         Err(e) => return e,

@@ -4701,6 +4701,8 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -4768,6 +4770,8 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5303,6 +5307,7 @@ impl BrokerClientApplication {
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         let v2_endpoint = !scope.is_empty();
         if !scope.is_empty() && request_resource.is_some() {
@@ -5332,6 +5337,8 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                redirect_uri,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5349,6 +5356,7 @@ impl BrokerClientApplication {
         session_key: &SessionKey,
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging a PRT for an Access Token");
 
@@ -5365,6 +5373,8 @@ impl BrokerClientApplication {
                 on_behalf_of_client_id,
                 tpm,
                 storage_key,
+                #[cfg(feature = "redirect_uri")]
+                redirect_uri,
             )
             .await?;
 
@@ -5376,6 +5386,8 @@ impl BrokerClientApplication {
             request_resource.as_deref(),
             #[cfg(feature = "on_behalf_of")]
             on_behalf_of_client_id,
+            #[cfg(feature = "redirect_uri")]
+            redirect_uri,
         )
         .await
     }
@@ -5675,6 +5687,8 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5846,6 +5860,7 @@ impl BrokerClientApplication {
         self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn exchange_prt_for_auth_code_internal(
         &self,
         scope: Vec<&str>,
@@ -5855,12 +5870,29 @@ impl BrokerClientApplication {
         signed_prt_payload: Option<String>,
         signed_device_payload: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
     ) -> Result<String, MsalError> {
         #[cfg(not(feature = "on_behalf_of"))]
         let on_behalf_of_client_id: Option<&str> = None;
+        #[cfg(not(feature = "redirect_uri"))]
+        let redirect_uri_override: Option<&str> = None;
 
         let scope = format!("openid profile {}", scope.join(" "));
-        let (client_id, redirect_uri) = if v2_endpoint {
+        let (client_id, redirect_uri) = if let Some(uri) = redirect_uri_override {
+            // Use the caller-supplied redirect URI with the appropriate client_id
+            let cid = if v2_endpoint {
+                if let Some(obo) = on_behalf_of_client_id {
+                    obo.to_string()
+                } else if let Some(obo) = &self.on_behalf_of_client_id {
+                    obo.clone()
+                } else {
+                    LINUX_BROKER_APP_ID.to_string()
+                }
+            } else {
+                self.app.client_id().to_string()
+            };
+            (cid, uri.to_string())
+        } else if v2_endpoint {
             if let Some(on_behalf_of_client_id) = on_behalf_of_client_id {
                 (
                     on_behalf_of_client_id.to_string(),
@@ -6118,6 +6150,7 @@ impl BrokerClientApplication {
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
     ) -> Result<String, MsalError> {
         debug!("Exchanging a PRT for an Authorization Code");
 
@@ -6169,6 +6202,8 @@ impl BrokerClientApplication {
                 Some(signed_device_payload.clone()),
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                redirect_uri,
             )
             .await;
 
@@ -6187,6 +6222,8 @@ impl BrokerClientApplication {
                     Some(signed_device_payload),
                     #[cfg(feature = "on_behalf_of")]
                     on_behalf_of_client_id,
+                    #[cfg(feature = "redirect_uri")]
+                    redirect_uri,
                 )
                 .await
             }
@@ -6202,13 +6239,30 @@ impl BrokerClientApplication {
         authorization_code: String,
         request_resource: Option<&str>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging an Authorization Code for an Access Token");
         #[cfg(not(feature = "on_behalf_of"))]
         let on_behalf_of_client_id: Option<&str> = None;
+        #[cfg(not(feature = "redirect_uri"))]
+        let redirect_uri_override: Option<&str> = None;
 
         let scopes_str = format!("openid profile offline_access {}", scope.join(" "));
-        let (client_id, redirect_uri) = if v2_endpoint {
+        let (client_id, redirect_uri) = if let Some(uri) = redirect_uri_override {
+            // Use the caller-supplied redirect URI with the appropriate client_id
+            let cid = if v2_endpoint {
+                if let Some(obo) = on_behalf_of_client_id {
+                    obo.to_string()
+                } else if let Some(obo) = &self.on_behalf_of_client_id {
+                    obo.clone()
+                } else {
+                    LINUX_BROKER_APP_ID.to_string()
+                }
+            } else {
+                self.app.client_id().to_string()
+            };
+            (cid, uri.to_string())
+        } else if v2_endpoint {
             if let Some(on_behalf_of_client_id) = on_behalf_of_client_id {
                 (
                     on_behalf_of_client_id.to_string(),
