@@ -438,6 +438,8 @@ pub enum PyAuthOption {
     Fido,
     Passwordless,
     PasswordlessFido,
+    PasswordlessSecurityKey,
+    PasswordlessQrBluetooth,
     NoDAGFallback,
 }
 
@@ -447,6 +449,8 @@ impl From<PyAuthOption> for AuthOption {
             PyAuthOption::Fido => AuthOption::Fido,
             PyAuthOption::Passwordless => AuthOption::Passwordless,
             PyAuthOption::PasswordlessFido => AuthOption::PasswordlessFido,
+            PyAuthOption::PasswordlessSecurityKey => AuthOption::PasswordlessSecurityKey,
+            PyAuthOption::PasswordlessQrBluetooth => AuthOption::PasswordlessQrBluetooth,
             PyAuthOption::NoDAGFallback => AuthOption::NoDAGFallback,
         }
     }
