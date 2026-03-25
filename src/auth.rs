@@ -7210,12 +7210,19 @@ mod tests {
 
         assert_eq!(mfa.mfa_method(), "OneWaySMS");
 
-        let default = mfa.get_default_mfa_method_details().unwrap();
-        assert_eq!(default.auth_method_id, "OneWaySMS");
-        assert!(default.is_default);
+        let default = mfa.get_default_mfa_method_details();
+        assert!(default.is_some(), "default MFA method should exist");
+        if let Some(default) = default {
+            assert_eq!(default.auth_method_id, "OneWaySMS");
+            assert!(default.is_default);
+        }
 
         assert!(mfa.has_mfa_method("FidoKey"));
-        assert!(mfa.should_skip_fido_method(&mfa.get_mfa_method_by_id("FidoKey").unwrap()));
+        let fido = mfa.get_mfa_method_by_id("FidoKey");
+        assert!(fido.is_some(), "FidoKey method should exist");
+        if let Some(fido) = fido {
+            assert!(mfa.should_skip_fido_method(&fido));
+        }
 
         assert_eq!(mfa.mfa_method_count(), 3);
     }
