@@ -978,6 +978,57 @@ impl ExchangePRTPayload {
     }
 }
 
+/// JWT payload for exchanging a PRT directly for an access token via the
+/// JWT bearer grant. Used for PoP (Proof of Possession) token requests
+/// where the authorize -> auth_code -> token flow is not supported.
+#[cfg(feature = "broker")]
+#[derive(Serialize, Clone, Default)]
+struct ExchangePRTForATPayload {
+    win_ver: Option<String>,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
+    request_nonce: String,
+    refresh_token: String,
+    iss: String,
+    grant_type: String,
+    client_id: String,
+    redirect_uri: String,
+    aud: String,
+}
+
+#[cfg(feature = "broker")]
+impl ExchangePRTForATPayload {
+    fn new(
+        prt: &PrimaryRefreshToken,
+        nonce: &str,
+        scopes: &str,
+        client_id: &str,
+        redirect_uri: &str,
+        resource: Option<&str>,
+    ) -> Result<Self, MsalError> {
+        let os_release = match OsRelease::new() {
+            Ok(os_release) => Some(format!(
+                "{} {}",
+                os_release.pretty_name, os_release.version_id
+            )),
+            Err(_) => None,
+        };
+        Ok(ExchangePRTForATPayload {
+            win_ver: os_release,
+            scope: scopes.to_string(),
+            resource: resource.map(|r| r.to_string()),
+            request_nonce: nonce.to_string(),
+            refresh_token: prt.refresh_token.clone(),
+            iss: "aad:brokerplugin".to_string(),
+            grant_type: "refresh_token".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            aud: "login.microsoftonline.com".to_string(),
+        })
+    }
+}
+
 #[cfg(feature = "broker")]
 #[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct RefreshTokenCredentialPayload {
@@ -4809,6 +4860,8 @@ impl BrokerClientApplication {
                 on_behalf_of_client_id,
                 #[cfg(feature = "redirect_uri")]
                 None,
+                #[cfg(feature = "pop_support")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -4877,6 +4930,8 @@ impl BrokerClientApplication {
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
                 #[cfg(feature = "redirect_uri")]
+                None,
+                #[cfg(feature = "pop_support")]
                 None,
             )
             .await?;
@@ -5405,6 +5460,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn exchange_prt_for_access_token(
         &self,
         sealed_prt: &SealedData,
@@ -5414,7 +5470,11 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
         #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
+        #[cfg(feature = "pop_support")] req_cnf: Option<&str>,
     ) -> Result<UserToken, MsalError> {
+        #[cfg(not(feature = "pop_support"))]
+        let _req_cnf: Option<&str> = None;
+
         let v2_endpoint = !scope.is_empty();
         if !scope.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
@@ -5445,6 +5505,8 @@ impl BrokerClientApplication {
                 on_behalf_of_client_id,
                 #[cfg(feature = "redirect_uri")]
                 redirect_uri,
+                #[cfg(feature = "pop_support")]
+                req_cnf,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5463,8 +5525,35 @@ impl BrokerClientApplication {
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
+        #[cfg(feature = "pop_support")] req_cnf: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging a PRT for an Access Token");
+
+        #[cfg(not(feature = "pop_support"))]
+        let req_cnf: Option<&str> = None;
+
+        // When PoP (req_cnf) is requested, use the JWT bearer grant directly
+        // to the token endpoint. This is needed for scopes like
+        // ms-device-service:// that require PoP and don't work with the
+        // authorize -> auth_code -> token flow.
+        if let Some(req_cnf_val) = req_cnf {
+            return self
+                .exchange_prt_for_access_token_jwt_bearer(
+                    prt,
+                    scope,
+                    v2_endpoint,
+                    tpm,
+                    storage_key,
+                    session_key,
+                    request_resource,
+                    req_cnf_val,
+                    #[cfg(feature = "on_behalf_of")]
+                    on_behalf_of_client_id,
+                    #[cfg(feature = "redirect_uri")]
+                    redirect_uri,
+                )
+                .await;
+        }
 
         let request_id = Uuid::new_v4().to_string();
         let auth_code = self
@@ -5481,6 +5570,7 @@ impl BrokerClientApplication {
                 storage_key,
                 #[cfg(feature = "redirect_uri")]
                 redirect_uri,
+                req_cnf,
             )
             .await?;
 
@@ -5494,8 +5584,259 @@ impl BrokerClientApplication {
             on_behalf_of_client_id,
             #[cfg(feature = "redirect_uri")]
             redirect_uri,
+            req_cnf,
         )
         .await
+    }
+
+    /// Exchange a PRT for an access token using a two-step PoP flow:
+    /// 1. Use JWT bearer grant with PRT to get a bearer token + refresh_token
+    ///    for basic scopes (openid profile offline_access)
+    /// 2. Use that refresh_token with grant_type=refresh_token + target scope
+    ///    + token_type=pop + req_cnf to get the PoP access token
+    ///
+    /// This is required because Azure rejects PRT-based flows (both
+    /// authorize -> auth_code and JWT bearer) for certain scopes like
+    /// ms-device-service:// with AADSTS50132 (SsoArtifactInvalidOrExpired).
+    /// Using a standard refresh_token from a prior token acquisition bypasses
+    /// this restriction.
+    #[allow(clippy::too_many_arguments)]
+    async fn exchange_prt_for_access_token_jwt_bearer(
+        &self,
+        prt: &PrimaryRefreshToken,
+        scope: Vec<&str>,
+        v2_endpoint: bool,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+        session_key: &SessionKey,
+        request_resource: Option<String>,
+        req_cnf: &str,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
+    ) -> Result<UserToken, MsalError> {
+        debug!("Exchanging a PRT for an Access Token via JWT bearer (PoP)");
+
+        #[cfg(not(feature = "on_behalf_of"))]
+        let on_behalf_of_client_id: Option<&str> = None;
+        #[cfg(not(feature = "redirect_uri"))]
+        let redirect_uri_override: Option<&str> = None;
+
+        // Resolve client_id and redirect_uri using the same logic as the
+        // authorize -> auth_code flow
+        let (client_id, redirect_uri) = if let Some(uri) = redirect_uri_override {
+            let cid = if v2_endpoint {
+                if let Some(obo) = on_behalf_of_client_id {
+                    obo.to_string()
+                } else if let Some(obo) = &self.on_behalf_of_client_id {
+                    obo.clone()
+                } else {
+                    LINUX_BROKER_APP_ID.to_string()
+                }
+            } else {
+                self.app.client_id().to_string()
+            };
+            (cid, uri.to_string())
+        } else if v2_endpoint {
+            if let Some(obo) = on_behalf_of_client_id {
+                (
+                    obo.to_string(),
+                    self.app
+                        .get_auth_redirect_uri(Some(obo), request_resource.as_deref()),
+                )
+            } else if let Some(obo) = &self.on_behalf_of_client_id {
+                (obo.clone(), HIMMELBLAU_REDIRECT_URI.to_string())
+            } else {
+                (
+                    LINUX_BROKER_APP_ID.to_string(),
+                    self.app.get_auth_redirect_uri(
+                        Some(LINUX_BROKER_APP_ID),
+                        request_resource.as_deref(),
+                    ),
+                )
+            }
+        } else {
+            (
+                self.app.client_id().to_string(),
+                self.app
+                    .get_auth_redirect_uri(None, request_resource.as_deref()),
+            )
+        };
+
+        // Step 1: Use JWT bearer with PRT to get a bearer token with basic
+        // scopes. This gets us a standard refresh_token.
+        let base_scopes = "openid profile offline_access";
+
+        let nonce = self.request_nonce().await?;
+        let jwt_payload = ExchangePRTForATPayload::new(
+            prt,
+            &nonce,
+            base_scopes,
+            &client_id,
+            &redirect_uri,
+            request_resource.as_deref(),
+        )?;
+        let jwt = JwsBuilder::from(
+            serde_json::to_vec(&jwt_payload).map_err(|e| {
+                MsalError::InvalidJson(format!(
+                    "Failed serializing ExchangePRTForAT JWT: {}",
+                    e
+                ))
+            })?,
+        )
+        .set_typ(Some("JWT"))
+        .build();
+
+        if let Ok(mut payload) = jwt.from_json::<Value>() {
+            payload["refresh_token"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&payload) {
+                debug!(
+                    "Step 1: Exchange PRT for bearer token (JWT bearer) Payload: {}",
+                    pretty
+                );
+            }
+        }
+
+        let signed_jwt = self
+            .sign_session_key_jwt(&jwt, tpm, storage_key, session_key)
+            .await?;
+
+        let step1_params = vec![
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("windows_api_version", "2.2"),
+            ("request", &signed_jwt),
+            ("client_id", &client_id),
+            ("redirect_uri", &redirect_uri),
+            ("client_info", "1"),
+        ];
+        let step1_payload = step1_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        // Step 1 always uses the v1 token endpoint. The v2 endpoint with
+        // only openid/profile/offline_access scopes defaults to Azure AD
+        // Graph which requires preauthorization for first-party apps.
+        let url = format!("{}/oauth2/token", self.authority()?);
+
+        let mut debug_params = step1_params.clone();
+        debug_params[2] = ("request", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_params) {
+            debug!("Step 1 POST {}: {}", url, pretty);
+        }
+
+        let resp = self
+            .client()
+            .post(&url)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(step1_payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
+        let bearer_token: UserToken = if resp.status().is_success() {
+            let resp_text = resp
+                .text()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+
+            // The response may be a JWE encrypted with the session key, or
+            // plain JSON. Try JWE decryption first.
+            let transport_key = self.transport_key(tpm, storage_key)?;
+            let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+            let prt_storage_key =
+                maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+            if let Ok(jwe) = JweCompact::from_str(&resp_text) {
+                let decrypted = session_key
+                    .decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
+                json_from_str(
+                    std::str::from_utf8(decrypted.payload())
+                        .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+            } else {
+                json_from_str(&resp_text)
+                    .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+            }
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            return Err(MsalError::AcquireTokenFailed(json_resp));
+        };
+
+        debug!(
+            "Step 1 succeeded, got bearer token with refresh_token present={}",
+            !bearer_token.refresh_token.is_empty()
+        );
+
+        // Step 2: Use the refresh_token from step 1 with
+        // grant_type=refresh_token + target scope + token_type=pop + req_cnf
+        let target_scopes = if v2_endpoint {
+            format!("openid profile offline_access {}", scope.join(" "))
+        } else {
+            "openid".to_string()
+        };
+
+        let mut step2_params = vec![
+            ("client_id", client_id.as_str()),
+            ("scope", target_scopes.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &bearer_token.refresh_token),
+            ("client_info", "1"),
+            ("token_type", "pop"),
+            ("req_cnf", req_cnf),
+        ];
+        if !v2_endpoint {
+            if let Some(resource) = request_resource.as_deref() {
+                step2_params.push(("resource", resource));
+            }
+        }
+        let step2_payload = step2_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        // Step 2 uses the v2 endpoint when v2 scopes are present, so the
+        // target scope (e.g. ms-device-service://) is correctly resolved.
+        let step2_url = if v2_endpoint {
+            format!("{}/oauth2/v2.0/token", self.authority()?)
+        } else {
+            format!("{}/oauth2/token", self.authority()?)
+        };
+
+        let mut debug_params2 = step2_params.clone();
+        debug_params2[3] = ("refresh_token", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_params2) {
+            debug!("Step 2 POST {}: {}", step2_url, pretty);
+        }
+
+        let resp2 = self
+            .client()
+            .post(&step2_url)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(step2_payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
+        if resp2.status().is_success() {
+            let token: UserToken = resp2
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Ok(token)
+        } else {
+            let json_resp: ErrorResponse = resp2
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
     }
 
     /// Given the primary refresh token, this method requests a new primary
@@ -5795,6 +6136,8 @@ impl BrokerClientApplication {
                 on_behalf_of_client_id,
                 #[cfg(feature = "redirect_uri")]
                 None,
+                #[cfg(feature = "pop_support")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5977,6 +6320,7 @@ impl BrokerClientApplication {
         signed_device_payload: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
+        _req_cnf: Option<&str>,
     ) -> Result<String, MsalError> {
         #[cfg(not(feature = "on_behalf_of"))]
         let on_behalf_of_client_id: Option<&str> = None;
@@ -6257,6 +6601,7 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
         #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
+        req_cnf: Option<&str>,
     ) -> Result<String, MsalError> {
         debug!("Exchanging a PRT for an Authorization Code");
 
@@ -6310,6 +6655,7 @@ impl BrokerClientApplication {
                 on_behalf_of_client_id,
                 #[cfg(feature = "redirect_uri")]
                 redirect_uri,
+                req_cnf,
             )
             .await;
 
@@ -6330,6 +6676,7 @@ impl BrokerClientApplication {
                     on_behalf_of_client_id,
                     #[cfg(feature = "redirect_uri")]
                     redirect_uri,
+                    req_cnf,
                 )
                 .await
             }
@@ -6337,6 +6684,7 @@ impl BrokerClientApplication {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn exchange_auth_code_for_access_token_internal(
         &self,
         scope: Vec<&str>,
@@ -6346,6 +6694,7 @@ impl BrokerClientApplication {
         request_resource: Option<&str>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
+        req_cnf: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging an Authorization Code for an Access Token");
         #[cfg(not(feature = "on_behalf_of"))]
@@ -6406,6 +6755,9 @@ impl BrokerClientApplication {
             params.push(("resource", request_resource));
         } else {
             params.push(("resource", "https://graph.microsoft.com"));
+        }
+        if let Some(req_cnf) = req_cnf {
+            params.push(("req_cnf", req_cnf));
         }
         let payload = params
             .iter()

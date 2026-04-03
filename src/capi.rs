@@ -1511,6 +1511,8 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
         &machine_key.0,
         #[cfg(feature = "redirect_uri")]
         None,
+        #[cfg(feature = "pop_support")]
+        None,
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
