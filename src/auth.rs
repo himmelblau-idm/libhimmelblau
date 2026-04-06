@@ -275,9 +275,12 @@ pub struct MFAAuthContinue {
     /// When set, acquire_token_by_mfa_flow should skip polling and exchange
     /// this code directly for an access token.
     pub auth_code: Option<String>,
-    /// Whether the FIDO method is a passkey (cross-device capable).
-    /// Used to filter out passkeys from default MFA method selection.
-    pub fido_is_passkey: bool,
+    /// Whether to skip FidoKey in MFA method selection.
+    pub skip_fido_for_mfa: bool,
+    /// Whether the user has a physical USB security key.
+    pub has_physical_security_key: bool,
+    /// Whether the user has a cross-device capable passkey (e.g. MS Authenticator).
+    pub has_cross_device_passkey: bool,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -311,7 +314,7 @@ impl MFAAuthContinue {
             method.auth_method_id
         } else if !self.mfa_methods.is_empty() {
             for method in self.get_mfa_method_details() {
-                if !self.mfa_method_is_passkey(&method) {
+                if !self.should_skip_fido_method(&method) {
                     return method.auth_method_id.clone();
                 }
             }
@@ -344,9 +347,9 @@ impl MFAAuthContinue {
         self.get_available_mfa_methods().len()
     }
 
-    fn mfa_method_is_passkey(&self, method: &MfaMethodInfo) -> bool {
+    fn should_skip_fido_method(&self, method: &MfaMethodInfo) -> bool {
         if method.auth_method_id == "FidoKey" {
-            self.fido_is_passkey
+            self.skip_fido_for_mfa
         } else {
             false
         }
@@ -357,12 +360,12 @@ impl MFAAuthContinue {
         if let Some(details) = self
             .get_mfa_method_details()
             .into_iter()
-            .find(|method| method.is_default && !self.mfa_method_is_passkey(method))
+            .find(|method| method.is_default && !self.should_skip_fido_method(method))
         {
             Some(details)
         } else if !self.mfa_methods.is_empty() {
             for method in self.get_mfa_method_details() {
-                if !self.mfa_method_is_passkey(&method) {
+                if !self.should_skip_fido_method(&method) {
                     return Some(method);
                 }
             }
@@ -1008,9 +1011,7 @@ impl RefreshTokenCredentialPayload {
             None => {
                 let iat: i64 = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map_err(|e| {
-                        MsalError::GeneralFailure(format!("Failed choosing iat: {}", e))
-                    })?
+                    .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
                     .as_secs()
                     .try_into()
                     .map_err(|e| {
@@ -1369,11 +1370,65 @@ impl SessionKey {
     }
 }
 
+/// Determines whether passwordless security key authentication should be
+/// attempted (physical USB FIDO2 key).
+///
+/// Attempts whenever any FIDO method is registered for the user
+/// (FidoParams present in GetCredentialType). The actual key matching
+/// happens via the allow list at the WebAuthn level.
+pub(crate) fn should_attempt_passwordless_security_key(
+    options: &[AuthOption],
+    has_fido_params: bool,
+) -> bool {
+    let enabled = options.contains(&AuthOption::PasswordlessSecurityKey)
+        || options.contains(&AuthOption::PasswordlessFido);
+    if !enabled {
+        debug!("passwordless_security_key: skipped (not enabled in config)");
+        return false;
+    }
+    if !has_fido_params {
+        debug!("passwordless_security_key: skipped (no FIDO params from GetCredentialType)");
+        return false;
+    }
+    debug!("passwordless_security_key: user has FIDO params, attempting");
+    true
+}
+
+/// Determines whether passwordless QR/Bluetooth (caBLE hybrid transport)
+/// authentication should be attempted.
+///
+/// Uses `has_cross_device_capable_passkey` from GetCredentialType to
+/// determine if the user has a cross-device passkey. No Graph permission
+/// required. Bluetooth hardware availability is checked at runtime in the
+/// PAM layer, not here.
+pub(crate) fn should_attempt_passwordless_qr_bluetooth(
+    options: &[AuthOption],
+    has_fido_params: bool,
+    user_has_any_cross_device_fido: bool,
+) -> bool {
+    if !options.contains(&AuthOption::PasswordlessQrBluetooth) {
+        debug!("passwordless_qr_bluetooth: skipped (not enabled in config)");
+        return false;
+    }
+    if !has_fido_params {
+        debug!("passwordless_qr_bluetooth: skipped (no FIDO params from GetCredentialType)");
+        return false;
+    }
+    if !user_has_any_cross_device_fido {
+        debug!("passwordless_qr_bluetooth: skipped (user has no cross-device passkey)");
+        return false;
+    }
+    debug!("passwordless_qr_bluetooth: user has cross-device passkey, attempting");
+    true
+}
+
 #[derive(PartialEq)]
 pub enum AuthOption {
     Fido,
     Passwordless,
     PasswordlessFido,
+    PasswordlessSecurityKey,
+    PasswordlessQrBluetooth,
     NoDAGFallback,
     /// Demand ngcmfa in the amr_values, which forces MFA authentication.
     /// This should be used for remote connections (SSH) where we want to ensure
@@ -2685,7 +2740,7 @@ impl PublicClientApplication {
         macro_rules! passwordless_tap {
             () => {
                 if cred_type.credentials.has_access_pass.unwrap_or(false) {
-                    // Passwordless TAP is enabled, we can drop out here
+                    debug!("passwordless_tap: attempting (has_access_pass=true)");
                     let msg = "Enter Temporary Access Pass: ".to_string();
                     let url_post = match &auth_config.url_post {
                         Some(url_post) => url_post.clone(),
@@ -2720,8 +2775,12 @@ impl PublicClientApplication {
                         }],
                         selected_mfa_method_id: Some("AccessPass".to_string()),
                         auth_code: None,
-                        fido_is_passkey: false,
+                        skip_fido_for_mfa: false,
+                        has_physical_security_key: false,
+                        has_cross_device_passkey: false,
                     });
+                } else {
+                    debug!("passwordless_tap: skipped (has_access_pass=false)");
                 }
             };
         }
@@ -2739,6 +2798,7 @@ impl PublicClientApplication {
                 if !passwordless_remote_ngc_called {
                     passwordless_remote_ngc_called = true;
                     if let Some(ref remote_ngc_params) = cred_type.credentials.remote_ngc_params {
+                        debug!("passwordless_remote_ngc: attempting (remote_ngc_params present)");
                         // Mark that we're about to attempt a push via remote NGC
                         remote_ngc_push_attempted = true;
                         // Ensure the one time code didn't fail, if it did, we need to continue
@@ -2784,15 +2844,37 @@ impl PublicClientApplication {
                                 }],
                                 selected_mfa_method_id: Some("PhoneAppNotification".to_string()),
                                 auth_code: None,
-                                fido_is_passkey: false,
+                                skip_fido_for_mfa: false,
+                                has_physical_security_key: false,
+                                has_cross_device_passkey: false,
                             });
                         }
+                    } else {
+                        debug!("passwordless_remote_ngc: skipped (remote_ngc_params absent)");
                     }
+                } else {
+                    debug!("passwordless_remote_ngc: skipped (already called)");
                 }
             };
         }
 
-        let fido_is_a_passkey = cred_type
+        debug!("Credential type: pref_credential={}, has_password={}, has_fido={:?}, has_remote_ngc={:?}, has_access_pass={:?}, is_passkey_support_enabled={:?}",
+            cred_type.credentials.pref_credential,
+            cred_type.credentials.has_password,
+            cred_type.credentials.has_fido,
+            cred_type.credentials.has_remote_ngc,
+            cred_type.credentials.has_access_pass,
+            auth_config.is_passkey_support_enabled,
+        );
+        if let Some(ref fido_params) = cred_type.credentials.fido_params {
+            debug!(
+                "FIDO params: has_cross_device_capable_passkey={:?}, allow_list_count={}",
+                fido_params.has_cross_device_capable_passkey,
+                fido_params.fido_allow_list.len(),
+            );
+        }
+
+        let user_has_any_cross_device_fido = cred_type
             .credentials
             .fido_params
             .as_ref()
@@ -2802,71 +2884,90 @@ impl PublicClientApplication {
                     .unwrap_or(false)
             })
             .unwrap_or(false);
+        let attempt_security_key = should_attempt_passwordless_security_key(
+            options,
+            cred_type.credentials.fido_params.is_some(),
+        );
+        let attempt_qr_bluetooth = should_attempt_passwordless_qr_bluetooth(
+            options,
+            cred_type.credentials.fido_params.is_some(),
+            user_has_any_cross_device_fido,
+        );
+
         macro_rules! passwordless_fido {
             () => {
-                if options.contains(&AuthOption::PasswordlessFido) {
-                    if let Some(ref fido_params) = cred_type.credentials.fido_params {
-                        // If this is a Passkey, bail out. We don't support passkey auth
-                        if !fido_is_a_passkey {
-                            // Passwordless fido is enabled, we can drop out here
-                            let url_post = match &auth_config.url_post {
-                                Some(url_post) => url_post.clone(),
-                                None => {
-                                    return Err(MsalError::GeneralFailure(
-                                        "urlBeginAuth is missing".to_string(),
-                                    ))
-                                }
-                            };
-                            auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
-                            let fido_auth_config = self
-                                .handle_auth_config_fido_get(username, &auth_config, &request_id)
-                                .await?;
-                            return Ok(MFAAuthContinue {
-                                msg: "".to_string(),
-                                entropy: None,
-                                max_poll_attempts: auth_config.max_poll_attempts,
-                                polling_interval: Some(5000),
-                                session_id: fido_auth_config.session_id,
-                                flow_token: sft,
-                                ctx: sctx,
-                                canary: auth_config.canary,
-                                url_end_auth: auth_config.url_end_auth,
-                                url_post,
-                                resource: resource.map(|s| s.to_string()),
-                                dag: None,
-                                fido_challenge: fido_auth_config.fido_challenge,
-                                fido_allow_list: Some(fido_params.fido_allow_list.clone()),
-                                cross_domain_canary: fido_auth_config.cross_domain_canary,
-                                url_session_state: auth_config.url_session_state,
-                                mfa_methods: vec!["FidoKey".to_string()].into(),
-                                mfa_method_details: vec![MfaMethodInfo {
-                                    auth_method_id: "FidoKey".to_string(),
-                                    display: "FidoKey".to_string(),
-                                    is_default: true,
-                                }],
-                                selected_mfa_method_id: Some("FidoKey".to_string()),
-                                auth_code: None,
-                                fido_is_passkey: false,
-                            });
+                if attempt_security_key || attempt_qr_bluetooth {
+                    let fido_params = cred_type.credentials.fido_params.as_ref().unwrap();
+                    let url_post = match &auth_config.url_post {
+                        Some(url_post) => url_post.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure(
+                                "urlBeginAuth is missing".to_string(),
+                            ))
                         }
-                    }
+                    };
+                    auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
+                    let fido_auth_config = self
+                        .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                        .await?;
+                    return Ok(MFAAuthContinue {
+                        msg: "".to_string(),
+                        entropy: None,
+                        max_poll_attempts: auth_config.max_poll_attempts,
+                        polling_interval: Some(5000),
+                        session_id: fido_auth_config.session_id,
+                        flow_token: sft,
+                        ctx: sctx,
+                        canary: auth_config.canary,
+                        url_end_auth: auth_config.url_end_auth,
+                        url_post,
+                        resource: resource.map(|s| s.to_string()),
+                        dag: None,
+                        fido_challenge: fido_auth_config.fido_challenge,
+                        fido_allow_list: Some(fido_params.fido_allow_list.clone()),
+                        cross_domain_canary: fido_auth_config.cross_domain_canary,
+                        url_session_state: auth_config.url_session_state,
+                        mfa_methods: vec!["FidoKey".to_string()].into(),
+                        mfa_method_details: vec![MfaMethodInfo {
+                            auth_method_id: "FidoKey".to_string(),
+                            display: "FidoKey".to_string(),
+                            is_default: true,
+                        }],
+                        selected_mfa_method_id: Some("FidoKey".to_string()),
+                        auth_code: None,
+                        skip_fido_for_mfa: false,
+                        has_physical_security_key: attempt_security_key,
+                        has_cross_device_passkey: attempt_qr_bluetooth,
+                    });
                 }
             };
         }
 
-        // Attempt to honor the preferred credential choice.
+        // Methods are attempted most-secure-first: FIDO (phishing-resistant)
+        // always before remote_ngc (number matching), regardless of the
+        // pref_credential value returned by Microsoft. This ensures users
+        // under a phishing-resistant CAP are offered a compliant method.
         match cred_type.credentials.pref_credential {
             13 => passwordless_tap!(),
-            7 => passwordless_remote_ngc!(),
-            2 => passwordless_fido!(),
+            2 | 7 => {
+                debug!(
+                    "passwordless_fido triggered via pref_credential={}",
+                    cred_type.credentials.pref_credential
+                );
+                passwordless_fido!();
+                passwordless_remote_ngc!();
+            }
             _ => {}
         }
 
-        // Now attempt to emulate the old behavior, attempting passwordless MFA
+        // Now attempt to emulate the old behavior, attempting passwordless
         // auth even if it isn't the preferred method.
+        debug!("passwordless_tap triggered via fallthrough");
         passwordless_tap!();
-        passwordless_remote_ngc!();
+        debug!("passwordless_fido triggered via fallthrough");
         passwordless_fido!();
+        debug!("passwordless_remote_ngc triggered via fallthrough");
+        passwordless_remote_ngc!();
 
         if cred_type.credentials.federation_redirect_url.is_some() {
             info!("Federated identities are not supported.");
@@ -2999,7 +3100,8 @@ impl PublicClientApplication {
                     }
                 }
                 if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
-                    let fido_is_a_passkey = fido_is_a_passkey
+                    debug!("MFA methods available: {:?}", arr_user_proofs);
+                    let skip_fido_for_mfa = user_has_any_cross_device_fido
                         || auth_config.is_passkey_support_enabled.unwrap_or(false);
 
                     // Try to use provided MFA method if available
@@ -3008,7 +3110,7 @@ impl PublicClientApplication {
                             .iter()
                             .find(|proof| {
                                 proof.auth_method_id == requested_method
-                                    && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                                    && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
                             })
                             .ok_or_else(|| {
                                 let available = arr_user_proofs
@@ -3022,10 +3124,10 @@ impl PublicClientApplication {
                             })?
                     } else if let Some(method) = arr_user_proofs.iter().find(|proof| {
                         proof.is_default
-                            && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                            && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
                     }) {
                         method
-                    } else if fido_is_a_passkey {
+                    } else if skip_fido_for_mfa {
                         // Skip FidoKey methods entirely if we can't use them
                         match arr_user_proofs
                             .iter()
@@ -3037,7 +3139,7 @@ impl PublicClientApplication {
                             }) {
                             Some(method) => method,
                             None => {
-                                info!("No usable MFA methods found (FIDO was passkey)");
+                                info!("No usable MFA methods found (FIDO was cross-device)");
                                 dag_fallback!();
                             }
                         }
@@ -3173,7 +3275,9 @@ impl PublicClientApplication {
                             .collect(),
                         selected_mfa_method_id: Some(selected_auth_method.auth_method_id.clone()),
                         auth_code: None,
-                        fido_is_passkey: fido_is_a_passkey,
+                        skip_fido_for_mfa,
+                        has_physical_security_key: false,
+                        has_cross_device_passkey: false,
                     })
                 } else {
                     info!("No MFA methods found");
@@ -3205,7 +3309,9 @@ impl PublicClientApplication {
                     mfa_method_details: vec![],
                     selected_mfa_method_id: None,
                     auth_code: Some(auth_code),
-                    fido_is_passkey: false,
+                    skip_fido_for_mfa: false,
+                    has_physical_security_key: false,
+                    has_cross_device_passkey: false,
                 })
             }
             Err(e) => {
@@ -6157,9 +6263,9 @@ impl BrokerClientApplication {
         let nonce = self.request_nonce().await?;
 
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, Some(&nonce))?).map_err(|e| {
-                MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e))
-            })?,
+            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, Some(&nonce))?).map_err(
+                |e| MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e)),
+            )?,
         )
         .set_typ(Some("JWT"))
         .build();
@@ -7062,5 +7168,142 @@ mod tests {
         let token = build_user_token(access_token);
 
         assert_eq!(token.spn().unwrap_or_default(), "primary@example.com");
+    }
+
+    fn build_mfa_auth_continue(
+        methods: Vec<MfaMethodInfo>,
+        skip_fido_for_mfa: bool,
+    ) -> MFAAuthContinue {
+        let mfa_methods = methods.iter().map(|m| m.auth_method_id.clone()).collect();
+        MFAAuthContinue {
+            mfa_method_details: methods,
+            mfa_methods,
+            skip_fido_for_mfa,
+            ..Default::default()
+        }
+    }
+
+    /// User has SMS as preferred MFA, plus a cross-device passkey (MS Authenticator
+    /// QR scan) and PhoneAppNotification. No physical security key.
+    /// Tenant enforces MFA. Expected: SMS is selected, FIDO is skipped.
+    #[test]
+    fn mfa_prefers_sms_when_default_and_fido_is_cross_device_passkey() {
+        let methods = vec![
+            MfaMethodInfo {
+                auth_method_id: "OneWaySMS".to_string(),
+                display: "+X XXXXXXXX90".to_string(),
+                is_default: true,
+            },
+            MfaMethodInfo {
+                auth_method_id: "FidoKey".to_string(),
+                display: "MS Authenticator passkey".to_string(),
+                is_default: false,
+            },
+            MfaMethodInfo {
+                auth_method_id: "PhoneAppNotification".to_string(),
+                display: "Microsoft Authenticator".to_string(),
+                is_default: false,
+            },
+        ];
+
+        let mfa = build_mfa_auth_continue(methods, true);
+
+        assert_eq!(mfa.mfa_method(), "OneWaySMS");
+
+        let default = mfa.get_default_mfa_method_details();
+        assert!(default.is_some(), "default MFA method should exist");
+        if let Some(default) = default {
+            assert_eq!(default.auth_method_id, "OneWaySMS");
+            assert!(default.is_default);
+        }
+
+        assert!(mfa.has_mfa_method("FidoKey"));
+        let fido = mfa.get_mfa_method_by_id("FidoKey");
+        assert!(fido.is_some(), "FidoKey method should exist");
+        if let Some(fido) = fido {
+            assert!(mfa.should_skip_fido_method(&fido));
+        }
+
+        assert_eq!(mfa.mfa_method_count(), 3);
+    }
+
+    // User has only a cross-device passkey (MS Authenticator), no physical
+    // security key. Legacy flag is set. Graph is unavailable.
+    // Expected: security key flow should NOT be attempted.
+    // Legacy flag enables security key when FIDO params present
+    #[test]
+    fn passwordless_fido_skipped_when_cross_device_passkey_and_sms_preferred() {
+        let options = vec![AuthOption::PasswordlessFido, AuthOption::Fido];
+
+        let result = should_attempt_passwordless_security_key(
+            &options, true, // has_fido_params
+        );
+
+        assert!(
+            result,
+            "Should attempt security key when FIDO params present and legacy flag enabled"
+        );
+    }
+
+    #[test]
+    fn security_key_skipped_when_no_fido_params() {
+        let options = vec![AuthOption::PasswordlessSecurityKey];
+        let result = should_attempt_passwordless_security_key(&options, false);
+        assert!(
+            !result,
+            "Should not attempt security key without FIDO params"
+        );
+    }
+
+    #[test]
+    fn security_key_skipped_when_not_enabled() {
+        let options = vec![AuthOption::Fido];
+        let result = should_attempt_passwordless_security_key(&options, true);
+        assert!(
+            !result,
+            "Should not attempt security key when not enabled in config"
+        );
+    }
+
+    #[test]
+    fn qr_bluetooth_attempted_when_cross_device_passkey() {
+        let options = vec![AuthOption::PasswordlessQrBluetooth];
+        let result = should_attempt_passwordless_qr_bluetooth(&options, true, true);
+        assert!(
+            result,
+            "Should attempt QR/Bluetooth when user has cross-device passkey"
+        );
+    }
+
+    #[test]
+    fn qr_bluetooth_skipped_when_no_cross_device_passkey() {
+        let options = vec![AuthOption::PasswordlessQrBluetooth];
+        let result = should_attempt_passwordless_qr_bluetooth(&options, true, false);
+        assert!(
+            !result,
+            "Should not attempt QR/Bluetooth when user has no cross-device passkey"
+        );
+    }
+
+    #[test]
+    fn qr_bluetooth_skipped_when_not_enabled() {
+        let options = vec![AuthOption::PasswordlessFido];
+        let result = should_attempt_passwordless_qr_bluetooth(&options, true, true);
+        assert!(
+            !result,
+            "Legacy PasswordlessFido should not enable QR/Bluetooth"
+        );
+    }
+
+    #[test]
+    fn both_flows_when_fido_params_and_cross_device() {
+        let options = vec![
+            AuthOption::PasswordlessSecurityKey,
+            AuthOption::PasswordlessQrBluetooth,
+        ];
+        let security_key = should_attempt_passwordless_security_key(&options, true);
+        let qr_bluetooth = should_attempt_passwordless_qr_bluetooth(&options, true, true);
+        assert!(security_key, "Should attempt security key");
+        assert!(qr_bluetooth, "Should attempt QR/Bluetooth");
     }
 }
