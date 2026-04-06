@@ -275,6 +275,8 @@ pub struct MFAAuthContinue {
     /// When set, acquire_token_by_mfa_flow should skip polling and exchange
     /// this code directly for an access token.
     pub auth_code: Option<String>,
+    #[deprecated(note = "Use `skip_fido_for_mfa` instead")]
+    pub fido_is_passkey: bool,
     /// Whether to skip FidoKey in MFA method selection.
     pub skip_fido_for_mfa: bool,
     /// Whether the user has a physical USB security key.
@@ -2826,6 +2828,8 @@ impl PublicClientApplication {
                         }],
                         selected_mfa_method_id: Some("AccessPass".to_string()),
                         auth_code: None,
+                        #[allow(deprecated)]
+                        fido_is_passkey: false,
                         skip_fido_for_mfa: false,
                         has_physical_security_key: false,
                         has_cross_device_passkey: false,
@@ -2895,6 +2899,8 @@ impl PublicClientApplication {
                                 }],
                                 selected_mfa_method_id: Some("PhoneAppNotification".to_string()),
                                 auth_code: None,
+                                #[allow(deprecated)]
+                                fido_is_passkey: false,
                                 skip_fido_for_mfa: false,
                                 has_physical_security_key: false,
                                 has_cross_device_passkey: false,
@@ -2986,6 +2992,8 @@ impl PublicClientApplication {
                         }],
                         selected_mfa_method_id: Some("FidoKey".to_string()),
                         auth_code: None,
+                        #[allow(deprecated)]
+                        fido_is_passkey: false,
                         skip_fido_for_mfa: false,
                         has_physical_security_key: attempt_security_key,
                         has_cross_device_passkey: attempt_qr_bluetooth,
@@ -3326,6 +3334,8 @@ impl PublicClientApplication {
                             .collect(),
                         selected_mfa_method_id: Some(selected_auth_method.auth_method_id.clone()),
                         auth_code: None,
+                        #[allow(deprecated)]
+                        fido_is_passkey: skip_fido_for_mfa,
                         skip_fido_for_mfa,
                         has_physical_security_key: false,
                         has_cross_device_passkey: false,
@@ -3360,6 +3370,8 @@ impl PublicClientApplication {
                     mfa_method_details: vec![],
                     selected_mfa_method_id: None,
                     auth_code: Some(auth_code),
+                    #[allow(deprecated)]
+                    fido_is_passkey: false,
                     skip_fido_for_mfa: false,
                     has_physical_security_key: false,
                     has_cross_device_passkey: false,
