@@ -1474,6 +1474,65 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
     machine_key: *mut MachineKey,
     out: *mut *mut UserToken,
 ) -> *mut MSAL_ERROR {
+    broker_exchange_prt_for_access_token_with_pop(
+        client,
+        sealed_prt,
+        scopes,
+        scopes_len,
+        request_resource,
+        #[cfg(feature = "on_behalf_of")]
+        on_behalf_of_client_id,
+        std::ptr::null(),
+        tpm,
+        machine_key,
+        out,
+    )
+}
+
+/// Given the primary refresh token, this method requests an access token and
+/// allows requesting a PoP token via `req_cnf`.
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` -  An encrypted primary refresh token that was
+///   previously received from the server.
+///
+/// * `scopes` - The scopes that the client requests for the access token.
+///
+/// * `request_resource` - A resource for obtaining an access token.
+///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
+///
+/// * `req_cnf` - Base64url-encoded JSON object for OAuth PoP token requests.
+///   Pass NULL to use bearer token acquisition.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// * `out` - A UserToken containing an access_token.
+///
+/// # Safety
+///
+/// The calling function should ensure that `client`, `sealed_prt`, `scope`,
+/// `request_resource`, `req_cnf`, `tpm`, and `machine_key` are valid pointers
+/// to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_exchange_prt_for_access_token_with_pop(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    scopes: *const *const c_char,
+    scopes_len: c_int,
+    request_resource: *const c_char,
+    #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: *const c_char,
+    req_cnf: *const c_char,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out: *mut *mut UserToken,
+) -> *mut MSAL_ERROR {
     if client.is_null() || tpm.is_null() || machine_key.is_null() {
         return make_error(
             MSAL_ERROR_CODE::INVALID_POINTER,
@@ -1497,6 +1556,14 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
     let request_resource = wrap_c_char(request_resource);
     #[cfg(feature = "on_behalf_of")]
     let on_behalf_of_client_id = wrap_c_char(on_behalf_of_client_id);
+    let req_cnf = wrap_c_char(req_cnf);
+    #[cfg(not(feature = "pop_support"))]
+    if req_cnf.is_some() {
+        return make_error(
+            MSAL_ERROR_CODE::NOT_IMPLEMENTED,
+            "PoP token support requires libhimmelblau to be built with pop_support".to_string(),
+        );
+    }
     let tpm = unsafe { &mut *tpm };
     let machine_key = unsafe { &mut *machine_key };
     let resp = match run_async!(
@@ -1511,6 +1578,8 @@ pub unsafe extern "C" fn broker_exchange_prt_for_access_token(
         &machine_key.0,
         #[cfg(feature = "redirect_uri")]
         None,
+        #[cfg(feature = "pop_support")]
+        req_cnf.as_deref(),
     ) {
         Ok(resp) => resp,
         Err(e) => return e,
