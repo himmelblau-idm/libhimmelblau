@@ -31,6 +31,8 @@ use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, json, Value};
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -1498,20 +1500,42 @@ pub enum AuthOption {
     RemoteSession,
 }
 
+#[cfg(feature = "ipvers")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpVersion {
+    V4,
+    V6,
+}
+
 pub(crate) struct ClientApplication {
     pub(crate) client: Client,
     pub(crate) client_id: String,
     authority: RwLock<String>,
     jar: Arc<CookieStoreMutex>,
+    #[cfg(feature = "ipvers")]
+    pub(crate) ip_version: Vec<IpVersion>,
+    #[cfg(feature = "set_timeout")]
+    pub(crate) timeout: Duration,
 }
 
 impl ClientApplication {
-    pub(crate) fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+    pub(crate) fn new(
+        client_id: &str,
+        authority: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
+    ) -> Result<Self, MsalError> {
         let jar = Arc::new(CookieStoreMutex::new(CookieStore::default()));
+
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3))
+            .connect_timeout(connect_timeout)
+            .timeout(timeout)
             .redirect(Policy::none())
             .cookie_provider(jar.clone());
 
@@ -1527,6 +1551,19 @@ impl ClientApplication {
             }
         }
 
+        #[cfg(feature = "ipvers")]
+        {
+            let has_v4 = ip_version.contains(&IpVersion::V4);
+            let has_v6 = ip_version.contains(&IpVersion::V6);
+            if has_v4 && !has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            } else if !has_v4 && has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+            }
+        }
+
         let client = builder
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
@@ -1539,6 +1576,10 @@ impl ClientApplication {
                 None => "https://login.microsoftonline.com/common".to_string(),
             }),
             jar,
+            #[cfg(feature = "ipvers")]
+            ip_version: ip_version.to_vec(),
+            #[cfg(feature = "set_timeout")]
+            timeout,
         })
     }
 
@@ -1805,9 +1846,21 @@ impl PublicClientApplication {
     /// * `authority` - A URL that identifies a token authority. It should
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
-    pub fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+    pub fn new(
+        client_id: &str,
+        authority: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
+    ) -> Result<Self, MsalError> {
         Ok(PublicClientApplication {
-            app: ClientApplication::new(client_id, authority)?,
+            app: ClientApplication::new(
+                client_id,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
+            )?,
         })
     }
 
@@ -4675,9 +4728,18 @@ impl BrokerClientApplication {
         client_id: Option<&str>,
         transport_key: Option<LoadableMsOapxbcRsaKey>,
         cert_key: Option<LoadableMsDeviceEnrolmentKey>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         Ok(BrokerClientApplication {
-            app: PublicClientApplication::new(BROKER_APP_ID, authority)?,
+            app: PublicClientApplication::new(
+                BROKER_APP_ID,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
+            )?,
             transport_key,
             cert_key,
             on_behalf_of_client_id: client_id.map(|s| s.to_string()),
@@ -4877,7 +4939,15 @@ impl BrokerClientApplication {
         transport_key: &Rsa<Public>,
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
-        let services = Services::new(access_token, &attrs.target_domain).await?;
+        let services = Services::new(
+            access_token,
+            &attrs.target_domain,
+            #[cfg(feature = "set_timeout")]
+            self.app.app.timeout,
+            #[cfg(feature = "ipvers")]
+            &self.app.app.ip_version,
+        )
+        .await?;
         services
             .enroll_device(access_token, attrs, transport_key, csr_der)
             .await
@@ -5763,14 +5833,9 @@ impl BrokerClientApplication {
             &redirect_uri,
             request_resource.as_deref(),
         )?;
-        let jwt = JwsBuilder::from(
-            serde_json::to_vec(&jwt_payload).map_err(|e| {
-                MsalError::InvalidJson(format!(
-                    "Failed serializing ExchangePRTForAT JWT: {}",
-                    e
-                ))
-            })?,
-        )
+        let jwt = JwsBuilder::from(serde_json::to_vec(&jwt_payload).map_err(|e| {
+            MsalError::InvalidJson(format!("Failed serializing ExchangePRTForAT JWT: {}", e))
+        })?)
         .set_typ(Some("JWT"))
         .build();
 
@@ -5832,20 +5897,18 @@ impl BrokerClientApplication {
             // plain JSON. Try JWE decryption first.
             let transport_key = self.transport_key(tpm, storage_key)?;
             let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
-            let prt_storage_key =
-                maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+            let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
             if let Ok(jwe) = JweCompact::from_str(&resp_text) {
-                let decrypted = session_key
-                    .decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
+                let decrypted =
+                    session_key.decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
                 json_from_str(
                     std::str::from_utf8(decrypted.payload())
                         .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
                 )
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
             } else {
-                json_from_str(&resp_text)
-                    .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+                json_from_str(&resp_text).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
             }
         } else {
             let json_resp: ErrorResponse = resp
@@ -6089,7 +6152,15 @@ impl BrokerClientApplication {
                 ))
             }
         };
-        let services = Services::new(&access_token, &token.tenant_id()?).await?;
+        let services = Services::new(
+            &access_token,
+            &token.tenant_id()?,
+            #[cfg(feature = "set_timeout")]
+            self.app.app.timeout,
+            #[cfg(feature = "ipvers")]
+            &self.app.app.ip_version,
+        )
+        .await?;
         let resource_id = services.key_provisioning_resource_id();
 
         // Acquire an access token for the key provisioning service

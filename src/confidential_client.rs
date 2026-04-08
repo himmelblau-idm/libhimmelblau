@@ -24,6 +24,8 @@
 */
 use crate::error::{ErrorResponse, MsalError};
 use crate::ClientApplication;
+#[cfg(feature = "ipvers")]
+use crate::IpVersion;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use compact_jwt::crypto::JwsTpmRs256Signer;
@@ -36,6 +38,8 @@ use kanidm_hsm_crypto::{provider::BoxedDynTpm, structures::RS256Key};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(feature = "set_timeout")]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -147,9 +151,18 @@ impl ConfidentialClientApplication {
         client_id: &str,
         authority: Option<&str>,
         credential: ClientCredential,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         Ok(ConfidentialClientApplication {
-            app: ClientApplication::new(client_id, authority)?,
+            app: ClientApplication::new(
+                client_id,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
+            )?,
             credential,
         })
     }

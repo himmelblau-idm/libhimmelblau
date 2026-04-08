@@ -45,6 +45,11 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::{fmt, time::Duration};
 
+#[cfg(feature = "ipvers")]
+use crate::auth::IpVersion;
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
+
 #[derive(Debug, Deserialize)]
 pub struct DeviceAction {
     #[serde(rename = "target")]
@@ -422,11 +427,18 @@ impl IntuneForLinux {
     pub fn new(
         service_endpoints: IntuneServiceEndpoints,
         #[cfg(feature = "intune_portal_vers_selection")] app_vers: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3))
+            .connect_timeout(connect_timeout)
+            .timeout(timeout)
             .redirect(Policy::none())
             .cookie_store(true);
 
@@ -439,6 +451,19 @@ impl IntuneForLinux {
                 let proxy = Proxy::https(proxy_var)
                     .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
                 builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+            }
+        }
+
+        #[cfg(feature = "ipvers")]
+        {
+            let has_v4 = ip_version.contains(&IpVersion::V4);
+            let has_v6 = ip_version.contains(&IpVersion::V6);
+            if has_v4 && !has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            } else if !has_v4 && has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
             }
         }
 
