@@ -31,6 +31,8 @@ use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, json, Value};
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -42,8 +44,6 @@ use tracing::{error, info, warn};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-#[cfg(feature = "set_timeout")]
-use std::cmp::min;
 
 #[cfg(feature = "interactive")]
 use browser_window::{application::*, browser::*};
@@ -4870,7 +4870,8 @@ impl BrokerClientApplication {
             self.app.app.timeout,
             #[cfg(feature = "ipvers")]
             &self.app.app.ip_version,
-        ).await?;
+        )
+        .await?;
         services
             .enroll_device(access_token, attrs, transport_key, csr_der)
             .await
@@ -5756,14 +5757,9 @@ impl BrokerClientApplication {
             &redirect_uri,
             request_resource.as_deref(),
         )?;
-        let jwt = JwsBuilder::from(
-            serde_json::to_vec(&jwt_payload).map_err(|e| {
-                MsalError::InvalidJson(format!(
-                    "Failed serializing ExchangePRTForAT JWT: {}",
-                    e
-                ))
-            })?,
-        )
+        let jwt = JwsBuilder::from(serde_json::to_vec(&jwt_payload).map_err(|e| {
+            MsalError::InvalidJson(format!("Failed serializing ExchangePRTForAT JWT: {}", e))
+        })?)
         .set_typ(Some("JWT"))
         .build();
 
@@ -5825,20 +5821,18 @@ impl BrokerClientApplication {
             // plain JSON. Try JWE decryption first.
             let transport_key = self.transport_key(tpm, storage_key)?;
             let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
-            let prt_storage_key =
-                maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+            let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
             if let Ok(jwe) = JweCompact::from_str(&resp_text) {
-                let decrypted = session_key
-                    .decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
+                let decrypted =
+                    session_key.decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
                 json_from_str(
                     std::str::from_utf8(decrypted.payload())
                         .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
                 )
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
             } else {
-                json_from_str(&resp_text)
-                    .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+                json_from_str(&resp_text).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
             }
         } else {
             let json_resp: ErrorResponse = resp
@@ -6089,7 +6083,8 @@ impl BrokerClientApplication {
             self.app.app.timeout,
             #[cfg(feature = "ipvers")]
             &self.app.app.ip_version,
-        ).await?;
+        )
+        .await?;
         let resource_id = services.key_provisioning_resource_id();
 
         // Acquire an access token for the key provisioning service

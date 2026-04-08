@@ -38,11 +38,11 @@ use kanidm_hsm_crypto::{provider::BoxedDynTpm, structures::RS256Key};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(feature = "set_timeout")]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-#[cfg(feature = "set_timeout")]
-use std::time::Duration;
 
 const CLIENT_ID: &str = "client_id";
 const SCOPES: &str = "scope";

@@ -20,6 +20,8 @@ use std::fs;
 use std::io::Read;
 use std::time::Duration;
 
+#[cfg(feature = "ipvers")]
+use crate::auth::IpVersion;
 use crate::error::MsalError;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -27,18 +29,16 @@ use openssl::pkey::Public;
 use openssl::rsa::Rsa;
 use openssl::x509::X509;
 use os_release::OsRelease;
+#[cfg(feature = "proxyable")]
+use reqwest::Proxy;
 use reqwest::{header, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::to_string_pretty;
-use tracing::debug;
-use zeroize::{Zeroize, ZeroizeOnDrop};
-#[cfg(feature = "ipvers")]
-use crate::auth::IpVersion;
 #[cfg(feature = "set_timeout")]
 use std::cmp::min;
-#[cfg(feature = "proxyable")]
-use reqwest::Proxy;
+use tracing::debug;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const DRS_CLIENT_NAME_HEADER_FIELD: &str = "ocp-adrs-client-name";
 pub const DRS_CLIENT_VERSION_HEADER_FIELD: &str = "ocp-adrs-client-version";
@@ -501,7 +501,8 @@ impl Services {
                 .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?,
         };
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(url)
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
