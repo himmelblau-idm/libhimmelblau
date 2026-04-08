@@ -33,6 +33,7 @@ mfa_method_selection = []
 intune_portal_vers_selection = []
 optional_mfa = []
 set_timeout = []
+ipvers = []
 
 [dependencies]
 crypto-glue = { version = "0.1.6" }

@@ -33,6 +33,8 @@ use serde_json::json;
 use serde_json::to_string_pretty;
 use tracing::debug;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+#[cfg(feature = "ipvers")]
+use crate::auth::IpVersion;
 #[cfg(feature = "set_timeout")]
 use std::cmp::min;
 
@@ -392,6 +394,7 @@ impl Services {
         access_token: &str,
         domain_name: &str,
         #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         #[cfg(feature = "set_timeout")]
         let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
@@ -402,6 +405,19 @@ impl Services {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(timeout);
+
+        #[cfg(feature = "ipvers")]
+        {
+            let has_v4 = ip_version.contains(&IpVersion::V4);
+            let has_v6 = ip_version.contains(&IpVersion::V6);
+            if has_v4 && !has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            } else if !has_v4 && has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+            }
+        }
 
         let client = builder
             .build()

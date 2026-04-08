@@ -32,6 +32,8 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::debug;
 
+#[cfg(feature = "ipvers")]
+use crate::auth::IpVersion;
 #[cfg(feature = "set_timeout")]
 use std::cmp::min;
 
@@ -235,6 +237,7 @@ impl Graph {
         tenant_id: Option<&str>,
         graph_url: Option<&str>,
         #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         #[cfg(feature = "set_timeout")]
         let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
@@ -256,6 +259,19 @@ impl Graph {
                 let proxy = Proxy::https(proxy_var)
                     .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
                 builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+            }
+        }
+
+        #[cfg(feature = "ipvers")]
+        {
+            let has_v4 = ip_version.contains(&IpVersion::V4);
+            let has_v6 = ip_version.contains(&IpVersion::V6);
+            if has_v4 && !has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            } else if !has_v4 && has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
             }
         }
 

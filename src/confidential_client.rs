@@ -24,6 +24,8 @@
 */
 use crate::error::{ErrorResponse, MsalError};
 use crate::ClientApplication;
+#[cfg(feature = "ipvers")]
+use crate::IpVersion;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use compact_jwt::crypto::JwsTpmRs256Signer;
@@ -150,6 +152,7 @@ impl ConfidentialClientApplication {
         authority: Option<&str>,
         credential: ClientCredential,
         #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         Ok(ConfidentialClientApplication {
             app: ClientApplication::new(
@@ -157,6 +160,8 @@ impl ConfidentialClientApplication {
                 authority,
                 #[cfg(feature = "set_timeout")]
                 timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
             )?,
             credential,
         })

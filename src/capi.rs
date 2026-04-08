@@ -433,6 +433,8 @@ pub unsafe extern "C" fn broker_init(
         cert_key,
         #[cfg(feature = "set_timeout")]
         std::time::Duration::from_secs(3),
+        #[cfg(feature = "ipvers")]
+        &[IpVersion::V4, IpVersion::V6],
     ) {
         Ok(client) => {
             unsafe {

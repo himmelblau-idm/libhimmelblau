@@ -1500,11 +1500,20 @@ pub enum AuthOption {
     RemoteSession,
 }
 
+#[cfg(feature = "ipvers")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpVersion {
+    V4,
+    V6,
+}
+
 pub(crate) struct ClientApplication {
     pub(crate) client: Client,
     pub(crate) client_id: String,
     authority: RwLock<String>,
     jar: Arc<CookieStoreMutex>,
+    #[cfg(feature = "ipvers")]
+    pub(crate) ip_version: Vec<IpVersion>,
     #[cfg(feature = "set_timeout")]
     pub(crate) timeout: Duration,
 }
@@ -1514,6 +1523,7 @@ impl ClientApplication {
         client_id: &str,
         authority: Option<&str>,
         #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         let jar = Arc::new(CookieStoreMutex::new(CookieStore::default()));
 
@@ -1541,6 +1551,19 @@ impl ClientApplication {
             }
         }
 
+        #[cfg(feature = "ipvers")]
+        {
+            let has_v4 = ip_version.contains(&IpVersion::V4);
+            let has_v6 = ip_version.contains(&IpVersion::V6);
+            if has_v4 && !has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            } else if !has_v4 && has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+            }
+        }
+
         let client = builder
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
@@ -1553,6 +1576,8 @@ impl ClientApplication {
                 None => "https://login.microsoftonline.com/common".to_string(),
             }),
             jar,
+            #[cfg(feature = "ipvers")]
+            ip_version: ip_version.to_vec(),
             #[cfg(feature = "set_timeout")]
             timeout,
         })
@@ -1825,6 +1850,7 @@ impl PublicClientApplication {
         client_id: &str,
         authority: Option<&str>,
         #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         Ok(PublicClientApplication {
             app: ClientApplication::new(
@@ -1832,6 +1858,8 @@ impl PublicClientApplication {
                 authority,
                 #[cfg(feature = "set_timeout")]
                 timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
             )?,
         })
     }
@@ -4625,6 +4653,7 @@ impl BrokerClientApplication {
         transport_key: Option<LoadableMsOapxbcRsaKey>,
         cert_key: Option<LoadableMsDeviceEnrolmentKey>,
         #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         Ok(BrokerClientApplication {
             app: PublicClientApplication::new(
@@ -4632,6 +4661,8 @@ impl BrokerClientApplication {
                 authority,
                 #[cfg(feature = "set_timeout")]
                 timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
             )?,
             transport_key,
             cert_key,
@@ -4837,6 +4868,8 @@ impl BrokerClientApplication {
             &attrs.target_domain,
             #[cfg(feature = "set_timeout")]
             self.app.app.timeout,
+            #[cfg(feature = "ipvers")]
+            &self.app.app.ip_version,
         ).await?;
         services
             .enroll_device(access_token, attrs, transport_key, csr_der)
@@ -6054,6 +6087,8 @@ impl BrokerClientApplication {
             &token.tenant_id()?,
             #[cfg(feature = "set_timeout")]
             self.app.app.timeout,
+            #[cfg(feature = "ipvers")]
+            &self.app.app.ip_version,
         ).await?;
         let resource_id = services.key_provisioning_resource_id();
 
