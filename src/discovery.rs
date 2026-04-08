@@ -37,6 +37,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::auth::IpVersion;
 #[cfg(feature = "set_timeout")]
 use std::cmp::min;
+#[cfg(feature = "proxyable")]
+use reqwest::Proxy;
 
 pub const DRS_CLIENT_NAME_HEADER_FIELD: &str = "ocp-adrs-client-name";
 pub const DRS_CLIENT_VERSION_HEADER_FIELD: &str = "ocp-adrs-client-version";
@@ -405,6 +407,18 @@ impl Services {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(timeout);
+
+        #[cfg(feature = "proxyable")]
+        {
+            if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
+                .ok()
+                .or_else(|| std::env::var("ALL_PROXY").ok())
+            {
+                let proxy = Proxy::https(proxy_var)
+                    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
+                builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+            }
+        }
 
         #[cfg(feature = "ipvers")]
         {
