@@ -39,6 +39,8 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+#[cfg(feature = "set_timeout")]
+use std::time::Duration;
 
 const CLIENT_ID: &str = "client_id";
 const SCOPES: &str = "scope";
@@ -147,9 +149,15 @@ impl ConfidentialClientApplication {
         client_id: &str,
         authority: Option<&str>,
         credential: ClientCredential,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
     ) -> Result<Self, MsalError> {
         Ok(ConfidentialClientApplication {
-            app: ClientApplication::new(client_id, authority)?,
+            app: ClientApplication::new(
+                client_id,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+            )?,
             credential,
         })
     }

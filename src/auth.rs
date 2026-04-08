@@ -42,6 +42,8 @@ use tracing::{error, info, warn};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
 
 #[cfg(feature = "interactive")]
 use browser_window::{application::*, browser::*};
@@ -1503,15 +1505,27 @@ pub(crate) struct ClientApplication {
     pub(crate) client_id: String,
     authority: RwLock<String>,
     jar: Arc<CookieStoreMutex>,
+    #[cfg(feature = "set_timeout")]
+    pub(crate) timeout: Duration,
 }
 
 impl ClientApplication {
-    pub(crate) fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+    pub(crate) fn new(
+        client_id: &str,
+        authority: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+    ) -> Result<Self, MsalError> {
         let jar = Arc::new(CookieStoreMutex::new(CookieStore::default()));
+
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3))
+            .connect_timeout(connect_timeout)
+            .timeout(timeout)
             .redirect(Policy::none())
             .cookie_provider(jar.clone());
 
@@ -1539,6 +1553,8 @@ impl ClientApplication {
                 None => "https://login.microsoftonline.com/common".to_string(),
             }),
             jar,
+            #[cfg(feature = "set_timeout")]
+            timeout,
         })
     }
 
@@ -1805,9 +1821,18 @@ impl PublicClientApplication {
     /// * `authority` - A URL that identifies a token authority. It should
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
-    pub fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+    pub fn new(
+        client_id: &str,
+        authority: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+    ) -> Result<Self, MsalError> {
         Ok(PublicClientApplication {
-            app: ClientApplication::new(client_id, authority)?,
+            app: ClientApplication::new(
+                client_id,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+            )?,
         })
     }
 
@@ -4599,9 +4624,15 @@ impl BrokerClientApplication {
         client_id: Option<&str>,
         transport_key: Option<LoadableMsOapxbcRsaKey>,
         cert_key: Option<LoadableMsDeviceEnrolmentKey>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
     ) -> Result<Self, MsalError> {
         Ok(BrokerClientApplication {
-            app: PublicClientApplication::new(BROKER_APP_ID, authority)?,
+            app: PublicClientApplication::new(
+                BROKER_APP_ID,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+            )?,
             transport_key,
             cert_key,
             on_behalf_of_client_id: client_id.map(|s| s.to_string()),
@@ -4801,7 +4832,12 @@ impl BrokerClientApplication {
         transport_key: &Rsa<Public>,
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
-        let services = Services::new(access_token, &attrs.target_domain).await?;
+        let services = Services::new(
+            access_token,
+            &attrs.target_domain,
+            #[cfg(feature = "set_timeout")]
+            self.app.app.timeout,
+        ).await?;
         services
             .enroll_device(access_token, attrs, transport_key, csr_der)
             .await
@@ -6013,7 +6049,12 @@ impl BrokerClientApplication {
                 ))
             }
         };
-        let services = Services::new(&access_token, &token.tenant_id()?).await?;
+        let services = Services::new(
+            &access_token,
+            &token.tenant_id()?,
+            #[cfg(feature = "set_timeout")]
+            self.app.app.timeout,
+        ).await?;
         let resource_id = services.key_provisioning_resource_id();
 
         // Acquire an access token for the key provisioning service

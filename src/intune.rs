@@ -45,6 +45,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::{fmt, time::Duration};
 
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
+
 #[derive(Debug, Deserialize)]
 pub struct DeviceAction {
     #[serde(rename = "target")]
@@ -422,11 +425,17 @@ impl IntuneForLinux {
     pub fn new(
         service_endpoints: IntuneServiceEndpoints,
         #[cfg(feature = "intune_portal_vers_selection")] app_vers: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
     ) -> Result<Self, MsalError> {
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3))
+            .connect_timeout(connect_timeout)
+            .timeout(timeout)
             .redirect(Policy::none())
             .cookie_store(true);
 

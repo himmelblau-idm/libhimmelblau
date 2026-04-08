@@ -431,6 +431,8 @@ pub unsafe extern "C" fn broker_init(
         wrap_c_char(client_id).as_deref(),
         transport_key,
         cert_key,
+        #[cfg(feature = "set_timeout")]
+        std::time::Duration::from_secs(3),
     ) {
         Ok(client) => {
             unsafe {

@@ -32,6 +32,9 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::debug;
 
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
+
 #[derive(Debug, Deserialize)]
 struct FederationProvider {
     #[serde(rename = "tenantId")]
@@ -231,11 +234,17 @@ impl Graph {
         authority_host: Option<&str>,
         tenant_id: Option<&str>,
         graph_url: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
     ) -> Result<Self, MsalError> {
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3))
+            .connect_timeout(connect_timeout)
+            .timeout(timeout)
             .cookie_store(true);
 
         #[cfg(feature = "proxyable")]

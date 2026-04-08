@@ -18,6 +18,7 @@
 
 use std::fs;
 use std::io::Read;
+use std::time::Duration;
 
 use crate::error::MsalError;
 use base64::engine::general_purpose::STANDARD;
@@ -32,6 +33,8 @@ use serde_json::json;
 use serde_json::to_string_pretty;
 use tracing::debug;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
 
 pub const DRS_CLIENT_NAME_HEADER_FIELD: &str = "ocp-adrs-client-name";
 pub const DRS_CLIENT_VERSION_HEADER_FIELD: &str = "ocp-adrs-client-version";
@@ -385,7 +388,25 @@ pub struct Services {
 }
 
 impl Services {
-    pub async fn new(access_token: &str, domain_name: &str) -> Result<Self, MsalError> {
+    pub async fn new(
+        access_token: &str,
+        domain_name: &str,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+    ) -> Result<Self, MsalError> {
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
+        #[allow(unused_mut)]
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(timeout);
+
+        let client = builder
+            .build()
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
         let discovery_url = if cfg!(feature = "custom_oidc_discovery_url") {
             std::env::var("HIMMELBLAU_DISCOVERY_URL").unwrap_or_else(|_| DISCOVERY_URL.to_string())
         } else {
@@ -398,7 +419,6 @@ impl Services {
         )
         .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
 
-        let client = reqwest::Client::new();
         let resp = client
             .get(url)
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
@@ -451,8 +471,7 @@ impl Services {
                 .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?,
         };
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self.client
             .get(url)
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
