@@ -4024,7 +4024,39 @@ impl PublicClientApplication {
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         let text;
         (text, resp) = self.await_working(resp).await?;
+        debug!(
+            "exchange_fido_assertion_for_auth_code_internal: status={}, body length={}",
+            resp.status(),
+            text.len()
+        );
         if resp.status().is_redirection() {
+            // First try the Location header directly, which is the standard
+            // mechanism (matching auth_code_intercept_internal).
+            if let Some(location) = resp.headers().get("location") {
+                if let Ok(redirect) = location.to_str() {
+                    if let Ok(url) = Url::parse(redirect) {
+                        let params = url.query_pairs().collect::<Vec<_>>();
+
+                        if let Some((_, error_description)) =
+                            params.iter().find(|(k, _)| k == "error_description")
+                        {
+                            return Err(MsalError::GeneralFailure(format!(
+                                "Error in FIDO redirect: {}",
+                                error_description
+                            )));
+                        }
+
+                        if let Some((_, code)) =
+                            params.iter().find(|(k, _)| k == "code")
+                        {
+                            return Ok(code.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Fall back to parsing the HTML body for an <a href> containing
+            // the authorization code (legacy redirect body format).
             let document = Html::parse_document(&text);
             let selector = Selector::parse("a[href]").map_err(|_| {
                 MsalError::InvalidParse("Failed parsing auth code response".to_string())
@@ -4046,16 +4078,39 @@ impl PublicClientApplication {
                                     None
                                 }
                             })
-                            .ok_or(MsalError::GeneralFailure(
-                                "Authorization code not found".to_string(),
-                            ));
+                            .ok_or(MsalError::GeneralFailure(format!(
+                                "Authorization code not found in FIDO redirect. Body: {}",
+                                text
+                            )));
                     }
                 }
             }
-            Err(MsalError::GeneralFailure(
-                "Authorization code not found".to_string(),
-            ))
-        } else {
+            Err(MsalError::GeneralFailure(format!(
+                "Authorization code not found in FIDO redirect. Body: {}",
+                text
+            )))
+        } else if resp.status().is_success() {
+            // Check for a JavaScript document.location.replace redirect
+            // containing the auth code (some Entra responses use this instead
+            // of an HTTP redirect).
+            let re = Regex::new(r#"document\.location\.replace\("([^"]+)"\)"#)
+                .map_err(|e| MsalError::InvalidRegex(format!("{}", e)))?;
+            if let Some(m) = re.captures(&text) {
+                if let Some(redirect) = m.get(1) {
+                    let redirect_decoded = Url::parse(&redirect.as_str().replace(r#"\u0026"#, "&"))
+                        .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+                    for (k, v) in redirect_decoded.query_pairs().collect::<Vec<_>>() {
+                        if k == "code" {
+                            return Ok(v.to_string());
+                        }
+                        if k == "error_description" {
+                            return Err(MsalError::GeneralFailure(v.to_string()));
+                        }
+                    }
+                }
+            }
+
+            // Try HTML <a href> parsing for error_description or code.
             let document = Html::parse_document(&text);
             let selector = Selector::parse("a[href]").map_err(|_| {
                 MsalError::InvalidParse(format!("Failed parsing error response: {}", text))
@@ -4068,20 +4123,41 @@ impl PublicClientApplication {
                             MsalError::URLFormatFailed(format!("Failed decoding url: {:?}", e))
                         })?;
                     if let Ok(url) = Url::parse(&href) {
-                        if let Some(error) = url.query_pairs().find_map(|(key, value)| {
-                            if key == "error_description" {
-                                Some(value.to_string())
-                            } else {
-                                None
+                        for (key, value) in url.query_pairs() {
+                            if key == "code" {
+                                return Ok(value.to_string());
                             }
-                        }) {
-                            return Err(MsalError::GeneralFailure(format!("error_description found in parsed URL in exchange_fido_assertion_for_auth_code_internal(): {}", error)));
+                            if key == "error_description" {
+                                return Err(MsalError::GeneralFailure(format!(
+                                    "error_description in FIDO response: {}",
+                                    value
+                                )));
+                            }
                         }
                     }
                 }
             }
-            Err(MsalError::InvalidParse(format!(
-                "Failed parsing error response: {}",
+
+            // Try parsing an AuthConfig for specific errors.
+            match self.parse_auth_config(&text, false, false) {
+                #[cfg(feature = "changepassword")]
+                Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
+                Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                Err(MsalError::ConsentRequested(e)) => return Err(MsalError::ConsentRequested(e)),
+                Ok(auth_config) if auth_config.pgid.as_deref() == Some("ConvergedTFA") => {
+                    return Err(MsalError::MFARequired);
+                }
+                _ => {}
+            }
+
+            Err(MsalError::GeneralFailure(format!(
+                "Authorization code not found in FIDO response. Body: {}",
+                text
+            )))
+        } else {
+            Err(MsalError::GeneralFailure(format!(
+                "FIDO assertion request failed with status {}. Body: {}",
+                resp.status(),
                 text
             )))
         }
