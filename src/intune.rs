@@ -58,7 +58,7 @@ pub struct DeviceAction {
     pub title: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NoncompliantRule {
     #[serde(rename = "ComplianceSource")]
     pub compliance_source: Option<String>,
