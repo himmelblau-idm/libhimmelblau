@@ -1,7 +1,7 @@
 [package]
 name = "libhimmelblau"
 description = "Samba Library for Azure Entra ID Authentication"
-version = "0.8.8"
+version = "0.8.19"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
@@ -27,9 +27,13 @@ proxyable = []
 interactive = ["dep:browser-window", "browser-window/webkitgtk", "browser-window/threadsafe"]
 changepassword = []
 on_behalf_of = ["broker"]
+redirect_uri = ["broker"]
+pop_support = ["broker"]
 mfa_method_selection = []
 intune_portal_vers_selection = []
 optional_mfa = []
+set_timeout = []
+ipvers = []
 
 [dependencies]
 crypto-glue = { version = "0.1.6" }

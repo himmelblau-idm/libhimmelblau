@@ -31,6 +31,8 @@ use scraper::{Html, Selector};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{from_str as json_from_str, json, Value};
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -275,9 +277,14 @@ pub struct MFAAuthContinue {
     /// When set, acquire_token_by_mfa_flow should skip polling and exchange
     /// this code directly for an access token.
     pub auth_code: Option<String>,
-    /// Whether the FIDO method is a passkey (cross-device capable).
-    /// Used to filter out passkeys from default MFA method selection.
+    #[deprecated(note = "Use `skip_fido_for_mfa` instead")]
     pub fido_is_passkey: bool,
+    /// Whether to skip FidoKey in MFA method selection.
+    pub skip_fido_for_mfa: bool,
+    /// Whether the user has a physical USB security key.
+    pub has_physical_security_key: bool,
+    /// Whether the user has a cross-device capable passkey (e.g. MS Authenticator).
+    pub has_cross_device_passkey: bool,
 }
 
 impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
@@ -311,7 +318,7 @@ impl MFAAuthContinue {
             method.auth_method_id
         } else if !self.mfa_methods.is_empty() {
             for method in self.get_mfa_method_details() {
-                if !self.mfa_method_is_passkey(&method) {
+                if !self.should_skip_fido_method(&method) {
                     return method.auth_method_id.clone();
                 }
             }
@@ -344,9 +351,9 @@ impl MFAAuthContinue {
         self.get_available_mfa_methods().len()
     }
 
-    fn mfa_method_is_passkey(&self, method: &MfaMethodInfo) -> bool {
+    fn should_skip_fido_method(&self, method: &MfaMethodInfo) -> bool {
         if method.auth_method_id == "FidoKey" {
-            self.fido_is_passkey
+            self.skip_fido_for_mfa
         } else {
             false
         }
@@ -357,12 +364,12 @@ impl MFAAuthContinue {
         if let Some(details) = self
             .get_mfa_method_details()
             .into_iter()
-            .find(|method| method.is_default && !self.mfa_method_is_passkey(method))
+            .find(|method| method.is_default && !self.should_skip_fido_method(method))
         {
             Some(details)
         } else if !self.mfa_methods.is_empty() {
             for method in self.get_mfa_method_details() {
-                if !self.mfa_method_is_passkey(&method) {
+                if !self.should_skip_fido_method(&method) {
                     return Some(method);
                 }
             }
@@ -621,7 +628,10 @@ where
 pub struct AccessTokenPayload {
     amr: Vec<String>,
     tid: String,
-    upn: String,
+    // Some Entra token types (e.g. Authenticator number-match MFA flow) use
+    // `unique_name` instead of `upn` in the JWT payload. Accept both.
+    unique_name: Option<String>,
+    upn: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -714,7 +724,15 @@ impl UserToken {
                         .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
                     )
                     .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-                    Ok(payload.upn.clone())
+                    if let Some(upn) = &payload.upn {
+                        Ok(upn.clone())
+                    } else if let Some(unique_name) = &payload.unique_name {
+                        Ok(unique_name.clone())
+                    } else {
+                        Err(MsalError::GeneralFailure(
+                            "No spn available for UserToken".to_string(),
+                        ))
+                    }
                 }
                 None => Err(MsalError::GeneralFailure(
                     "No spn available for UserToken".to_string(),
@@ -964,12 +982,65 @@ impl ExchangePRTPayload {
     }
 }
 
+/// JWT payload for exchanging a PRT directly for an access token via the
+/// JWT bearer grant. Used for PoP (Proof of Possession) token requests
+/// where the authorize -> auth_code -> token flow is not supported.
+#[cfg(feature = "broker")]
+#[derive(Serialize, Clone, Default)]
+struct ExchangePRTForATPayload {
+    win_ver: Option<String>,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
+    request_nonce: String,
+    refresh_token: String,
+    iss: String,
+    grant_type: String,
+    client_id: String,
+    redirect_uri: String,
+    aud: String,
+}
+
+#[cfg(feature = "broker")]
+impl ExchangePRTForATPayload {
+    fn new(
+        prt: &PrimaryRefreshToken,
+        nonce: &str,
+        scopes: &str,
+        client_id: &str,
+        redirect_uri: &str,
+        resource: Option<&str>,
+    ) -> Result<Self, MsalError> {
+        let os_release = match OsRelease::new() {
+            Ok(os_release) => Some(format!(
+                "{} {}",
+                os_release.pretty_name, os_release.version_id
+            )),
+            Err(_) => None,
+        };
+        Ok(ExchangePRTForATPayload {
+            win_ver: os_release,
+            scope: scopes.to_string(),
+            resource: resource.map(|r| r.to_string()),
+            request_nonce: nonce.to_string(),
+            refresh_token: prt.refresh_token.clone(),
+            iss: "aad:brokerplugin".to_string(),
+            grant_type: "refresh_token".to_string(),
+            client_id: client_id.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            aud: "login.microsoftonline.com".to_string(),
+        })
+    }
+}
+
 #[cfg(feature = "broker")]
 #[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
 struct RefreshTokenCredentialPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
     iat: Option<i64>,
     refresh_token: String,
-    request_nonce: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_nonce: Option<String>,
     ua_client_id: Option<String>,
     ua_redirect_uri: Option<String>,
     x_client_platform: Option<String>,
@@ -979,13 +1050,7 @@ struct RefreshTokenCredentialPayload {
 
 #[cfg(feature = "broker")]
 impl RefreshTokenCredentialPayload {
-    fn new(prt: &PrimaryRefreshToken, nonce: &str) -> Result<Self, MsalError> {
-        let iat: i64 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
-            .as_secs()
-            .try_into()
-            .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?;
+    fn new(prt: &PrimaryRefreshToken, nonce: Option<&str>) -> Result<Self, MsalError> {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
                 "{} {}",
@@ -993,10 +1058,27 @@ impl RefreshTokenCredentialPayload {
             )),
             Err(_) => None,
         };
+        // When a nonce is provided (from the sso_nonce URL parameter),
+        // use it as request_nonce and omit iat.
+        // When no nonce is provided (proactive SSO flow), use iat only.
+        let (iat, request_nonce) = match nonce {
+            Some(n) => (None, Some(n.to_string())),
+            None => {
+                let iat: i64 = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| MsalError::GeneralFailure(format!("Failed choosing iat: {}", e)))?
+                    .as_secs()
+                    .try_into()
+                    .map_err(|e| {
+                        MsalError::GeneralFailure(format!("Failed choosing iat: {}", e))
+                    })?;
+                (Some(iat), None)
+            }
+        };
         Ok(RefreshTokenCredentialPayload {
-            iat: Some(iat),
+            iat,
             refresh_token: prt.refresh_token.clone(),
-            request_nonce: nonce.to_string(),
+            request_nonce,
             ua_client_id: None,
             ua_redirect_uri: None,
             x_client_platform: None,
@@ -1343,11 +1425,65 @@ impl SessionKey {
     }
 }
 
+/// Determines whether passwordless security key authentication should be
+/// attempted (physical USB FIDO2 key).
+///
+/// Attempts whenever any FIDO method is registered for the user
+/// (FidoParams present in GetCredentialType). The actual key matching
+/// happens via the allow list at the WebAuthn level.
+pub(crate) fn should_attempt_passwordless_security_key(
+    options: &[AuthOption],
+    has_fido_params: bool,
+) -> bool {
+    let enabled = options.contains(&AuthOption::PasswordlessSecurityKey)
+        || options.contains(&AuthOption::PasswordlessFido);
+    if !enabled {
+        debug!("passwordless_security_key: skipped (not enabled in config)");
+        return false;
+    }
+    if !has_fido_params {
+        debug!("passwordless_security_key: skipped (no FIDO params from GetCredentialType)");
+        return false;
+    }
+    debug!("passwordless_security_key: user has FIDO params, attempting");
+    true
+}
+
+/// Determines whether passwordless QR/Bluetooth (caBLE hybrid transport)
+/// authentication should be attempted.
+///
+/// Uses `has_cross_device_capable_passkey` from GetCredentialType to
+/// determine if the user has a cross-device passkey. No Graph permission
+/// required. Bluetooth hardware availability is checked at runtime in the
+/// PAM layer, not here.
+pub(crate) fn should_attempt_passwordless_qr_bluetooth(
+    options: &[AuthOption],
+    has_fido_params: bool,
+    user_has_any_cross_device_fido: bool,
+) -> bool {
+    if !options.contains(&AuthOption::PasswordlessQrBluetooth) {
+        debug!("passwordless_qr_bluetooth: skipped (not enabled in config)");
+        return false;
+    }
+    if !has_fido_params {
+        debug!("passwordless_qr_bluetooth: skipped (no FIDO params from GetCredentialType)");
+        return false;
+    }
+    if !user_has_any_cross_device_fido {
+        debug!("passwordless_qr_bluetooth: skipped (user has no cross-device passkey)");
+        return false;
+    }
+    debug!("passwordless_qr_bluetooth: user has cross-device passkey, attempting");
+    true
+}
+
 #[derive(PartialEq)]
 pub enum AuthOption {
     Fido,
     Passwordless,
     PasswordlessFido,
+    PasswordlessSecurityKey,
+    PasswordlessQrBluetooth,
     NoDAGFallback,
     /// Demand ngcmfa in the amr_values, which forces MFA authentication.
     /// This should be used for remote connections (SSH) where we want to ensure
@@ -1364,20 +1500,42 @@ pub enum AuthOption {
     RemoteSession,
 }
 
+#[cfg(feature = "ipvers")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpVersion {
+    V4,
+    V6,
+}
+
 pub(crate) struct ClientApplication {
     pub(crate) client: Client,
     pub(crate) client_id: String,
     authority: RwLock<String>,
     jar: Arc<CookieStoreMutex>,
+    #[cfg(feature = "ipvers")]
+    pub(crate) ip_version: Vec<IpVersion>,
+    #[cfg(feature = "set_timeout")]
+    pub(crate) timeout: Duration,
 }
 
 impl ClientApplication {
-    pub(crate) fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+    pub(crate) fn new(
+        client_id: &str,
+        authority: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
+    ) -> Result<Self, MsalError> {
         let jar = Arc::new(CookieStoreMutex::new(CookieStore::default()));
+
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
         #[allow(unused_mut)]
         let mut builder = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3))
+            .connect_timeout(connect_timeout)
+            .timeout(timeout)
             .redirect(Policy::none())
             .cookie_provider(jar.clone());
 
@@ -1393,6 +1551,19 @@ impl ClientApplication {
             }
         }
 
+        #[cfg(feature = "ipvers")]
+        {
+            let has_v4 = ip_version.contains(&IpVersion::V4);
+            let has_v6 = ip_version.contains(&IpVersion::V6);
+            if has_v4 && !has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            } else if !has_v4 && has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+            }
+        }
+
         let client = builder
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
@@ -1405,6 +1576,10 @@ impl ClientApplication {
                 None => "https://login.microsoftonline.com/common".to_string(),
             }),
             jar,
+            #[cfg(feature = "ipvers")]
+            ip_version: ip_version.to_vec(),
+            #[cfg(feature = "set_timeout")]
+            timeout,
         })
     }
 
@@ -1671,9 +1846,21 @@ impl PublicClientApplication {
     /// * `authority` - A URL that identifies a token authority. It should
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
-    pub fn new(client_id: &str, authority: Option<&str>) -> Result<Self, MsalError> {
+    pub fn new(
+        client_id: &str,
+        authority: Option<&str>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
+    ) -> Result<Self, MsalError> {
         Ok(PublicClientApplication {
-            app: ClientApplication::new(client_id, authority)?,
+            app: ClientApplication::new(
+                client_id,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
+            )?,
         })
     }
 
@@ -2659,7 +2846,7 @@ impl PublicClientApplication {
         macro_rules! passwordless_tap {
             () => {
                 if cred_type.credentials.has_access_pass.unwrap_or(false) {
-                    // Passwordless TAP is enabled, we can drop out here
+                    debug!("passwordless_tap: attempting (has_access_pass=true)");
                     let msg = "Enter Temporary Access Pass: ".to_string();
                     let url_post = match &auth_config.url_post {
                         Some(url_post) => url_post.clone(),
@@ -2694,8 +2881,14 @@ impl PublicClientApplication {
                         }],
                         selected_mfa_method_id: Some("AccessPass".to_string()),
                         auth_code: None,
+                        #[allow(deprecated)]
                         fido_is_passkey: false,
+                        skip_fido_for_mfa: false,
+                        has_physical_security_key: false,
+                        has_cross_device_passkey: false,
                     });
+                } else {
+                    debug!("passwordless_tap: skipped (has_access_pass=false)");
                 }
             };
         }
@@ -2713,6 +2906,7 @@ impl PublicClientApplication {
                 if !passwordless_remote_ngc_called {
                     passwordless_remote_ngc_called = true;
                     if let Some(ref remote_ngc_params) = cred_type.credentials.remote_ngc_params {
+                        debug!("passwordless_remote_ngc: attempting (remote_ngc_params present)");
                         // Mark that we're about to attempt a push via remote NGC
                         remote_ngc_push_attempted = true;
                         // Ensure the one time code didn't fail, if it did, we need to continue
@@ -2758,15 +2952,39 @@ impl PublicClientApplication {
                                 }],
                                 selected_mfa_method_id: Some("PhoneAppNotification".to_string()),
                                 auth_code: None,
+                                #[allow(deprecated)]
                                 fido_is_passkey: false,
+                                skip_fido_for_mfa: false,
+                                has_physical_security_key: false,
+                                has_cross_device_passkey: false,
                             });
                         }
+                    } else {
+                        debug!("passwordless_remote_ngc: skipped (remote_ngc_params absent)");
                     }
+                } else {
+                    debug!("passwordless_remote_ngc: skipped (already called)");
                 }
             };
         }
 
-        let fido_is_a_passkey = cred_type
+        debug!("Credential type: pref_credential={}, has_password={}, has_fido={:?}, has_remote_ngc={:?}, has_access_pass={:?}, is_passkey_support_enabled={:?}",
+            cred_type.credentials.pref_credential,
+            cred_type.credentials.has_password,
+            cred_type.credentials.has_fido,
+            cred_type.credentials.has_remote_ngc,
+            cred_type.credentials.has_access_pass,
+            auth_config.is_passkey_support_enabled,
+        );
+        if let Some(ref fido_params) = cred_type.credentials.fido_params {
+            debug!(
+                "FIDO params: has_cross_device_capable_passkey={:?}, allow_list_count={}",
+                fido_params.has_cross_device_capable_passkey,
+                fido_params.fido_allow_list.len(),
+            );
+        }
+
+        let user_has_any_cross_device_fido = cred_type
             .credentials
             .fido_params
             .as_ref()
@@ -2776,71 +2994,92 @@ impl PublicClientApplication {
                     .unwrap_or(false)
             })
             .unwrap_or(false);
+        let attempt_security_key = should_attempt_passwordless_security_key(
+            options,
+            cred_type.credentials.fido_params.is_some(),
+        );
+        let attempt_qr_bluetooth = should_attempt_passwordless_qr_bluetooth(
+            options,
+            cred_type.credentials.fido_params.is_some(),
+            user_has_any_cross_device_fido,
+        );
+
         macro_rules! passwordless_fido {
             () => {
-                if options.contains(&AuthOption::PasswordlessFido) {
-                    if let Some(ref fido_params) = cred_type.credentials.fido_params {
-                        // If this is a Passkey, bail out. We don't support passkey auth
-                        if !fido_is_a_passkey {
-                            // Passwordless fido is enabled, we can drop out here
-                            let url_post = match &auth_config.url_post {
-                                Some(url_post) => url_post.clone(),
-                                None => {
-                                    return Err(MsalError::GeneralFailure(
-                                        "urlBeginAuth is missing".to_string(),
-                                    ))
-                                }
-                            };
-                            auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
-                            let fido_auth_config = self
-                                .handle_auth_config_fido_get(username, &auth_config, &request_id)
-                                .await?;
-                            return Ok(MFAAuthContinue {
-                                msg: "".to_string(),
-                                entropy: None,
-                                max_poll_attempts: auth_config.max_poll_attempts,
-                                polling_interval: Some(5000),
-                                session_id: fido_auth_config.session_id,
-                                flow_token: sft,
-                                ctx: sctx,
-                                canary: auth_config.canary,
-                                url_end_auth: auth_config.url_end_auth,
-                                url_post,
-                                resource: resource.map(|s| s.to_string()),
-                                dag: None,
-                                fido_challenge: fido_auth_config.fido_challenge,
-                                fido_allow_list: Some(fido_params.fido_allow_list.clone()),
-                                cross_domain_canary: fido_auth_config.cross_domain_canary,
-                                url_session_state: auth_config.url_session_state,
-                                mfa_methods: vec!["FidoKey".to_string()].into(),
-                                mfa_method_details: vec![MfaMethodInfo {
-                                    auth_method_id: "FidoKey".to_string(),
-                                    display: "FidoKey".to_string(),
-                                    is_default: true,
-                                }],
-                                selected_mfa_method_id: Some("FidoKey".to_string()),
-                                auth_code: None,
-                                fido_is_passkey: false,
-                            });
+                if attempt_security_key || attempt_qr_bluetooth {
+                    let fido_params = cred_type.credentials.fido_params.as_ref().unwrap();
+                    let url_post = match &auth_config.url_post {
+                        Some(url_post) => url_post.clone(),
+                        None => {
+                            return Err(MsalError::GeneralFailure(
+                                "urlBeginAuth is missing".to_string(),
+                            ))
                         }
-                    }
+                    };
+                    auth_config.fido_allow_list = Some(fido_params.fido_allow_list.clone());
+                    let fido_auth_config = self
+                        .handle_auth_config_fido_get(username, &auth_config, &request_id)
+                        .await?;
+                    return Ok(MFAAuthContinue {
+                        msg: "".to_string(),
+                        entropy: None,
+                        max_poll_attempts: auth_config.max_poll_attempts,
+                        polling_interval: Some(5000),
+                        session_id: fido_auth_config.session_id,
+                        flow_token: sft,
+                        ctx: sctx,
+                        canary: auth_config.canary,
+                        url_end_auth: auth_config.url_end_auth,
+                        url_post,
+                        resource: resource.map(|s| s.to_string()),
+                        dag: None,
+                        fido_challenge: fido_auth_config.fido_challenge,
+                        fido_allow_list: Some(fido_params.fido_allow_list.clone()),
+                        cross_domain_canary: fido_auth_config.cross_domain_canary,
+                        url_session_state: auth_config.url_session_state,
+                        mfa_methods: vec!["FidoKey".to_string()].into(),
+                        mfa_method_details: vec![MfaMethodInfo {
+                            auth_method_id: "FidoKey".to_string(),
+                            display: "FidoKey".to_string(),
+                            is_default: true,
+                        }],
+                        selected_mfa_method_id: Some("FidoKey".to_string()),
+                        auth_code: None,
+                        #[allow(deprecated)]
+                        fido_is_passkey: false,
+                        skip_fido_for_mfa: false,
+                        has_physical_security_key: attempt_security_key,
+                        has_cross_device_passkey: attempt_qr_bluetooth,
+                    });
                 }
             };
         }
 
-        // Attempt to honor the preferred credential choice.
+        // Methods are attempted most-secure-first: FIDO (phishing-resistant)
+        // always before remote_ngc (number matching), regardless of the
+        // pref_credential value returned by Microsoft. This ensures users
+        // under a phishing-resistant CAP are offered a compliant method.
         match cred_type.credentials.pref_credential {
             13 => passwordless_tap!(),
-            7 => passwordless_remote_ngc!(),
-            2 => passwordless_fido!(),
+            2 | 7 => {
+                debug!(
+                    "passwordless_fido triggered via pref_credential={}",
+                    cred_type.credentials.pref_credential
+                );
+                passwordless_fido!();
+                passwordless_remote_ngc!();
+            }
             _ => {}
         }
 
-        // Now attempt to emulate the old behavior, attempting passwordless MFA
+        // Now attempt to emulate the old behavior, attempting passwordless
         // auth even if it isn't the preferred method.
+        debug!("passwordless_tap triggered via fallthrough");
         passwordless_tap!();
-        passwordless_remote_ngc!();
+        debug!("passwordless_fido triggered via fallthrough");
         passwordless_fido!();
+        debug!("passwordless_remote_ngc triggered via fallthrough");
+        passwordless_remote_ngc!();
 
         if cred_type.credentials.federation_redirect_url.is_some() {
             info!("Federated identities are not supported.");
@@ -2973,7 +3212,8 @@ impl PublicClientApplication {
                     }
                 }
                 if let Some(ref arr_user_proofs) = auth_config.arr_user_proofs {
-                    let fido_is_a_passkey = fido_is_a_passkey
+                    debug!("MFA methods available: {:?}", arr_user_proofs);
+                    let skip_fido_for_mfa = user_has_any_cross_device_fido
                         || auth_config.is_passkey_support_enabled.unwrap_or(false);
 
                     // Try to use provided MFA method if available
@@ -2982,7 +3222,7 @@ impl PublicClientApplication {
                             .iter()
                             .find(|proof| {
                                 proof.auth_method_id == requested_method
-                                    && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                                    && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
                             })
                             .ok_or_else(|| {
                                 let available = arr_user_proofs
@@ -2996,10 +3236,10 @@ impl PublicClientApplication {
                             })?
                     } else if let Some(method) = arr_user_proofs.iter().find(|proof| {
                         proof.is_default
-                            && (!fido_is_a_passkey || proof.auth_method_id != "FidoKey")
+                            && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
                     }) {
                         method
-                    } else if fido_is_a_passkey {
+                    } else if skip_fido_for_mfa {
                         // Skip FidoKey methods entirely if we can't use them
                         match arr_user_proofs
                             .iter()
@@ -3011,7 +3251,7 @@ impl PublicClientApplication {
                             }) {
                             Some(method) => method,
                             None => {
-                                info!("No usable MFA methods found (FIDO was passkey)");
+                                info!("No usable MFA methods found (FIDO was cross-device)");
                                 dag_fallback!();
                             }
                         }
@@ -3147,7 +3387,11 @@ impl PublicClientApplication {
                             .collect(),
                         selected_mfa_method_id: Some(selected_auth_method.auth_method_id.clone()),
                         auth_code: None,
-                        fido_is_passkey: fido_is_a_passkey,
+                        #[allow(deprecated)]
+                        fido_is_passkey: skip_fido_for_mfa,
+                        skip_fido_for_mfa,
+                        has_physical_security_key: false,
+                        has_cross_device_passkey: false,
                     })
                 } else {
                     info!("No MFA methods found");
@@ -3179,7 +3423,11 @@ impl PublicClientApplication {
                     mfa_method_details: vec![],
                     selected_mfa_method_id: None,
                     auth_code: Some(auth_code),
+                    #[allow(deprecated)]
                     fido_is_passkey: false,
+                    skip_fido_for_mfa: false,
+                    has_physical_security_key: false,
+                    has_cross_device_passkey: false,
                 })
             }
             Err(e) => {
@@ -3829,7 +4077,39 @@ impl PublicClientApplication {
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
         let text;
         (text, resp) = self.await_working(resp).await?;
+        debug!(
+            "exchange_fido_assertion_for_auth_code_internal: status={}, body length={}",
+            resp.status(),
+            text.len()
+        );
         if resp.status().is_redirection() {
+            // First try the Location header directly, which is the standard
+            // mechanism (matching auth_code_intercept_internal).
+            if let Some(location) = resp.headers().get("location") {
+                if let Ok(redirect) = location.to_str() {
+                    if let Ok(url) = Url::parse(redirect) {
+                        let params = url.query_pairs().collect::<Vec<_>>();
+
+                        if let Some((_, error_description)) =
+                            params.iter().find(|(k, _)| k == "error_description")
+                        {
+                            return Err(MsalError::GeneralFailure(format!(
+                                "Error in FIDO redirect: {}",
+                                error_description
+                            )));
+                        }
+
+                        if let Some((_, code)) =
+                            params.iter().find(|(k, _)| k == "code")
+                        {
+                            return Ok(code.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Fall back to parsing the HTML body for an <a href> containing
+            // the authorization code (legacy redirect body format).
             let document = Html::parse_document(&text);
             let selector = Selector::parse("a[href]").map_err(|_| {
                 MsalError::InvalidParse("Failed parsing auth code response".to_string())
@@ -3851,16 +4131,39 @@ impl PublicClientApplication {
                                     None
                                 }
                             })
-                            .ok_or(MsalError::GeneralFailure(
-                                "Authorization code not found".to_string(),
-                            ));
+                            .ok_or(MsalError::GeneralFailure(format!(
+                                "Authorization code not found in FIDO redirect. Body: {}",
+                                text
+                            )));
                     }
                 }
             }
-            Err(MsalError::GeneralFailure(
-                "Authorization code not found".to_string(),
-            ))
-        } else {
+            Err(MsalError::GeneralFailure(format!(
+                "Authorization code not found in FIDO redirect. Body: {}",
+                text
+            )))
+        } else if resp.status().is_success() {
+            // Check for a JavaScript document.location.replace redirect
+            // containing the auth code (some Entra responses use this instead
+            // of an HTTP redirect).
+            let re = Regex::new(r#"document\.location\.replace\("([^"]+)"\)"#)
+                .map_err(|e| MsalError::InvalidRegex(format!("{}", e)))?;
+            if let Some(m) = re.captures(&text) {
+                if let Some(redirect) = m.get(1) {
+                    let redirect_decoded = Url::parse(&redirect.as_str().replace(r#"\u0026"#, "&"))
+                        .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
+                    for (k, v) in redirect_decoded.query_pairs().collect::<Vec<_>>() {
+                        if k == "code" {
+                            return Ok(v.to_string());
+                        }
+                        if k == "error_description" {
+                            return Err(MsalError::GeneralFailure(v.to_string()));
+                        }
+                    }
+                }
+            }
+
+            // Try HTML <a href> parsing for error_description or code.
             let document = Html::parse_document(&text);
             let selector = Selector::parse("a[href]").map_err(|_| {
                 MsalError::InvalidParse(format!("Failed parsing error response: {}", text))
@@ -3873,20 +4176,41 @@ impl PublicClientApplication {
                             MsalError::URLFormatFailed(format!("Failed decoding url: {:?}", e))
                         })?;
                     if let Ok(url) = Url::parse(&href) {
-                        if let Some(error) = url.query_pairs().find_map(|(key, value)| {
-                            if key == "error_description" {
-                                Some(value.to_string())
-                            } else {
-                                None
+                        for (key, value) in url.query_pairs() {
+                            if key == "code" {
+                                return Ok(value.to_string());
                             }
-                        }) {
-                            return Err(MsalError::GeneralFailure(format!("error_description found in parsed URL in exchange_fido_assertion_for_auth_code_internal(): {}", error)));
+                            if key == "error_description" {
+                                return Err(MsalError::GeneralFailure(format!(
+                                    "error_description in FIDO response: {}",
+                                    value
+                                )));
+                            }
                         }
                     }
                 }
             }
-            Err(MsalError::InvalidParse(format!(
-                "Failed parsing error response: {}",
+
+            // Try parsing an AuthConfig for specific errors.
+            match self.parse_auth_config(&text, false, false) {
+                #[cfg(feature = "changepassword")]
+                Err(MsalError::ChangePassword) => return Err(MsalError::ChangePassword),
+                Err(MsalError::AADSTSError(e)) => return Err(MsalError::AADSTSError(e)),
+                Err(MsalError::ConsentRequested(e)) => return Err(MsalError::ConsentRequested(e)),
+                Ok(auth_config) if auth_config.pgid.as_deref() == Some("ConvergedTFA") => {
+                    return Err(MsalError::MFARequired);
+                }
+                _ => {}
+            }
+
+            Err(MsalError::GeneralFailure(format!(
+                "Authorization code not found in FIDO response. Body: {}",
+                text
+            )))
+        } else {
+            Err(MsalError::GeneralFailure(format!(
+                "FIDO assertion request failed with status {}. Body: {}",
+                resp.status(),
                 text
             )))
         }
@@ -4404,9 +4728,18 @@ impl BrokerClientApplication {
         client_id: Option<&str>,
         transport_key: Option<LoadableMsOapxbcRsaKey>,
         cert_key: Option<LoadableMsDeviceEnrolmentKey>,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
         Ok(BrokerClientApplication {
-            app: PublicClientApplication::new(BROKER_APP_ID, authority)?,
+            app: PublicClientApplication::new(
+                BROKER_APP_ID,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                timeout,
+                #[cfg(feature = "ipvers")]
+                ip_version,
+            )?,
             transport_key,
             cert_key,
             on_behalf_of_client_id: client_id.map(|s| s.to_string()),
@@ -4606,7 +4939,15 @@ impl BrokerClientApplication {
         transport_key: &Rsa<Public>,
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
-        let services = Services::new(access_token, &attrs.target_domain).await?;
+        let services = Services::new(
+            access_token,
+            &attrs.target_domain,
+            #[cfg(feature = "set_timeout")]
+            self.app.app.timeout,
+            #[cfg(feature = "ipvers")]
+            &self.app.app.ip_version,
+        )
+        .await?;
         services
             .enroll_device(access_token, attrs, transport_key, csr_der)
             .await
@@ -4675,6 +5016,10 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                None,
+                #[cfg(feature = "pop_support")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -4742,6 +5087,10 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                None,
+                #[cfg(feature = "pop_support")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -4844,9 +5193,16 @@ impl BrokerClientApplication {
         username: &str,
         options: &[AuthOption],
     ) -> Result<AuthInit, MsalError> {
-        let drs_resource = "https://enrollment.manage.microsoft.com/";
+        // Use the Intune service principal as the resource for the initial
+        // auth config request. This avoids Conditional Access policies that
+        // block access to enrollment.manage.microsoft.com from non-compliant
+        // devices, since CA exclusions for "Microsoft Intune" and "Microsoft
+        // Intune Company Portal for Linux" will match this resource+client
+        // combination. This app id is documented at:
+        // https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership
+        let intune_resource = "0000000a-0000-0000-c000-000000000000";
         self.app
-            .check_user_exists(username, Some(drs_resource), options)
+            .check_user_exists(username, Some(intune_resource), options)
             .await
     }
 
@@ -4878,13 +5234,19 @@ impl BrokerClientApplication {
         auth_init: Option<AuthInit>,
         #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
     ) -> Result<MFAAuthContinue, MsalError> {
-        let drs_resource = "https://enrollment.manage.microsoft.com/";
+        // Use the Intune service principal as the resource, as per documentation
+        // https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership
+        // This avoids Conditional Access policies that block non-compliant
+        // devices from accessing enrollment.manage.microsoft.com during
+        // the initial authentication. The enrollment-specific token is
+        // obtained later via refresh_token exchange in enroll_device().
+        let intune_resource = "0000000a-0000-0000-c000-000000000000";
         self.app
             .initiate_acquire_token_by_mfa_flow(
                 username,
                 password,
                 vec![],
-                Some(drs_resource),
+                Some(intune_resource),
                 options,
                 auth_init,
                 #[cfg(feature = "mfa_method_selection")]
@@ -5256,6 +5618,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn exchange_prt_for_access_token(
         &self,
         sealed_prt: &SealedData,
@@ -5264,7 +5627,12 @@ impl BrokerClientApplication {
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
+        #[cfg(feature = "pop_support")] req_cnf: Option<&str>,
     ) -> Result<UserToken, MsalError> {
+        #[cfg(not(feature = "pop_support"))]
+        let _req_cnf: Option<&str> = None;
+
         let v2_endpoint = !scope.is_empty();
         if !scope.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
@@ -5293,6 +5661,10 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                redirect_uri,
+                #[cfg(feature = "pop_support")]
+                req_cnf,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5310,8 +5682,36 @@ impl BrokerClientApplication {
         session_key: &SessionKey,
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
+        #[cfg(feature = "pop_support")] req_cnf: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging a PRT for an Access Token");
+
+        #[cfg(not(feature = "pop_support"))]
+        let req_cnf: Option<&str> = None;
+
+        // When PoP (req_cnf) is requested, use the JWT bearer grant directly
+        // to the token endpoint. This is needed for scopes like
+        // ms-device-service:// that require PoP and don't work with the
+        // authorize -> auth_code -> token flow.
+        if let Some(req_cnf_val) = req_cnf {
+            return self
+                .exchange_prt_for_access_token_jwt_bearer(
+                    prt,
+                    scope,
+                    v2_endpoint,
+                    tpm,
+                    storage_key,
+                    session_key,
+                    request_resource,
+                    req_cnf_val,
+                    #[cfg(feature = "on_behalf_of")]
+                    on_behalf_of_client_id,
+                    #[cfg(feature = "redirect_uri")]
+                    redirect_uri,
+                )
+                .await;
+        }
 
         let request_id = Uuid::new_v4().to_string();
         let auth_code = self
@@ -5326,6 +5726,9 @@ impl BrokerClientApplication {
                 on_behalf_of_client_id,
                 tpm,
                 storage_key,
+                #[cfg(feature = "redirect_uri")]
+                redirect_uri,
+                req_cnf,
             )
             .await?;
 
@@ -5337,8 +5740,254 @@ impl BrokerClientApplication {
             request_resource.as_deref(),
             #[cfg(feature = "on_behalf_of")]
             on_behalf_of_client_id,
+            #[cfg(feature = "redirect_uri")]
+            redirect_uri,
+            req_cnf,
         )
         .await
+    }
+
+    /// Exchange a PRT for an access token using a two-step PoP flow:
+    /// 1. Use JWT bearer grant with PRT to get a bearer token + refresh_token
+    ///    for basic scopes (openid profile offline_access)
+    /// 2. Use that refresh_token with grant_type=refresh_token + target scope
+    ///    + token_type=pop + req_cnf to get the PoP access token
+    ///
+    /// This is required because Azure rejects PRT-based flows (both
+    /// authorize -> auth_code and JWT bearer) for certain scopes like
+    /// ms-device-service:// with AADSTS50132 (SsoArtifactInvalidOrExpired).
+    /// Using a standard refresh_token from a prior token acquisition bypasses
+    /// this restriction.
+    #[allow(clippy::too_many_arguments)]
+    async fn exchange_prt_for_access_token_jwt_bearer(
+        &self,
+        prt: &PrimaryRefreshToken,
+        scope: Vec<&str>,
+        v2_endpoint: bool,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+        session_key: &SessionKey,
+        request_resource: Option<String>,
+        req_cnf: &str,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
+    ) -> Result<UserToken, MsalError> {
+        debug!("Exchanging a PRT for an Access Token via JWT bearer (PoP)");
+
+        #[cfg(not(feature = "on_behalf_of"))]
+        let on_behalf_of_client_id: Option<&str> = None;
+        #[cfg(not(feature = "redirect_uri"))]
+        let redirect_uri_override: Option<&str> = None;
+
+        // Resolve client_id and redirect_uri using the same logic as the
+        // authorize -> auth_code flow
+        let (client_id, redirect_uri) = if let Some(uri) = redirect_uri_override {
+            let cid = if v2_endpoint {
+                if let Some(obo) = on_behalf_of_client_id {
+                    obo.to_string()
+                } else if let Some(obo) = &self.on_behalf_of_client_id {
+                    obo.clone()
+                } else {
+                    LINUX_BROKER_APP_ID.to_string()
+                }
+            } else {
+                self.app.client_id().to_string()
+            };
+            (cid, uri.to_string())
+        } else if v2_endpoint {
+            if let Some(obo) = on_behalf_of_client_id {
+                (
+                    obo.to_string(),
+                    self.app
+                        .get_auth_redirect_uri(Some(obo), request_resource.as_deref()),
+                )
+            } else if let Some(obo) = &self.on_behalf_of_client_id {
+                (obo.clone(), HIMMELBLAU_REDIRECT_URI.to_string())
+            } else {
+                (
+                    LINUX_BROKER_APP_ID.to_string(),
+                    self.app.get_auth_redirect_uri(
+                        Some(LINUX_BROKER_APP_ID),
+                        request_resource.as_deref(),
+                    ),
+                )
+            }
+        } else {
+            (
+                self.app.client_id().to_string(),
+                self.app
+                    .get_auth_redirect_uri(None, request_resource.as_deref()),
+            )
+        };
+
+        // Step 1: Use JWT bearer with PRT to get a bearer token with basic
+        // scopes. This gets us a standard refresh_token.
+        let base_scopes = "openid profile offline_access";
+
+        let nonce = self.request_nonce().await?;
+        let jwt_payload = ExchangePRTForATPayload::new(
+            prt,
+            &nonce,
+            base_scopes,
+            &client_id,
+            &redirect_uri,
+            request_resource.as_deref(),
+        )?;
+        let jwt = JwsBuilder::from(serde_json::to_vec(&jwt_payload).map_err(|e| {
+            MsalError::InvalidJson(format!("Failed serializing ExchangePRTForAT JWT: {}", e))
+        })?)
+        .set_typ(Some("JWT"))
+        .build();
+
+        if let Ok(mut payload) = jwt.from_json::<Value>() {
+            payload["refresh_token"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&payload) {
+                debug!(
+                    "Step 1: Exchange PRT for bearer token (JWT bearer) Payload: {}",
+                    pretty
+                );
+            }
+        }
+
+        let signed_jwt = self
+            .sign_session_key_jwt(&jwt, tpm, storage_key, session_key)
+            .await?;
+
+        let step1_params = vec![
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("windows_api_version", "2.2"),
+            ("request", &signed_jwt),
+            ("client_id", &client_id),
+            ("redirect_uri", &redirect_uri),
+            ("client_info", "1"),
+        ];
+        let step1_payload = step1_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        // Step 1 always uses the v1 token endpoint. The v2 endpoint with
+        // only openid/profile/offline_access scopes defaults to Azure AD
+        // Graph which requires preauthorization for first-party apps.
+        let url = format!("{}/oauth2/token", self.authority()?);
+
+        let mut debug_params = step1_params.clone();
+        debug_params[2] = ("request", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_params) {
+            debug!("Step 1 POST {}: {}", url, pretty);
+        }
+
+        let resp = self
+            .client()
+            .post(&url)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(step1_payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
+        let bearer_token: UserToken = if resp.status().is_success() {
+            let resp_text = resp
+                .text()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+
+            // The response may be a JWE encrypted with the session key, or
+            // plain JSON. Try JWE decryption first.
+            let transport_key = self.transport_key(tpm, storage_key)?;
+            let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+            let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+
+            if let Ok(jwe) = JweCompact::from_str(&resp_text) {
+                let decrypted =
+                    session_key.decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
+                json_from_str(
+                    std::str::from_utf8(decrypted.payload())
+                        .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+            } else {
+                json_from_str(&resp_text).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+            }
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            return Err(MsalError::AcquireTokenFailed(json_resp));
+        };
+
+        debug!(
+            "Step 1 succeeded, got bearer token with refresh_token present={}",
+            !bearer_token.refresh_token.is_empty()
+        );
+
+        // Step 2: Use the refresh_token from step 1 with
+        // grant_type=refresh_token + target scope + token_type=pop + req_cnf
+        let target_scopes = if v2_endpoint {
+            format!("openid profile offline_access {}", scope.join(" "))
+        } else {
+            "openid".to_string()
+        };
+
+        let mut step2_params = vec![
+            ("client_id", client_id.as_str()),
+            ("scope", target_scopes.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &bearer_token.refresh_token),
+            ("client_info", "1"),
+            ("token_type", "pop"),
+            ("req_cnf", req_cnf),
+        ];
+        if !v2_endpoint {
+            if let Some(resource) = request_resource.as_deref() {
+                step2_params.push(("resource", resource));
+            }
+        }
+        let step2_payload = step2_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        // Step 2 uses the v2 endpoint when v2 scopes are present, so the
+        // target scope (e.g. ms-device-service://) is correctly resolved.
+        let step2_url = if v2_endpoint {
+            format!("{}/oauth2/v2.0/token", self.authority()?)
+        } else {
+            format!("{}/oauth2/token", self.authority()?)
+        };
+
+        let mut debug_params2 = step2_params.clone();
+        debug_params2[3] = ("refresh_token", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_params2) {
+            debug!("Step 2 POST {}: {}", step2_url, pretty);
+        }
+
+        let resp2 = self
+            .client()
+            .post(&step2_url)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(step2_payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
+        if resp2.status().is_success() {
+            let token: UserToken = resp2
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Ok(token)
+        } else {
+            let json_resp: ErrorResponse = resp2
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
     }
 
     /// Given the primary refresh token, this method requests a new primary
@@ -5503,7 +6152,15 @@ impl BrokerClientApplication {
                 ))
             }
         };
-        let services = Services::new(&access_token, &token.tenant_id()?).await?;
+        let services = Services::new(
+            &access_token,
+            &token.tenant_id()?,
+            #[cfg(feature = "set_timeout")]
+            self.app.app.timeout,
+            #[cfg(feature = "ipvers")]
+            &self.app.app.ip_version,
+        )
+        .await?;
         let resource_id = services.key_provisioning_resource_id();
 
         // Acquire an access token for the key provisioning service
@@ -5636,6 +6293,10 @@ impl BrokerClientApplication {
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                None,
+                #[cfg(feature = "pop_support")]
+                None,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5807,6 +6468,7 @@ impl BrokerClientApplication {
         self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn exchange_prt_for_auth_code_internal(
         &self,
         scope: Vec<&str>,
@@ -5816,12 +6478,30 @@ impl BrokerClientApplication {
         signed_prt_payload: Option<String>,
         signed_device_payload: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
+        _req_cnf: Option<&str>,
     ) -> Result<String, MsalError> {
         #[cfg(not(feature = "on_behalf_of"))]
         let on_behalf_of_client_id: Option<&str> = None;
+        #[cfg(not(feature = "redirect_uri"))]
+        let redirect_uri_override: Option<&str> = None;
 
         let scope = format!("openid profile {}", scope.join(" "));
-        let (client_id, redirect_uri) = if v2_endpoint {
+        let (client_id, redirect_uri) = if let Some(uri) = redirect_uri_override {
+            // Use the caller-supplied redirect URI with the appropriate client_id
+            let cid = if v2_endpoint {
+                if let Some(obo) = on_behalf_of_client_id {
+                    obo.to_string()
+                } else if let Some(obo) = &self.on_behalf_of_client_id {
+                    obo.clone()
+                } else {
+                    LINUX_BROKER_APP_ID.to_string()
+                }
+            } else {
+                self.app.client_id().to_string()
+            };
+            (cid, uri.to_string())
+        } else if v2_endpoint {
             if let Some(on_behalf_of_client_id) = on_behalf_of_client_id {
                 (
                     on_behalf_of_client_id.to_string(),
@@ -5996,9 +6676,49 @@ impl BrokerClientApplication {
     /// * Success: A JWT (as a String) that can be used for single sign-on
     ///   (SSO) authentication.
     /// * Failure: An MsalError, indicating the failure.
+    ///
+    /// Given the primary refresh token, this method creates a PRT SSO
+    /// cookie that can be used for browser single sign-on (SSO).
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` - An encrypted primary refresh token.
+    ///
+    /// * `sso_nonce` - An optional SSO nonce extracted from a login URL's
+    ///   `sso_nonce` query parameter. When `None`, the cookie is generated
+    ///   with an `iat` (issued-at) claim instead, suitable for proactive
+    ///   SSO where the cookie is set as a static header. When `Some`, the
+    ///   provided nonce is included as `request_nonce` in the cookie.
+    ///
+    /// * `tpm` - The TPM object.
+    ///
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: A JWT (as a String) that can be used for single sign-on
+    ///   (SSO) authentication.
+    /// * Failure: An MsalError, indicating the failure.
     pub async fn acquire_prt_sso_cookie(
         &self,
         prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<String, MsalError> {
+        self.acquire_prt_sso_cookie_with_nonce(prt, None, tpm, storage_key)
+            .await
+    }
+
+    /// Like [`acquire_prt_sso_cookie`](Self::acquire_prt_sso_cookie), but
+    /// accepts an optional SSO nonce.
+    ///
+    /// When `sso_nonce` is `None`, the cookie uses an `iat` (issued-at)
+    /// claim, making it suitable for proactive SSO (e.g., the linux-entra-sso
+    /// extension's static header injection). When `Some`, the provided
+    /// nonce is included as `request_nonce`.
+    pub async fn acquire_prt_sso_cookie_with_nonce(
+        &self,
+        prt: &SealedData,
+        sso_nonce: Option<&str>,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
     ) -> Result<String, MsalError> {
@@ -6015,10 +6735,8 @@ impl BrokerClientApplication {
         let prt = self.unseal_user_prt(prt, tpm, prt_storage_key)?;
         let session_key = prt.session_key()?;
 
-        let nonce = self.request_nonce().await?;
-
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&RefreshTokenCredentialPayload::new(&prt, &nonce)?).map_err(
+            serde_json::to_vec(&RefreshTokenCredentialPayload::new(&prt, sso_nonce)?).map_err(
                 |e| MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e)),
             )?,
         )
@@ -6041,15 +6759,17 @@ impl BrokerClientApplication {
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
+        req_cnf: Option<&str>,
     ) -> Result<String, MsalError> {
         debug!("Exchanging a PRT for an Authorization Code");
 
         let nonce = self.request_nonce().await?;
 
         let jwt = JwsBuilder::from(
-            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, &nonce)?).map_err(|e| {
-                MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e))
-            })?,
+            serde_json::to_vec(&RefreshTokenCredentialPayload::new(prt, Some(&nonce))?).map_err(
+                |e| MsalError::InvalidJson(format!("Failed serializing Authorization JWT: {}", e)),
+            )?,
         )
         .set_typ(Some("JWT"))
         .build();
@@ -6092,11 +6812,14 @@ impl BrokerClientApplication {
                 Some(signed_device_payload.clone()),
                 #[cfg(feature = "on_behalf_of")]
                 on_behalf_of_client_id,
+                #[cfg(feature = "redirect_uri")]
+                redirect_uri,
+                req_cnf,
             )
             .await;
 
-        // AADSTS16000 (InteractionRequired) or MFARequired (ConvergedTFA) can
-        // occur due to stale session cookies. Clear cookies and retry once.
+        // AADSTS16000 (InteractionRequired) can occur due to stale session
+        // cookies. Clear cookies and retry once.
         match result {
             Err(MsalError::AADSTSError(ref e)) if e.code == 16000 => {
                 warn!("PRT exchange failed with AADSTS16000, clearing cookies and retrying");
@@ -6110,31 +6833,17 @@ impl BrokerClientApplication {
                     Some(signed_device_payload),
                     #[cfg(feature = "on_behalf_of")]
                     on_behalf_of_client_id,
+                    #[cfg(feature = "redirect_uri")]
+                    redirect_uri,
+                    req_cnf,
                 )
                 .await
-            }
-            Err(MsalError::MFARequired) => {
-                warn!("PRT exchange failed with MFARequired (ConvergedTFA), clearing cookies and retrying");
-                self.clear_cookies();
-                let retry_result = self
-                    .exchange_prt_for_auth_code_internal(
-                        scope,
-                        request_id,
-                        resource,
-                        v2_endpoint,
-                        Some(signed_prt_payload),
-                        Some(signed_device_payload),
-                        #[cfg(feature = "on_behalf_of")]
-                        on_behalf_of_client_id,
-                    )
-                    .await;
-                // If retry still fails with MFARequired, propagate it
-                retry_result
             }
             other => other,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn exchange_auth_code_for_access_token_internal(
         &self,
         scope: Vec<&str>,
@@ -6143,13 +6852,31 @@ impl BrokerClientApplication {
         authorization_code: String,
         request_resource: Option<&str>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
+        req_cnf: Option<&str>,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging an Authorization Code for an Access Token");
         #[cfg(not(feature = "on_behalf_of"))]
         let on_behalf_of_client_id: Option<&str> = None;
+        #[cfg(not(feature = "redirect_uri"))]
+        let redirect_uri_override: Option<&str> = None;
 
         let scopes_str = format!("openid profile offline_access {}", scope.join(" "));
-        let (client_id, redirect_uri) = if v2_endpoint {
+        let (client_id, redirect_uri) = if let Some(uri) = redirect_uri_override {
+            // Use the caller-supplied redirect URI with the appropriate client_id
+            let cid = if v2_endpoint {
+                if let Some(obo) = on_behalf_of_client_id {
+                    obo.to_string()
+                } else if let Some(obo) = &self.on_behalf_of_client_id {
+                    obo.clone()
+                } else {
+                    LINUX_BROKER_APP_ID.to_string()
+                }
+            } else {
+                self.app.client_id().to_string()
+            };
+            (cid, uri.to_string())
+        } else if v2_endpoint {
             if let Some(on_behalf_of_client_id) = on_behalf_of_client_id {
                 (
                     on_behalf_of_client_id.to_string(),
@@ -6187,6 +6914,9 @@ impl BrokerClientApplication {
             params.push(("resource", request_resource));
         } else {
             params.push(("resource", "https://graph.microsoft.com"));
+        }
+        if let Some(req_cnf) = req_cnf {
+            params.push(("req_cnf", req_cnf));
         }
         let payload = params
             .iter()
@@ -6893,5 +7623,198 @@ impl BrokerClientApplication {
         let prt = self.unseal_user_prt(prt, tpm, prt_storage_key)?;
 
         Ok(prt.is_expired())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_access_token(payload_json: &str) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#.as_bytes());
+        let payload = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        format!("{}.{}.", header, payload)
+    }
+
+    fn build_user_token(access_token: String) -> UserToken {
+        UserToken {
+            token_type: "Bearer".to_string(),
+            scope: None,
+            expires_in: 3600,
+            ext_expires_in: 3600,
+            access_token: Some(access_token),
+            refresh_token: "refresh-token".to_string(),
+            id_token: IdToken::default(),
+            client_info: ClientInfo::default(),
+            #[cfg(feature = "broker")]
+            prt: None,
+        }
+    }
+
+    #[test]
+    fn user_token_spn_uses_upn_when_present() {
+        let access_token = build_access_token(
+            r#"{"amr":["pwd"],"tid":"11111111-1111-1111-1111-111111111111","upn":"user@example.com"}"#,
+        );
+        let token = build_user_token(access_token);
+
+        assert_eq!(token.spn().unwrap_or_default(), "user@example.com");
+    }
+
+    #[test]
+    fn user_token_spn_falls_back_to_unique_name() {
+        let access_token = build_access_token(
+            r#"{"amr":["pwd"],"tid":"11111111-1111-1111-1111-111111111111","unique_name":"alias@example.com"}"#,
+        );
+        let token = build_user_token(access_token);
+
+        assert_eq!(token.spn().unwrap_or_default(), "alias@example.com");
+    }
+
+    #[test]
+    fn user_token_spn_prefers_upn_when_both_fields_present() {
+        let access_token = build_access_token(
+            r#"{"amr":["pwd"],"tid":"11111111-1111-1111-1111-111111111111","upn":"primary@example.com","unique_name":"alias@example.com"}"#,
+        );
+        let token = build_user_token(access_token);
+
+        assert_eq!(token.spn().unwrap_or_default(), "primary@example.com");
+    }
+
+    fn build_mfa_auth_continue(
+        methods: Vec<MfaMethodInfo>,
+        skip_fido_for_mfa: bool,
+    ) -> MFAAuthContinue {
+        let mfa_methods = methods.iter().map(|m| m.auth_method_id.clone()).collect();
+        MFAAuthContinue {
+            mfa_method_details: methods,
+            mfa_methods,
+            skip_fido_for_mfa,
+            ..Default::default()
+        }
+    }
+
+    /// User has SMS as preferred MFA, plus a cross-device passkey (MS Authenticator
+    /// QR scan) and PhoneAppNotification. No physical security key.
+    /// Tenant enforces MFA. Expected: SMS is selected, FIDO is skipped.
+    #[test]
+    fn mfa_prefers_sms_when_default_and_fido_is_cross_device_passkey() {
+        let methods = vec![
+            MfaMethodInfo {
+                auth_method_id: "OneWaySMS".to_string(),
+                display: "+X XXXXXXXX90".to_string(),
+                is_default: true,
+            },
+            MfaMethodInfo {
+                auth_method_id: "FidoKey".to_string(),
+                display: "MS Authenticator passkey".to_string(),
+                is_default: false,
+            },
+            MfaMethodInfo {
+                auth_method_id: "PhoneAppNotification".to_string(),
+                display: "Microsoft Authenticator".to_string(),
+                is_default: false,
+            },
+        ];
+
+        let mfa = build_mfa_auth_continue(methods, true);
+
+        assert_eq!(mfa.mfa_method(), "OneWaySMS");
+
+        let default = mfa.get_default_mfa_method_details();
+        assert!(default.is_some(), "default MFA method should exist");
+        if let Some(default) = default {
+            assert_eq!(default.auth_method_id, "OneWaySMS");
+            assert!(default.is_default);
+        }
+
+        assert!(mfa.has_mfa_method("FidoKey"));
+        let fido = mfa.get_mfa_method_by_id("FidoKey");
+        assert!(fido.is_some(), "FidoKey method should exist");
+        if let Some(fido) = fido {
+            assert!(mfa.should_skip_fido_method(&fido));
+        }
+
+        assert_eq!(mfa.mfa_method_count(), 3);
+    }
+
+    // User has only a cross-device passkey (MS Authenticator), no physical
+    // security key. Legacy flag is set. Graph is unavailable.
+    // Expected: security key flow should NOT be attempted.
+    // Legacy flag enables security key when FIDO params present
+    #[test]
+    fn passwordless_fido_skipped_when_cross_device_passkey_and_sms_preferred() {
+        let options = vec![AuthOption::PasswordlessFido, AuthOption::Fido];
+
+        let result = should_attempt_passwordless_security_key(
+            &options, true, // has_fido_params
+        );
+
+        assert!(
+            result,
+            "Should attempt security key when FIDO params present and legacy flag enabled"
+        );
+    }
+
+    #[test]
+    fn security_key_skipped_when_no_fido_params() {
+        let options = vec![AuthOption::PasswordlessSecurityKey];
+        let result = should_attempt_passwordless_security_key(&options, false);
+        assert!(
+            !result,
+            "Should not attempt security key without FIDO params"
+        );
+    }
+
+    #[test]
+    fn security_key_skipped_when_not_enabled() {
+        let options = vec![AuthOption::Fido];
+        let result = should_attempt_passwordless_security_key(&options, true);
+        assert!(
+            !result,
+            "Should not attempt security key when not enabled in config"
+        );
+    }
+
+    #[test]
+    fn qr_bluetooth_attempted_when_cross_device_passkey() {
+        let options = vec![AuthOption::PasswordlessQrBluetooth];
+        let result = should_attempt_passwordless_qr_bluetooth(&options, true, true);
+        assert!(
+            result,
+            "Should attempt QR/Bluetooth when user has cross-device passkey"
+        );
+    }
+
+    #[test]
+    fn qr_bluetooth_skipped_when_no_cross_device_passkey() {
+        let options = vec![AuthOption::PasswordlessQrBluetooth];
+        let result = should_attempt_passwordless_qr_bluetooth(&options, true, false);
+        assert!(
+            !result,
+            "Should not attempt QR/Bluetooth when user has no cross-device passkey"
+        );
+    }
+
+    #[test]
+    fn qr_bluetooth_skipped_when_not_enabled() {
+        let options = vec![AuthOption::PasswordlessFido];
+        let result = should_attempt_passwordless_qr_bluetooth(&options, true, true);
+        assert!(
+            !result,
+            "Legacy PasswordlessFido should not enable QR/Bluetooth"
+        );
+    }
+
+    #[test]
+    fn both_flows_when_fido_params_and_cross_device() {
+        let options = vec![
+            AuthOption::PasswordlessSecurityKey,
+            AuthOption::PasswordlessQrBluetooth,
+        ];
+        let security_key = should_attempt_passwordless_security_key(&options, true);
+        let qr_bluetooth = should_attempt_passwordless_qr_bluetooth(&options, true, true);
+        assert!(security_key, "Should attempt security key");
+        assert!(qr_bluetooth, "Should attempt QR/Bluetooth");
     }
 }

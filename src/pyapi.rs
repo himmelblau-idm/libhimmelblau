@@ -438,6 +438,8 @@ pub enum PyAuthOption {
     Fido,
     Passwordless,
     PasswordlessFido,
+    PasswordlessSecurityKey,
+    PasswordlessQrBluetooth,
     NoDAGFallback,
 }
 
@@ -447,6 +449,8 @@ impl From<PyAuthOption> for AuthOption {
             PyAuthOption::Fido => AuthOption::Fido,
             PyAuthOption::Passwordless => AuthOption::Passwordless,
             PyAuthOption::PasswordlessFido => AuthOption::PasswordlessFido,
+            PyAuthOption::PasswordlessSecurityKey => AuthOption::PasswordlessSecurityKey,
+            PyAuthOption::PasswordlessQrBluetooth => AuthOption::PasswordlessQrBluetooth,
             PyAuthOption::NoDAGFallback => AuthOption::NoDAGFallback,
         }
     }
@@ -871,6 +875,39 @@ impl PyBrokerClientApplication {
                 request_resource,
                 &mut tpm.tpm,
                 &machine_key.key,
+                #[cfg(feature = "redirect_uri")]
+                None,
+                #[cfg(feature = "pop_support")]
+                None,
+            ),
+        })
+    }
+
+    #[cfg(feature = "pop_support")]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn exchange_prt_for_access_token_pop(
+        &self,
+        sealed_prt: &PySealedData,
+        scope: Vec<String>,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyStorageKey,
+        request_resource: Option<String>,
+        req_cnf: Option<&str>,
+        py: Python,
+    ) -> PyResult<PyUserToken> {
+        Ok(PyUserToken {
+            token: run_async!(
+                py,
+                self.client,
+                exchange_prt_for_access_token,
+                &sealed_prt.data,
+                str_vec_ref!(scope),
+                request_resource,
+                &mut tpm.tpm,
+                &machine_key.key,
+                #[cfg(feature = "redirect_uri")]
+                None,
+                req_cnf,
             ),
         })
     }

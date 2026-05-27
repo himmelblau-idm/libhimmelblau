@@ -18,7 +18,10 @@
 
 use std::fs;
 use std::io::Read;
+use std::time::Duration;
 
+#[cfg(feature = "ipvers")]
+use crate::auth::IpVersion;
 use crate::error::MsalError;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -26,10 +29,14 @@ use openssl::pkey::Public;
 use openssl::rsa::Rsa;
 use openssl::x509::X509;
 use os_release::OsRelease;
+#[cfg(feature = "proxyable")]
+use reqwest::Proxy;
 use reqwest::{header, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::to_string_pretty;
+#[cfg(feature = "set_timeout")]
+use std::cmp::min;
 use tracing::debug;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -385,7 +392,51 @@ pub struct Services {
 }
 
 impl Services {
-    pub async fn new(access_token: &str, domain_name: &str) -> Result<Self, MsalError> {
+    pub async fn new(
+        access_token: &str,
+        domain_name: &str,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
+    ) -> Result<Self, MsalError> {
+        #[cfg(feature = "set_timeout")]
+        let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
+        #[cfg(not(feature = "set_timeout"))]
+        let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
+
+        #[allow(unused_mut)]
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(timeout);
+
+        #[cfg(feature = "proxyable")]
+        {
+            if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
+                .ok()
+                .or_else(|| std::env::var("ALL_PROXY").ok())
+            {
+                let proxy = Proxy::https(proxy_var)
+                    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
+                builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+            }
+        }
+
+        #[cfg(feature = "ipvers")]
+        {
+            let has_v4 = ip_version.contains(&IpVersion::V4);
+            let has_v6 = ip_version.contains(&IpVersion::V6);
+            if has_v4 && !has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            } else if !has_v4 && has_v6 {
+                builder =
+                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+            }
+        }
+
+        let client = builder
+            .build()
+            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+
         let discovery_url = if cfg!(feature = "custom_oidc_discovery_url") {
             std::env::var("HIMMELBLAU_DISCOVERY_URL").unwrap_or_else(|_| DISCOVERY_URL.to_string())
         } else {
@@ -398,7 +449,6 @@ impl Services {
         )
         .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
 
-        let client = reqwest::Client::new();
         let resp = client
             .get(url)
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
@@ -451,8 +501,8 @@ impl Services {
                 .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?,
         };
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self
+            .client
             .get(url)
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
