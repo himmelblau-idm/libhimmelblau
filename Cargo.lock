@@ -2260,12 +2260,14 @@ dependencies = [
  "chrono",
  "compact_jwt",
  "crypto-glue",
+ "der 0.7.10",
  "hostname",
  "kanidm-hsm-crypto",
  "libkrimes",
  "openssl",
  "os-release",
  "paste",
+ "pem-rfc7468",
  "percent-encoding",
  "picky-asn1",
  "picky-asn1-der",
@@ -2285,6 +2287,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "x509-cert",
  "zeroize",
 ]
 
