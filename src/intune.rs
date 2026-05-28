@@ -19,13 +19,16 @@ use crate::auth::UserToken;
 use crate::error::MsalError;
 use crate::graph::IntuneServiceEndpoints;
 use crate::EnrollAttrs;
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use crypto_glue::traits::EncodeDer;
+use crypto_glue::traits::SpkiEncodePublicKey;
+use crypto_glue::x509::oiddb::rfc5912;
+use der::asn1::{BitString, SetOfVec};
+use der::pem::LineEnding;
+use der::{Decode, Encode, Sequence};
 use kanidm_hsm_crypto::{
-    provider::{BoxedDynTpm, TpmMsExtensions},
-    structures::{LoadableMsDeviceEnrolmentKey, StorageKey as MachineKey},
+    provider::{BoxedDynTpm, TpmRS256},
+    structures::{LoadableMsDeviceEnrolmentKey, LoadableRS256Key, StorageKey as MachineKey},
 };
 use openssl::x509::X509;
 #[cfg(feature = "intune_portal_vers_selection")]
@@ -43,7 +46,12 @@ use serde_json::json;
 use std::collections::BTreeSet;
 #[cfg(feature = "intune_portal_vers_selection")]
 use std::error::Error;
+use std::str::FromStr;
 use std::{fmt, time::Duration};
+use x509_cert::attr::Attribute;
+use x509_cert::certificate::Certificate;
+use x509_cert::name::Name;
+use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 
 #[cfg(feature = "ipvers")]
 use crate::auth::IpVersion;
@@ -423,6 +431,21 @@ pub async fn fetch_intune_portal_versions(
 // Microsoft requires that the app version match a version of their Intune Portal for Linux.
 static APP_VERSION: &str = "1.2511.7";
 
+/// PKCS#10 CertificationRequestInfo with an EMPTY constructed context [0] tag.
+/// Microsoft requires the attributes field to be present as an empty CONSTRUCTED tag.
+#[derive(Clone, Debug, PartialEq, Eq, Sequence)]
+struct CertReqInfoEmptyAttributes {
+    /// Version (must be 0 for v1)
+    pub version: x509_cert::request::Version,
+    /// Subject name
+    pub subject: Name,
+    /// Subject public key info
+    pub public_key: SubjectPublicKeyInfoOwned,
+    /// Empty attributes - CONSTRUCTED context tag [0] with length 0
+    #[asn1(context_specific = "0", tag_mode = "IMPLICIT")]
+    pub attributes: SetOfVec<Attribute>,
+}
+
 impl IntuneForLinux {
     pub fn new(
         service_endpoints: IntuneServiceEndpoints,
@@ -483,11 +506,144 @@ impl IntuneForLinux {
         })
     }
 
+    /// Escape a string for use as an RFC4514 Distinguished Name attribute value.
+    /// Special characters (,+\"\\<>;=#) and leading/trailing spaces must be escaped.
+    fn escape_dn_attribute_value(value: &str) -> String {
+        let mut result = String::with_capacity(value.len() * 2);
+        let chars: Vec<char> = value.chars().collect();
+
+        for (i, &ch) in chars.iter().enumerate() {
+            let is_first = i == 0;
+            let is_last = i == chars.len() - 1;
+
+            match ch {
+                // Always escape special characters
+                ',' | '+' | '"' | '\\' | '<' | '>' | ';' | '=' => {
+                    result.push('\\');
+                    result.push(ch);
+                }
+                // Escape leading/trailing spaces
+                ' ' if is_first || is_last => {
+                    result.push('\\');
+                    result.push(ch);
+                }
+                // Escape leading #
+                '#' if is_first => {
+                    result.push('\\');
+                    result.push(ch);
+                }
+                // All other characters are fine
+                _ => result.push(ch),
+            }
+        }
+
+        result
+    }
+
+    /// Create a minimal PKCS#10 CSR with NO attributes for Intune enrollment.
+    /// Microsoft rejects CSRs with Requested Extensions attributes.
+    fn create_intune_csr(
+        tpm: &mut BoxedDynTpm,
+        machine_key: &MachineKey,
+        device_display_name: &str,
+    ) -> Result<(LoadableRS256Key, String), MsalError> {
+        // Create RSA 2048-bit key in TPM
+        let loadable_rs256_key = tpm
+            .rs256_create(machine_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed creating RSA key: {:?}", e)))?;
+
+        let rs256_key = tpm
+            .rs256_load(machine_key, &loadable_rs256_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed loading RSA key: {:?}", e)))?;
+
+        // Get public key from TPM
+        let public_key = tpm
+            .rs256_public(&rs256_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed getting public key: {:?}", e)))?;
+
+        let public_key_der = public_key
+            .to_public_key_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed encoding public key: {:?}", e)))?;
+
+        // Parse public key into SPKI format
+        let spki = SubjectPublicKeyInfoOwned::try_from(public_key_der.as_bytes())
+            .map_err(|e| MsalError::CryptoFail(format!("Failed parsing SPKI: {:?}", e)))?;
+
+        // Build subject name: CN=device_display_name
+        let subject_str = format!(
+            "CN={}",
+            Self::escape_dn_attribute_value(device_display_name)
+        );
+        let subject = Name::from_str(&subject_str)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed parsing subject name: {:?}", e)))?;
+
+        // Build CertReqInfo with empty CONSTRUCTED [0] context tag
+        let cert_req_info = CertReqInfoEmptyAttributes {
+            version: x509_cert::request::Version::V1,
+            subject,
+            public_key: spki,
+            attributes: SetOfVec::new(), // Empty SET - will encode as constructed [0]
+        };
+
+        // Encode CertReqInfo to DER for signing
+        let tbs_der = cert_req_info
+            .to_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed encoding CertReqInfo: {:?}", e)))?;
+
+        // Sign with TPM key
+        let signature = tpm
+            .rs256_sign(&rs256_key, &tbs_der)
+            .map_err(|e| MsalError::TPMFail(format!("Failed signing CSR: {:?}", e)))?;
+
+        // Convert signature to bytes (Signature can be converted to Box<[u8]>)
+        let signature_box: Box<[u8]> = signature.into();
+        let signature_bytes: &[u8] = &signature_box;
+
+        // Build signature algorithm identifier (sha256WithRSAEncryption)
+        let signature_algorithm = AlgorithmIdentifierOwned {
+            oid: rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
+            parameters: Some(der::asn1::AnyRef::from(der::asn1::Null).into()),
+        };
+
+        // Build the complete CSR manually
+        // We use our custom structure with empty [0] context tag
+
+        // Create a wrapper structure for the complete CSR
+        #[derive(Sequence)]
+        struct CertReqEmptyAttributes {
+            info: CertReqInfoEmptyAttributes,
+            algorithm: AlgorithmIdentifierOwned,
+            signature: BitString,
+        }
+
+        let cert_req = CertReqEmptyAttributes {
+            info: cert_req_info,
+            algorithm: signature_algorithm,
+            signature: BitString::from_bytes(signature_bytes).map_err(|e| {
+                MsalError::CryptoFail(format!("Failed creating BitString: {:?}", e))
+            })?,
+        };
+
+        // Convert to DER
+        let csr_der = cert_req
+            .to_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed encoding CSR to DER: {:?}", e)))?;
+
+        // Convert DER to PEM using pem_rfc7468
+        let csr_pem = pem_rfc7468::encode_string("CERTIFICATE REQUEST", LineEnding::LF, &csr_der)
+            .map_err(|e| {
+            MsalError::CryptoFail(format!("Failed converting CSR to PEM: {:?}", e))
+        })?;
+
+        Ok((loadable_rs256_key, csr_pem))
+    }
+
     pub async fn enroll(
         &self,
         token: &UserToken,
         attrs: &EnrollAttrs,
-        device_id: &str,
+        // device_id input is intentionally ignored for ABI compatibility with the existing enroll function, but the protocol switch to using device_display_name for the CSR subject.
+        _device_id: &str,
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
     ) -> Result<(LoadableMsDeviceEnrolmentKey, String), MsalError> {
@@ -508,27 +664,27 @@ impl IntuneForLinux {
             MsalError::GeneralFailure("Failed to Intune enroll: missing access_token".to_string())
         })?;
 
-        // Create the CSR
-        let (in_progess_enrolment, csr) = tpm
-            .ms_device_enrolment_begin(machine_key, device_id)
-            .map_err(|e| MsalError::TPMFail(format!("Failed creating certificate key: {:?}", e)))?;
-
-        // We need to make the csr into der here, or we can can just yield the der from ms_device_enrolment_begining.
-        let csr_der = csr
-            .to_der()
-            .map_err(|e| MsalError::CryptoFail(format!("Failed creating CSR: {:?}", e)))?;
+        // Create the CSR using our custom function (no attributes!)
+        let (loadable_rs256_key, csr_pem) =
+            Self::create_intune_csr(tpm, machine_key, &attrs.device_display_name)?;
 
         let payload = json!({
-            "CertificateSigningRequest": STANDARD.encode(csr_der),
-            "AppVersion": &self.app_vers,
+            "CertificateSigningRequest": csr_pem,
+            "AppVersion": "0.0.0",
             "DeviceName": &attrs.device_display_name,
         });
 
+        let user_agent = format!(
+            "Linux Company Portal/{}/{}",
+            attrs.os_distribution, self.app_vers
+        );
         let resp = self
             .client
             .post(enrollment_url)
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .header(header::CONTENT_TYPE, "application/json")
+            .header(header::USER_AGENT, user_agent)
+            .header(header::ACCEPT, "*/*")
             .json(&payload)
             .send()
             .await
@@ -547,14 +703,40 @@ impl IntuneForLinux {
             let cert_der = cert
                 .to_der()
                 .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?;
-            // To help prevent mismatches between the tpm crypto lib and openssl, we
-            // want the certificate *der* here. This way you don't have to worry about it
-            // as much when you load, and it saves you having to do the translation.
-            let new_loadable_cert_key = tpm
-                .ms_device_enrolment_finalise(machine_key, in_progess_enrolment, &cert_der)
-                .map_err(|err| {
-                    MsalError::TPMFail(format!("Failed creating loadable identity key: {:?}", err))
-                })?;
+
+            // Verify the certificate's public key matches the TPM key
+            let certificate = Certificate::from_der(cert_der.as_slice()).map_err(|e| {
+                MsalError::CryptoFail(format!("Failed to parse certificate: {:?}", e))
+            })?;
+
+            let rs256_key = tpm
+                .rs256_load(machine_key, &loadable_rs256_key)
+                .map_err(|e| MsalError::TPMFail(format!("Failed loading RSA key: {:?}", e)))?;
+
+            let tpm_public_key = tpm
+                .rs256_public(&rs256_key)
+                .map_err(|e| MsalError::TPMFail(format!("Failed getting public key: {:?}", e)))?;
+
+            let tpm_public_key_der = tpm_public_key.to_public_key_der().map_err(|e| {
+                MsalError::CryptoFail(format!("Failed encoding TPM public key: {:?}", e))
+            })?;
+
+            let tpm_spki = SubjectPublicKeyInfoOwned::try_from(tpm_public_key_der.as_bytes())
+                .map_err(|e| MsalError::CryptoFail(format!("Failed parsing TPM SPKI: {:?}", e)))?;
+
+            let cert_spki = &certificate.tbs_certificate.subject_public_key_info;
+
+            if tpm_spki != *cert_spki {
+                return Err(MsalError::CryptoFail(
+                    "Certificate public key does not match TPM key".to_string(),
+                ));
+            }
+
+            // Store the certificate with the TPM key
+            let new_loadable_cert_key = LoadableMsDeviceEnrolmentKey::Rsa2048V1 {
+                loadable_rs256_key,
+                x509_der: cert_der.to_vec(),
+            };
             Ok((new_loadable_cert_key, json_resp.device_id))
         } else {
             Err(MsalError::GeneralFailure(

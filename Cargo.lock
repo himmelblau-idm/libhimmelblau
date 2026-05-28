@@ -2252,7 +2252,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libhimmelblau"
-version = "0.8.19"
+version = "0.8.20"
 dependencies = [
  "base64 0.22.1",
  "browser-window",
@@ -2260,12 +2260,14 @@ dependencies = [
  "chrono",
  "compact_jwt",
  "crypto-glue",
+ "der 0.7.10",
  "hostname",
  "kanidm-hsm-crypto",
  "libkrimes",
  "openssl",
  "os-release",
  "paste",
+ "pem-rfc7468",
  "percent-encoding",
  "picky-asn1",
  "picky-asn1-der",
@@ -2285,6 +2287,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "x509-cert",
  "zeroize",
 ]
 
