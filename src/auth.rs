@@ -5236,6 +5236,53 @@ impl BrokerClientApplication {
             .await
     }
 
+    /// Initiate an MFA flow via user credentials (without enrollment-specific
+    /// resource scoping).
+    ///
+    /// This is the non-enrollment counterpart of
+    /// `initiate_acquire_token_by_mfa_flow_for_device_enrollment`. The resulting
+    /// token is scoped to the default resource (MS Graph) rather than Intune,
+    /// making it suitable for scenarios where device enrollment is not desired.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `options` - Authentication options to enable, such as Fido.
+    ///
+    /// * `auth_init` - The result of `check_user_exists`.
+    ///
+    /// * `selected_method` - Optional specific MFA method ID to use. Only available
+    ///   when the `mfa_method_selection` feature is enabled.
+    ///
+    /// # Returns
+    /// * Success: A MFAAuthContinue containing the information needed to continue the
+    ///   authentication flow.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn initiate_acquire_token_by_mfa_flow(
+        &self,
+        username: &str,
+        password: Option<&str>,
+        options: &[AuthOption],
+        auth_init: Option<AuthInit>,
+        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
+    ) -> Result<MFAAuthContinue, MsalError> {
+        self.app
+            .initiate_acquire_token_by_mfa_flow(
+                username,
+                password,
+                vec![],
+                None,
+                options,
+                auth_init,
+                #[cfg(feature = "mfa_method_selection")]
+                selected_method,
+            )
+            .await
+    }
+
     /// Obtain token by a MFA flow object.
     ///
     /// # Arguments
