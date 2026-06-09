@@ -774,11 +774,7 @@ impl PyBrokerClientApplication {
         flow: &PyDeviceAuthorizationResponse,
     ) -> PyResult<PyUserToken> {
         Ok(PyUserToken {
-            token: run_async!(
-                self.client,
-                acquire_token_by_device_flow,
-                flow.flow.clone(),
-            ),
+            token: run_async!(self.client, acquire_token_by_device_flow, flow.flow.clone(),),
         })
     }
 
@@ -1155,10 +1151,7 @@ impl PyConfidentialClientApplication {
     /// Returns:
     ///     A ClientToken (dict-like) with an ``access_token``.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn acquire_token_silent(
-        &self,
-        scopes: Vec<String>,
-    ) -> PyResult<PyClientToken> {
+    pub fn acquire_token_silent(&self, scopes: Vec<String>) -> PyResult<PyClientToken> {
         let scopes_ref: Vec<&str> = str_vec_ref!(scopes);
         let token = run_async!(self.client, acquire_token_silent, scopes_ref, None);
         Ok(PyClientToken { token })

@@ -2464,17 +2464,9 @@ impl PublicClientApplication {
             }
         };
 
-        let credentials_json = match &auth_config.fido_allow_list {
-            Some(fido_allow_list) => {
-                if !fido_allow_list.is_empty() {
-                    &fido_allow_list[0]
-                } else {
-                    return Err(MsalError::GeneralFailure(
-                        "arrFidoAllowList missing from auth config".to_string(),
-                    ));
-                }
-            }
-            None => {
+        let credentials_json = match auth_config.fido_allow_list.as_deref() {
+            Some([credentials_json, ..]) => credentials_json,
+            _ => {
                 return Err(MsalError::GeneralFailure(
                     "arrFidoAllowList missing from auth config".to_string(),
                 ))
@@ -4156,9 +4148,7 @@ impl PublicClientApplication {
                             )));
                         }
 
-                        if let Some((_, code)) =
-                            params.iter().find(|(k, _)| k == "code")
-                        {
+                        if let Some((_, code)) = params.iter().find(|(k, _)| k == "code") {
                             return Ok(code.to_string());
                         }
                     }
@@ -5077,6 +5067,7 @@ impl BrokerClientApplication {
                 None,
                 #[cfg(feature = "pop_support")]
                 None,
+                false,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5115,6 +5106,29 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
     ) -> Result<UserToken, MsalError> {
+        self.acquire_token_by_refresh_token_internal(
+            refresh_token,
+            scopes,
+            request_resource,
+            #[cfg(feature = "on_behalf_of")]
+            on_behalf_of_client_id,
+            false,
+            tpm,
+            storage_key,
+        )
+        .await
+    }
+
+    async fn acquire_token_by_refresh_token_internal(
+        &self,
+        refresh_token: &str,
+        scopes: Vec<&str>,
+        request_resource: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        demand_mfa: bool,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<UserToken, MsalError> {
         let prt = self
             .acquire_user_prt_by_refresh_token_internal(refresh_token, tpm, storage_key)
             .await?;
@@ -5148,6 +5162,7 @@ impl BrokerClientApplication {
                 None,
                 #[cfg(feature = "pop_support")]
                 None,
+                demand_mfa,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5722,6 +5737,7 @@ impl BrokerClientApplication {
                 redirect_uri,
                 #[cfg(feature = "pop_support")]
                 req_cnf,
+                false,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -5741,6 +5757,7 @@ impl BrokerClientApplication {
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
         #[cfg(feature = "pop_support")] req_cnf: Option<&str>,
+        demand_mfa: bool,
     ) -> Result<UserToken, MsalError> {
         debug!("Exchanging a PRT for an Access Token");
 
@@ -5786,6 +5803,7 @@ impl BrokerClientApplication {
                 #[cfg(feature = "redirect_uri")]
                 redirect_uri,
                 req_cnf,
+                demand_mfa,
             )
             .await?;
 
@@ -6190,7 +6208,9 @@ impl BrokerClientApplication {
     ) -> Result<LoadableMsHelloKey, MsalError> {
         debug!("Provisioning a Hello for Business Key");
 
-        if !token.amr_ngcmfa()? {
+        // If we at least have the mfa amr already, we can request a token
+        // containing ngcmfa. If we have neither, we cannot proceed.
+        if !token.amr_ngcmfa()? && !token.amr_mfa()? {
             error!("Key provisioning is impossible without an ngcmfa amr!");
             return Err(MsalError::GeneralFailure(
                 "Token is missing an ngcmfa amr".to_string(),
@@ -6222,12 +6242,13 @@ impl BrokerClientApplication {
 
         // Acquire an access token for the key provisioning service
         let token = self
-            .acquire_token_by_refresh_token(
+            .acquire_token_by_refresh_token_internal(
                 &token.refresh_token,
                 vec![],
                 Some(resource_id),
                 #[cfg(feature = "on_behalf_of")]
                 None,
+                true, // Hello enrollment must demand MFA
                 tpm,
                 storage_key,
             )
@@ -6354,6 +6375,7 @@ impl BrokerClientApplication {
                 None,
                 #[cfg(feature = "pop_support")]
                 None,
+                false,
             )
             .await?;
         token.client_info = prt.client_info.clone();
@@ -6537,6 +6559,7 @@ impl BrokerClientApplication {
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         #[cfg(feature = "redirect_uri")] redirect_uri_override: Option<&str>,
         _req_cnf: Option<&str>,
+        demand_mfa: bool,
     ) -> Result<String, MsalError> {
         #[cfg(not(feature = "on_behalf_of"))]
         let on_behalf_of_client_id: Option<&str> = None;
@@ -6596,6 +6619,9 @@ impl BrokerClientApplication {
             params.push(("resource", resource));
         } else {
             params.push(("resource", "https://graph.microsoft.com"));
+        }
+        if !v2_endpoint && demand_mfa {
+            params.push(("amr_values", "ngcmfa"));
         }
         let payload = params
             .iter()
@@ -6818,6 +6844,7 @@ impl BrokerClientApplication {
         storage_key: &StorageKey,
         #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
         req_cnf: Option<&str>,
+        demand_mfa: bool,
     ) -> Result<String, MsalError> {
         debug!("Exchanging a PRT for an Authorization Code");
 
@@ -6872,6 +6899,7 @@ impl BrokerClientApplication {
                 #[cfg(feature = "redirect_uri")]
                 redirect_uri,
                 req_cnf,
+                demand_mfa,
             )
             .await;
 
@@ -6893,6 +6921,7 @@ impl BrokerClientApplication {
                     #[cfg(feature = "redirect_uri")]
                     redirect_uri,
                     req_cnf,
+                    demand_mfa,
                 )
                 .await
             }
