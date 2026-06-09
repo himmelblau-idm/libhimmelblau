@@ -607,6 +607,28 @@ impl FromStr for ClientInfo {
     }
 }
 
+/// Convert a v2-style API scope to a v1 resource identifier by stripping the
+/// permission suffix. The v1 `/oauth2/authorize` endpoint uses the `resource`
+/// parameter (not `scope`) to determine the token audience.
+///
+/// Examples:
+///   `api://<guid>/access_as_user`           → `api://<guid>`
+///   `https://graph.microsoft.com/User.Read` → `https://graph.microsoft.com`
+///   `https://graph.microsoft.com`           → `https://graph.microsoft.com`
+fn v2_scope_to_v1_resource(scope: &str) -> String {
+    if let Some(scheme_end) = scope.find("://") {
+        let authority_start = scheme_end + 3;
+        let after_authority = &scope[authority_start..];
+        if let Some(slash_pos) = after_authority.find('/') {
+            let permission = &after_authority[slash_pos + 1..];
+            if !permission.is_empty() {
+                return scope[..authority_start + slash_pos].to_string();
+            }
+        }
+    }
+    scope.trim_end_matches('/').to_string()
+}
+
 fn decode_number_from_string<'de, D>(d: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
@@ -2726,8 +2748,13 @@ impl PublicClientApplication {
                 if !options.contains(&AuthOption::NoDAGFallback) {
                     let mut dag_scopes: Vec<String> =
                         scopes.into_iter().map(|s| s.to_string()).collect();
-                    // Enforce MFA via the azure portal
-                    if force_mfa {
+                    // Enforce MFA via the azure portal, but only when the caller
+                    // has not requested scopes for a specific non-Portal resource.
+                    // The token endpoint rejects .default combined with explicit
+                    // permission scopes from a different audience (AADSTS70011).
+                    let has_resource_scope =
+                        dag_scopes.iter().any(|s| s.contains("://"));
+                    if force_mfa && !has_resource_scope {
                         dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
                     }
                     info!("MFA auth failed, falling back to Device Authorization Grant.");
@@ -2784,8 +2811,13 @@ impl PublicClientApplication {
 
                     let mut dag_scopes: Vec<String> =
                         scopes.into_iter().map(|s| s.to_string()).collect();
-                    // Enforce MFA via the azure portal
-                    if force_mfa {
+                    // Enforce MFA via the azure portal, but only when the caller
+                    // has not requested scopes for a specific non-Portal resource.
+                    // The token endpoint rejects .default combined with explicit
+                    // permission scopes from a different audience (AADSTS70011).
+                    let has_resource_scope =
+                        dag_scopes.iter().any(|s| s.contains("://"));
+                    if force_mfa && !has_resource_scope {
                         dag_scopes.push(format!("{}/.default", AZURE_PORTAL_APP_ID));
                     }
                     info!("MFA auth failed, falling back to Device Authorization Grant.");
@@ -2808,6 +2840,25 @@ impl PublicClientApplication {
                 return Ok(flow);
             };
         }
+
+        // The auth config page uses the v1 /oauth2/authorize endpoint, where the
+        // `resource` parameter (not `scope`) drives the token audience. If the caller
+        // passed v2-style API scopes (e.g. `api://<guid>/access_as_user`) without an
+        // explicit resource, derive the v1 resource from the first non-OIDC scope so
+        // that the login page sees the correct audience and returns a valid sCtx.
+        const OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
+        let _derived_resource: Option<String>;
+        let resource: Option<&str> = match resource {
+            Some(r) => Some(r),
+            None => {
+                _derived_resource = scopes
+                    .iter()
+                    .find(|&&s| !OIDC_SCOPES.contains(&s))
+                    .map(|&s| v2_scope_to_v1_resource(s));
+                _derived_resource.as_deref()
+            }
+        };
+
         let request_id = Uuid::new_v4().to_string();
         let (mut auth_config, cred_type) = if let Some(auth_init) = auth_init {
             (auth_init.auth_config, auth_init.cred_type)
@@ -2836,11 +2887,17 @@ impl PublicClientApplication {
         };
         let sctx = match &auth_config.sctx {
             Some(sctx) => sctx.clone(),
-            None => return Err(MsalError::GeneralFailure("sCtx is missing".to_string())),
+            None => {
+                info!("sCtx is missing");
+                dag_fallback!();
+            }
         };
         let sft = match &auth_config.sft {
             Some(sft) => sft.clone(),
-            None => return Err(MsalError::GeneralFailure("sFt is missing".to_string())),
+            None => {
+                info!("sFt is missing");
+                dag_fallback!();
+            }
         };
 
         macro_rules! passwordless_tap {

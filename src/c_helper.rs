@@ -78,7 +78,22 @@ pub(crate) fn str_array_to_vec(
     arr: *const *const c_char,
     len: c_int,
 ) -> Result<Vec<String>, *mut MSAL_ERROR> {
-    if arr.is_null() && len == 0 {
+    if len < 0 {
+        return Err(make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Negative array length is invalid".to_string(),
+        ));
+    }
+    if arr.is_null() {
+        if len == 0 {
+            return Ok(vec![]);
+        }
+        return Err(make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Null array pointer with non-zero length".to_string(),
+        ));
+    }
+    if len == 0 {
         return Ok(vec![]);
     }
     let slice = unsafe { slice::from_raw_parts(arr, len as usize) };
@@ -87,7 +102,7 @@ pub(crate) fn str_array_to_vec(
         if item.is_null() {
             return Err(make_error(
                 MSAL_ERROR_CODE::INVALID_POINTER,
-                format!("Invalid input {}", stringify!($arr)),
+                "Null string pointer in input array".to_string(),
             ));
         }
         let c_item = unsafe { CStr::from_ptr(item) };
@@ -179,6 +194,7 @@ macro_rules! c_str_from_object_func {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum MSAL_ERROR_CODE {
@@ -209,6 +225,8 @@ pub enum MSAL_ERROR_CODE {
     CONSENT_REQUESTED,
     AUTH_CODE_RECEIVED,
     MFA_REQUIRED,
+    #[cfg(feature = "on_behalf_of")]
+    OBO_INTERACTION_REQUIRED,
 }
 
 #[repr(C)]
@@ -216,8 +234,9 @@ pub enum MSAL_ERROR_CODE {
 pub struct MSAL_ERROR {
     pub code: MSAL_ERROR_CODE,
     pub msg: *const c_char,
+    pub claims: *const c_char,
     pub aadsts_code: u32,
-    pub acquire_token_error_codes: *const u32,
+    pub acquire_token_error_codes: *mut u32,
     pub acquire_token_error_codes_len: usize,
 }
 
@@ -249,22 +268,40 @@ impl From<MsalError> for MSAL_ERROR_CODE {
             MsalError::ConsentRequested(_) => MSAL_ERROR_CODE::CONSENT_REQUESTED,
             MsalError::AuthCodeReceived(_) => MSAL_ERROR_CODE::AUTH_CODE_RECEIVED,
             MsalError::MFARequired => MSAL_ERROR_CODE::MFA_REQUIRED,
+            #[cfg(feature = "on_behalf_of")]
+            MsalError::OboInteractionRequired { .. } => MSAL_ERROR_CODE::OBO_INTERACTION_REQUIRED,
         }
     }
 }
 
 impl From<MsalError> for MSAL_ERROR {
     fn from(error: MsalError) -> Self {
-        let aadsts_code = match error {
+        let aadsts_code = match &error {
             MsalError::AADSTSError(ref err) => err.code,
             _ => 0,
         };
 
-        // If the error is an AcquireTokenFailed, also extract error codes
-        let acquire_token_error_codes = match error {
+        // If the error is an AcquireTokenFailed or OboInteractionRequired, also extract error codes
+        let acquire_token_error_codes = match &error {
             MsalError::AcquireTokenFailed(ref err) => err.error_codes.clone(),
+            #[cfg(feature = "on_behalf_of")]
+            MsalError::OboInteractionRequired { ref error, .. } => error.error_codes.clone(),
             _ => vec![],
         };
+
+        #[cfg(feature = "on_behalf_of")]
+        let claims = match &error {
+            MsalError::OboInteractionRequired {
+                claims: Some(claims),
+                ..
+            } => match CString::new(claims.clone()) {
+                Ok(cstr) => cstr.into_raw() as *const c_char,
+                Err(_) => std::ptr::null(),
+            },
+            _ => std::ptr::null(),
+        };
+        #[cfg(not(feature = "on_behalf_of"))]
+        let claims = std::ptr::null();
 
         let msg = match CString::new(error.to_string()) {
             Ok(cstr) => cstr.into_raw(),
@@ -272,18 +309,22 @@ impl From<MsalError> for MSAL_ERROR {
         };
 
         let code = MSAL_ERROR_CODE::from(error);
+        let mut acquire_token_error_codes = acquire_token_error_codes.into_boxed_slice();
+        let acquire_token_error_codes_len = acquire_token_error_codes.len();
+        let acquire_token_error_codes_ptr = if acquire_token_error_codes_len == 0 {
+            std::ptr::null_mut()
+        } else {
+            acquire_token_error_codes.as_mut_ptr()
+        };
+        std::mem::forget(acquire_token_error_codes);
 
         MSAL_ERROR {
             code,
             msg,
+            claims,
             aadsts_code,
-            acquire_token_error_codes: if acquire_token_error_codes.is_empty() {
-                std::ptr::null()
-            } else {
-                let buf = acquire_token_error_codes.clone().into_boxed_slice();
-                Box::into_raw(buf) as *const u32
-            },
-            acquire_token_error_codes_len: acquire_token_error_codes.len(),
+            acquire_token_error_codes: acquire_token_error_codes_ptr,
+            acquire_token_error_codes_len,
         }
     }
 }
@@ -301,12 +342,142 @@ pub fn make_error(code: MSAL_ERROR_CODE, msg: String) -> *mut MSAL_ERROR {
     Box::into_raw(Box::new(MSAL_ERROR {
         code,
         msg,
+        claims: std::ptr::null(),
         aadsts_code: 0,
-        acquire_token_error_codes: std::ptr::null(),
+        acquire_token_error_codes: std::ptr::null_mut(),
         acquire_token_error_codes_len: 0,
     }))
 }
 
 pub fn make_error_from_msal_error(error: MsalError) -> *mut MSAL_ERROR {
     Box::into_raw(Box::new(MSAL_ERROR::from(error)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorResponse;
+
+    fn free_msal_error_fields(mut error: MSAL_ERROR) {
+        unsafe {
+            if !error.msg.is_null() {
+                drop(CString::from_raw(error.msg as *mut c_char));
+                error.msg = std::ptr::null();
+            }
+            if !error.claims.is_null() {
+                drop(CString::from_raw(error.claims as *mut c_char));
+                error.claims = std::ptr::null();
+            }
+            if !error.acquire_token_error_codes.is_null() && error.acquire_token_error_codes_len > 0
+            {
+                let slice_ptr = std::ptr::slice_from_raw_parts_mut(
+                    error.acquire_token_error_codes,
+                    error.acquire_token_error_codes_len,
+                );
+                let _ = Box::from_raw(slice_ptr);
+                error.acquire_token_error_codes = std::ptr::null_mut();
+            }
+        }
+    }
+
+    #[test]
+    fn str_array_to_vec_rejects_negative_len() {
+        let res = str_array_to_vec(std::ptr::null(), -1);
+        assert!(res.is_err());
+        if let Err(error) = res {
+            unsafe {
+                let error = Box::from_raw(error);
+                if !error.msg.is_null() {
+                    drop(CString::from_raw(error.msg as *mut c_char));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn str_array_to_vec_rejects_null_pointer_with_non_zero_len() {
+        let res = str_array_to_vec(std::ptr::null(), 1);
+        assert!(res.is_err());
+        if let Err(error) = res {
+            unsafe {
+                let error = Box::from_raw(error);
+                if !error.msg.is_null() {
+                    drop(CString::from_raw(error.msg as *mut c_char));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn str_array_to_vec_accepts_empty_null_input() {
+        let res = str_array_to_vec(std::ptr::null(), 0).unwrap();
+        assert!(res.is_empty());
+    }
+
+    #[test]
+    fn str_array_to_vec_parses_valid_input() {
+        let item_a = CString::new("scope.a").unwrap();
+        let item_b = CString::new("scope.b").unwrap();
+        let input = [item_a.as_ptr(), item_b.as_ptr()];
+        let res = str_array_to_vec(input.as_ptr(), input.len() as c_int).unwrap();
+        assert_eq!(res, vec!["scope.a".to_string(), "scope.b".to_string()]);
+    }
+
+    #[test]
+    fn msal_error_from_acquire_token_failed_preserves_error_codes() {
+        let error = MsalError::AcquireTokenFailed(ErrorResponse {
+            error: "invalid_grant".to_string(),
+            error_description: "AADSTS65001".to_string(),
+            suberror: None,
+            error_codes: vec![65001, 50076],
+        });
+
+        let c_error = MSAL_ERROR::from(error);
+        assert_eq!(c_error.acquire_token_error_codes_len, 2);
+        let codes = unsafe {
+            std::slice::from_raw_parts(
+                c_error.acquire_token_error_codes,
+                c_error.acquire_token_error_codes_len,
+            )
+        };
+        assert_eq!(codes, &[65001, 50076]);
+        free_msal_error_fields(c_error);
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn msal_error_from_obo_interaction_required_sets_claims_and_codes() {
+        let error = MsalError::OboInteractionRequired {
+            error: ErrorResponse {
+                error: "interaction_required".to_string(),
+                error_description: "AADSTS50076".to_string(),
+                suberror: Some("basic_action".to_string()),
+                error_codes: vec![50076],
+            },
+            claims: Some("{\"access_token\":{}}".to_string()),
+        };
+        let c_error = MSAL_ERROR::from(error);
+
+        assert!(matches!(
+            c_error.code,
+            MSAL_ERROR_CODE::OBO_INTERACTION_REQUIRED
+        ));
+        assert!(!c_error.claims.is_null());
+        let claims = unsafe { CStr::from_ptr(c_error.claims) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(claims, "{\"access_token\":{}}");
+
+        assert_eq!(c_error.acquire_token_error_codes_len, 1);
+        let codes = unsafe {
+            std::slice::from_raw_parts(
+                c_error.acquire_token_error_codes,
+                c_error.acquire_token_error_codes_len,
+            )
+        };
+        assert_eq!(codes, &[50076]);
+        free_msal_error_fields(c_error);
+    }
 }

@@ -19,7 +19,7 @@ crate-type = ["rlib", "cdylib"]
 default = ["broker"]
 broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto"]
 tpm = ["broker", "kanidm-hsm-crypto/tpm"]
-capi = ["broker"]
+capi = ["broker", "on_behalf_of"]
 pyapi = ["broker", "dep:pyo3"]
 developer = ["broker", "proxyable", "custom_oidc_discovery_url"]
 custom_oidc_discovery_url = []
@@ -69,6 +69,9 @@ serde_bytes = "0.11.17"
 serde_urlencoded = "0.7.1"
 reqwest_cookie_store = "0.10.0"
 semver = "1.0.27"
+libkrimes = { version = "0.1.0" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 libkrimes = { version = "0.1.0", features = ["keyring"] }
 
 [build-dependencies]

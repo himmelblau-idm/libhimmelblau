@@ -27,6 +27,8 @@ endorsed by Microsoft. Instead, it is maintained and developed by the community.
 The scope of this project includes:
 
 - Implementation of MSAL's PublicClientApplication Class
+- Implementation of MSAL's ConfidentialClientApplication Class, including the
+  OAuth 2.0 On-Behalf-Of (OBO) flow and client credentials grant
 - Integration with the MS-DRS protocol
 - Implementation of MS-OAPXBC sections for primary refresh token requests and
   exchanges
@@ -122,6 +124,71 @@ Additionally, the project utilizes an undocumented `tgt` parameter during PRT
 requests. This parameter allows for the retrieval of both a cloud TGT and, if
 configured, an on-prem TGT. This enhances the flexibility and broadens the scope
 of available authentication mechanisms.
+
+#### 3. ConfidentialClientApplication
+
+The `ConfidentialClientApplication` component provides authentication
+capabilities for confidential (server-side) applications that can securely
+maintain a client secret or certificate. It is designed for middle-tier services
+that need to call downstream APIs on behalf of users or using their own
+application identity.
+
+##### OAuth 2.0 On-Behalf-Of (OBO) Flow
+
+The primary capability of `ConfidentialClientApplication` is the
+[OAuth 2.0 On-Behalf-Of flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow).
+In this flow, a middle-tier service receives an access token from a calling
+client and exchanges it for a new token targeting a downstream API (e.g.,
+Microsoft Graph), preserving the user's identity and permissions through the
+request chain.
+
+The implementation includes:
+
+- **Pre-flight validation**: Before sending the OBO request to Entra ID, the
+  library performs soft validation of the incoming user assertion, emitting
+  warnings if the token appears expired or if its audience does not match the
+  application's client ID. These checks are diagnostic only and do not block
+  the exchange, since Entra ID is the authoritative validator.
+
+- **Tenant-specific authority override**: When the configured authority uses
+  `/common` or `/organizations`, the library extracts the `tid` (tenant ID)
+  claim from the incoming assertion and overrides the authority with a
+  tenant-specific endpoint. This ensures the OBO exchange targets the correct
+  home tenant, which is important for guest user scenarios and government
+  cloud environments (GCCH, DoD).
+
+- **Conditional Access claims challenge handling**: When Entra ID requires
+  additional user interaction (e.g., MFA for a downstream resource protected
+  by a Conditional Access policy), the OBO exchange returns an
+  `interaction_required` error with a `claims` challenge. The library surfaces
+  this as a structured `MsalError::OboInteractionRequired` error containing
+  the machine-readable claims JSON, which the middle-tier must propagate back
+  to the original client for re-authentication.
+
+##### Client Credentials Grant
+
+`ConfidentialClientApplication` also supports the client credentials grant via
+`acquire_token_silent`, allowing the application to obtain tokens using its own
+identity (without a user context) for service-to-service scenarios.
+
+##### Credential Types
+
+Two credential types are supported:
+
+- **Client secret**: A shared secret string registered in the Entra ID
+  application. Suitable for development and testing.
+- **Client certificate**: An RSA key pair with a certificate uploaded to
+  Entra ID. The library constructs a signed JWT client assertion per
+  [RFC 7523](https://tools.ietf.org/html/rfc7523). This is the recommended
+  approach for production environments.
+
+##### Intended Use
+
+The `ConfidentialClientApplication` is intended for server-side applications
+that act as a middle-tier between a user-facing client and a downstream API.
+Common scenarios include web APIs, background services, and daemon applications
+that need to acquire tokens using either delegated (OBO) or application-only
+(client credentials) permissions.
 
 ### Design Principles
 
@@ -529,6 +596,57 @@ Given the primary refresh token, this method requests a new primary refresh toke
 
 ###### Returns
 - `Ok(SealedData)`: An encrypted PrimaryRefreshToken, containing a refresh_token and optionally a tgt. The session key is copied from the old PRT.
+- `Err(MsalError)`: An MsalError, indicating failure.
+
+### 3. ConfidentialClientApplication
+Provides authentication capabilities for confidential (server-side) applications, including the OAuth 2.0 On-Behalf-Of (OBO) flow and client credentials grant. Requires the `on_behalf_of` feature flag.
+
+#### Implementation Details
+
+##### `new(client_id: &str, authority: Option<&str>, credential: ClientCredential) -> Result<Self, MsalError>`
+Creates an instance of the application.
+
+###### Arguments
+- `client_id`: Your app has a client_id after you register it on AAD.
+- `authority`: A URL that identifies a token authority. It should be of the format https://login.microsoftonline.com/your_tenant By default, we will use https://login.microsoftonline.com/common.
+- `credential`: Either a client secret (via `ClientCredential::from_secret`) or a certificate key (via `ClientCredential::from_certificate`).
+
+###### Returns
+- `Ok(Self)`: An instance of ConfidentialClientApplication.
+- `Err(MsalError)`: An MsalError, indicating failure.
+
+##### `acquire_token_on_behalf_of(user_assertion: &str, scopes: Vec<&str>, tpm: Option<&mut BoxedDynTpm>) -> Result<OboToken, MsalError>`
+Acquires a token on behalf of a user via the OAuth 2.0 OBO flow. Exchanges an incoming user access token (the assertion) for a new access token targeting a downstream API, preserving the user's identity and permissions.
+
+###### Arguments
+- `user_assertion`: The access token received by the middle-tier API from the calling client. Its `aud` claim must match this application's `client_id`.
+- `scopes`: Scopes for the downstream API (e.g., `["https://graph.microsoft.com/User.Read"]`). Include `offline_access` if a refresh token is needed.
+- `tpm`: An optional TPM interface. Required only if the client was initialized with a certificate credential.
+
+###### Returns
+- `Ok(OboToken)`: An OboToken containing an access_token for the downstream API.
+- `Err(MsalError::OboInteractionRequired)`: Conditional Access requires user interaction. The `claims` field must be propagated back to the original client for re-authentication.
+- `Err(MsalError)`: An MsalError, indicating failure.
+
+##### `acquire_token_silent(scopes: Vec<&str>, tpm: Option<&mut BoxedDynTpm>) -> Result<ClientToken, MsalError>`
+Acquires a token using client credentials (client_credentials grant) without user context.
+
+###### Arguments
+- `scopes`: Scopes requested to access a protected API (a resource).
+- `tpm`: An optional TPM interface. Required only if the client was initialized with a certificate credential.
+
+###### Returns
+- `Ok(ClientToken)`: A ClientToken containing an access_token.
+- `Err(MsalError)`: An MsalError, indicating failure.
+
+##### `set_authority(new_authority: &str) -> Result<(), MsalError>`
+Changes the authority URL set at initialization time.
+
+###### Arguments
+- `new_authority`: The new authority URL to be used when communicating with Entra ID.
+
+###### Returns
+- `Ok(())`: The authority was successfully updated.
 - `Err(MsalError)`: An MsalError, indicating failure.
 
 ## Contributing <a name="contributing"></a>

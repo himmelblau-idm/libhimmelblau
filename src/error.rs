@@ -32,7 +32,11 @@ pub const DEVICE_AUTH_FAIL: u32 = 0xC3EB;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
+    #[serde(default)]
     pub error_description: String,
+    #[serde(default)]
+    pub suberror: Option<String>,
+    #[serde(default)]
     pub error_codes: Vec<u32>,
 }
 
@@ -89,6 +93,14 @@ pub enum MsalError {
     /// MFA is required to complete authentication (e.g., when Hello for Business
     /// auth gets an MFA challenge page instead of an auth code)
     MFARequired,
+    #[cfg(feature = "on_behalf_of")]
+    /// OBO exchange failed due to Conditional Access requiring user interaction.
+    /// The `claims` field must be propagated back to the original client for
+    /// re-authentication with the claims challenge.
+    OboInteractionRequired {
+        error: ErrorResponse,
+        claims: Option<String>,
+    },
 }
 
 impl fmt::Display for MsalError {
@@ -127,6 +139,131 @@ impl fmt::Display for MsalError {
             MsalError::MFARequired => {
                 write!(f, "MFA is required to complete authentication")
             }
+            #[cfg(feature = "on_behalf_of")]
+            MsalError::OboInteractionRequired { ref error, .. } => {
+                write!(
+                    f,
+                    "OBO interaction required: {} ({})",
+                    error.error, error.error_description
+                )
+            }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_response_full_deserialization() {
+        let json = r#"{
+            "error": "invalid_grant",
+            "error_description": "AADSTS65001: Consent required",
+            "error_codes": [65001]
+        }"#;
+        let resp: ErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "invalid_grant");
+        assert_eq!(resp.error_description, "AADSTS65001: Consent required");
+        assert_eq!(resp.suberror, None);
+        assert_eq!(resp.error_codes, vec![65001]);
+    }
+
+    #[test]
+    fn error_response_missing_error_codes() {
+        let json = r#"{
+            "error": "interaction_required",
+            "error_description": "AADSTS50076"
+        }"#;
+        let resp: ErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "interaction_required");
+        assert_eq!(resp.suberror, None);
+        assert!(resp.error_codes.is_empty());
+    }
+
+    #[test]
+    fn error_response_missing_description_and_codes() {
+        let json = r#"{"error": "server_error"}"#;
+        let resp: ErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "server_error");
+        assert_eq!(resp.error_description, "");
+        assert_eq!(resp.suberror, None);
+        assert!(resp.error_codes.is_empty());
+    }
+
+    #[test]
+    fn error_response_multiple_error_codes() {
+        let json = r#"{
+            "error": "invalid_request",
+            "error_description": "Multiple errors",
+            "error_codes": [50076, 50074, 16000]
+        }"#;
+        let resp: ErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.suberror, None);
+        assert_eq!(resp.error_codes, vec![50076, 50074, 16000]);
+    }
+
+    #[test]
+    fn error_response_with_suberror() {
+        let json = r#"{
+            "error": "invalid_grant",
+            "error_description": "AADSTS50076",
+            "suberror": "basic_action",
+            "error_codes": [50076]
+        }"#;
+        let resp: ErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.suberror, Some("basic_action".to_string()));
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_interaction_required_display() {
+        let error = MsalError::OboInteractionRequired {
+            error: ErrorResponse {
+                error: "interaction_required".to_string(),
+                error_description: "AADSTS50076: MFA required".to_string(),
+                suberror: None,
+                error_codes: vec![50076],
+            },
+            claims: Some("{\"access_token\":{}}".to_string()),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("OBO interaction required"));
+        assert!(display.contains("interaction_required"));
+        assert!(display.contains("AADSTS50076"));
+    }
+
+    #[cfg(feature = "on_behalf_of")]
+    #[test]
+    fn obo_interaction_required_without_claims_display() {
+        let error = MsalError::OboInteractionRequired {
+            error: ErrorResponse {
+                error: "interaction_required".to_string(),
+                error_description: "AADSTS16000".to_string(),
+                suberror: None,
+                error_codes: vec![16000],
+            },
+            claims: None,
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("OBO interaction required"));
+        assert!(display.contains("AADSTS16000"));
+    }
+
+    #[test]
+    fn error_response_roundtrip_serialization() {
+        let resp = ErrorResponse {
+            error: "test_error".to_string(),
+            error_description: "A test error".to_string(),
+            suberror: Some("other".to_string()),
+            error_codes: vec![12345],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: ErrorResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.error, resp.error);
+        assert_eq!(deserialized.error_description, resp.error_description);
+        assert_eq!(deserialized.suberror, resp.suberror);
+        assert_eq!(deserialized.error_codes, resp.error_codes);
     }
 }
