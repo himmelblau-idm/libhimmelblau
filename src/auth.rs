@@ -2464,17 +2464,9 @@ impl PublicClientApplication {
             }
         };
 
-        let credentials_json = match &auth_config.fido_allow_list {
-            Some(fido_allow_list) => {
-                if !fido_allow_list.is_empty() {
-                    &fido_allow_list[0]
-                } else {
-                    return Err(MsalError::GeneralFailure(
-                        "arrFidoAllowList missing from auth config".to_string(),
-                    ));
-                }
-            }
-            None => {
+        let credentials_json = match auth_config.fido_allow_list.as_deref() {
+            Some([credentials_json, ..]) => credentials_json,
+            _ => {
                 return Err(MsalError::GeneralFailure(
                     "arrFidoAllowList missing from auth config".to_string(),
                 ))
