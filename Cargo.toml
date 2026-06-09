@@ -15,6 +15,9 @@ name = "himmelblau"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
+[patch.crates-io]
+paste = { path = "overrides/paste" }
+
 [features]
 default = ["broker"]
 broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto"]
