@@ -561,7 +561,15 @@ impl PyPublicClientApplication {
     #[new]
     pub fn new(client_id: &str, authority: Option<&str>) -> PyResult<Self> {
         Ok(PyPublicClientApplication {
-            client: PublicClientApplication::new(client_id, authority).map_err(|e| to_pyerr!(e))?,
+            client: PublicClientApplication::new(
+                client_id,
+                authority,
+                #[cfg(feature = "set_timeout")]
+                std::time::Duration::from_secs(3),
+                #[cfg(feature = "ipvers")]
+                &[crate::IpVersion::V4, crate::IpVersion::V6],
+            )
+            .map_err(|e| to_pyerr!(e))?,
         })
     }
 
@@ -667,6 +675,10 @@ impl PyBrokerClientApplication {
                 client_id,
                 transport_key.map(|k| k.key.clone()),
                 cert_key.map(|k| k.key.clone()),
+                #[cfg(feature = "set_timeout")]
+                std::time::Duration::from_secs(3),
+                #[cfg(feature = "ipvers")]
+                &[crate::IpVersion::V4, crate::IpVersion::V6],
             )
             .map_err(|e| to_pyerr!(e))?,
         })
@@ -1138,8 +1150,16 @@ impl PyConfidentialClientApplication {
     pub fn new(client_id: &str, authority: Option<&str>, client_secret: &str) -> PyResult<Self> {
         let credential = ClientCredential::from_secret(client_secret.to_string());
         Ok(PyConfidentialClientApplication {
-            client: ConfidentialClientApplication::new(client_id, authority, credential)
-                .map_err(|e| to_pyerr!(e))?,
+            client: ConfidentialClientApplication::new(
+                client_id,
+                authority,
+                credential,
+                #[cfg(feature = "set_timeout")]
+                std::time::Duration::from_secs(3),
+                #[cfg(feature = "ipvers")]
+                &[crate::IpVersion::V4, crate::IpVersion::V6],
+            )
+            .map_err(|e| to_pyerr!(e))?,
         })
     }
 

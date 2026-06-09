@@ -2611,7 +2611,15 @@ pub unsafe extern "C" fn confidential_client_init_with_secret(
     };
     let authority_opt = wrap_c_char(authority);
     let credential = ClientCredential::from_secret(secret_str);
-    match ConfidentialClientApplication::new(&client_id_str, authority_opt.as_deref(), credential) {
+    match ConfidentialClientApplication::new(
+        &client_id_str,
+        authority_opt.as_deref(),
+        credential,
+        #[cfg(feature = "set_timeout")]
+        std::time::Duration::from_secs(3),
+        #[cfg(feature = "ipvers")]
+        &[IpVersion::V4, IpVersion::V6],
+    ) {
         Ok(app) => {
             unsafe {
                 *out = Box::into_raw(Box::new(app));
@@ -3191,7 +3199,16 @@ mod tests {
 
     fn test_confidential_client() -> ConfidentialClientApplication {
         let credential = ClientCredential::from_secret("test-secret".to_string());
-        ConfidentialClientApplication::new("test-client-id", None, credential).unwrap()
+        ConfidentialClientApplication::new(
+            "test-client-id",
+            None,
+            credential,
+            #[cfg(feature = "set_timeout")]
+            std::time::Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4, IpVersion::V6],
+        )
+        .unwrap()
     }
 
     #[test]
