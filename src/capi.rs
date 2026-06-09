@@ -41,7 +41,7 @@ use kanidm_hsm_crypto::{
     structures::LoadableStorageKey as LoadableMachineKeyIn, structures::SealedData as SealedDataIn,
     structures::StorageKey as MachineKeyIn, AuthValue,
 };
-use paste::paste;
+use pastey::paste;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::slice;

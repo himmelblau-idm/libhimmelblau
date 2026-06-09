@@ -45,11 +45,6 @@ use urlencoding::encode as url_encode;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-#[cfg(feature = "interactive")]
-use browser_window::{application::*, browser::*};
-#[cfg(feature = "interactive")]
-use std::sync::mpsc::channel;
-
 #[cfg(feature = "broker")]
 use compact_jwt::{
     compact::JweCompact,
@@ -4642,93 +4637,6 @@ impl PublicClientApplication {
         }
     }
 
-    /// Obtain token interactively.
-    ///
-    /// # Arguments
-    ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// * `resource` - A resource for obtaining an access token.
-    ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
-    ///
-    /// # Returns
-    ///
-    /// * Success: A UserToken containing an access_token.
-    /// * Failure: An MsalError, indicating the failure.
-    #[cfg(feature = "interactive")]
-    pub async fn acquire_token_interactive(
-        &self,
-        username: &str,
-        resource: Option<&str>,
-    ) -> Result<UserToken, MsalError> {
-        // We use this redirect because it's the only approved https redirect
-        let broker_redirect = "https://login.microsoftonline.com/applebroker/msauth";
-        let params = [
-            ("client_id", self.client_id()),
-            ("login_hint", username),
-            ("response_type", "code"),
-            ("redirect_uri", broker_redirect),
-            ("response_mode", "query"),
-            (
-                "resource",
-                (resource.unwrap_or("https://graph.microsoft.com")),
-            ),
-            ("amr_values", "ngcmfa"),
-        ];
-        let url = Url::parse_with_params(
-            &format!("{}/oauth2/authorize", self.authority()?),
-            &params.to_vec(),
-        )
-        .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
-
-        let application = Application::initialize(&ApplicationSettings::default())
-            .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
-        let runtime = application.start();
-
-        let (tx, rx) = channel();
-        runtime.run_async(|app| async move {
-            let mut bwb = BrowserWindowBuilder::new(Source::Url(url.to_string()));
-            bwb.dev_tools(false);
-            bwb.size(800, 600);
-            bwb.title("Azure Entra Id Interactive Authentication");
-            let bw = bwb.build_async(&app).await;
-            bw.show();
-
-            while !bw.url().contains(broker_redirect) {
-                app.sleep(Duration::from_millis(100)).await;
-            }
-
-            let redirect = bw.url().to_string();
-            tx.send(redirect).unwrap_or_else(|e| {
-                error!("{:?}", e);
-            });
-            app.exit(0);
-        });
-
-        let redirect = rx.recv_timeout(Duration::from_secs(900)).map_err(|e| {
-            error!("{:?}", e);
-            MsalError::GeneralFailure(
-                "Failed receiving redirect from interactive acquire".to_string(),
-            )
-        })?;
-        let url = Url::parse(&redirect).map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
-        let (_, auth_code) =
-            url.query_pairs()
-                .find(|(k, _)| k == "code")
-                .ok_or(MsalError::InvalidParse(
-                    "Authorization code missing from redirect".to_string(),
-                ))?;
-
-        application.finish();
-
-        self.exchange_authorization_code_for_access_token_internal(
-            auth_code.to_string(),
-            resource,
-            Some(broker_redirect),
-        )
-        .await
-    }
-
     fn get_auth_redirect_uri(&self, client_id: Option<&str>, resource: Option<&str>) -> String {
         self.app.get_auth_redirect_uri(client_id, resource)
     }
@@ -7594,27 +7502,6 @@ impl BrokerClientApplication {
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
         self.seal_user_prt(&prt, tpm, prt_storage_key)
-    }
-
-    /// Obtain token interactively for device enrollment.
-    ///
-    /// # Arguments
-    ///
-    /// * `username` - Typically a UPN in the form of an email address.
-    ///
-    /// # Returns
-    ///
-    /// * Success: A UserToken containing an access_token.
-    /// * Failure: An MsalError, indicating the failure.
-    #[cfg(feature = "interactive")]
-    pub async fn acquire_token_interactive_for_device_enrollment(
-        &self,
-        username: &str,
-    ) -> Result<UserToken, MsalError> {
-        let resource = "https://enrollment.manage.microsoft.com";
-        self.app
-            .acquire_token_interactive(username, Some(resource))
-            .await
     }
 
     pub async fn resolve_nametosid(
