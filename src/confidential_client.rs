@@ -364,9 +364,9 @@ impl ConfidentialClientApplication {
             };
             let aud_matches = match aud {
                 AssertionAudience::Single(single_aud) => aud_matches_target(&single_aud),
-                AssertionAudience::Multiple(multi_aud) => {
-                    multi_aud.iter().any(|candidate| aud_matches_target(candidate))
-                }
+                AssertionAudience::Multiple(multi_aud) => multi_aud
+                    .iter()
+                    .any(|candidate| aud_matches_target(candidate)),
             };
             if !aud_matches {
                 warn!(
@@ -716,10 +716,7 @@ mod tests {
 
     /// Helper: build an app with a specific authority URL.
     #[cfg(feature = "on_behalf_of")]
-    fn test_app_with_authority(
-        client_id: &str,
-        authority: &str,
-    ) -> ConfidentialClientApplication {
+    fn test_app_with_authority(client_id: &str, authority: &str) -> ConfidentialClientApplication {
         let credential = ClientCredential::from_secret("test-secret".to_string());
         ConfidentialClientApplication::new(client_id, Some(authority), credential)
             .expect("Failed to create test app with authority")
@@ -751,8 +748,7 @@ mod tests {
     #[cfg(feature = "on_behalf_of")]
     #[test]
     fn obo_authority_override_common_with_tid() {
-        let app =
-            test_app_with_authority("cid", "https://login.microsoftonline.com/common");
+        let app = test_app_with_authority("cid", "https://login.microsoftonline.com/common");
         let jwt = make_jwt(&json!({"tid": "tenant-abc-123"}));
         let authority = compute_obo_authority(&app, &jwt);
         assert_eq!(
@@ -764,38 +760,25 @@ mod tests {
     #[cfg(feature = "on_behalf_of")]
     #[test]
     fn obo_authority_override_organizations_with_tid() {
-        let app = test_app_with_authority(
-            "cid",
-            "https://login.microsoftonline.com/organizations",
-        );
+        let app = test_app_with_authority("cid", "https://login.microsoftonline.com/organizations");
         let jwt = make_jwt(&json!({"tid": "tenant-xyz"}));
         let authority = compute_obo_authority(&app, &jwt);
-        assert_eq!(
-            authority,
-            "https://login.microsoftonline.com/tenant-xyz"
-        );
+        assert_eq!(authority, "https://login.microsoftonline.com/tenant-xyz");
     }
 
     #[cfg(feature = "on_behalf_of")]
     #[test]
     fn obo_authority_keeps_specific_tenant() {
-        let app = test_app_with_authority(
-            "cid",
-            "https://login.microsoftonline.com/my-tenant-id",
-        );
+        let app = test_app_with_authority("cid", "https://login.microsoftonline.com/my-tenant-id");
         let jwt = make_jwt(&json!({"tid": "other-tenant"}));
         let authority = compute_obo_authority(&app, &jwt);
-        assert_eq!(
-            authority,
-            "https://login.microsoftonline.com/my-tenant-id"
-        );
+        assert_eq!(authority, "https://login.microsoftonline.com/my-tenant-id");
     }
 
     #[cfg(feature = "on_behalf_of")]
     #[test]
     fn obo_authority_override_common_trailing_slash() {
-        let app =
-            test_app_with_authority("cid", "https://login.microsoftonline.com/common/");
+        let app = test_app_with_authority("cid", "https://login.microsoftonline.com/common/");
         let jwt = make_jwt(&json!({"tid": "tenant-trailing"}));
         let authority = compute_obo_authority(&app, &jwt);
         assert_eq!(
@@ -807,27 +790,19 @@ mod tests {
     #[cfg(feature = "on_behalf_of")]
     #[test]
     fn obo_authority_gcch_override_common() {
-        let app =
-            test_app_with_authority("cid", "https://login.microsoftonline.us/common");
+        let app = test_app_with_authority("cid", "https://login.microsoftonline.us/common");
         let jwt = make_jwt(&json!({"tid": "gcch-tenant"}));
         let authority = compute_obo_authority(&app, &jwt);
-        assert_eq!(
-            authority,
-            "https://login.microsoftonline.us/gcch-tenant"
-        );
+        assert_eq!(authority, "https://login.microsoftonline.us/gcch-tenant");
     }
 
     #[cfg(feature = "on_behalf_of")]
     #[test]
     fn obo_authority_no_tid_in_assertion() {
-        let app =
-            test_app_with_authority("cid", "https://login.microsoftonline.com/common");
+        let app = test_app_with_authority("cid", "https://login.microsoftonline.com/common");
         let jwt = make_jwt(&json!({"sub": "user"}));
         let authority = compute_obo_authority(&app, &jwt);
-        assert_eq!(
-            authority,
-            "https://login.microsoftonline.com/common"
-        );
+        assert_eq!(authority, "https://login.microsoftonline.com/common");
     }
 
     // ---------------------------------------------------------------

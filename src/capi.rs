@@ -2980,17 +2980,15 @@ pub unsafe extern "C" fn confidential_acquire_token_silent(
     let scopes_ref: Vec<&str> = scopes_vec.iter().map(|s| s.as_str()).collect();
 
     match runtime::Runtime::new() {
-        Ok(rt) => {
-            match rt.block_on(async { app.acquire_token_silent(scopes_ref, None).await }) {
-                Ok(token) => {
-                    unsafe {
-                        *out = Box::into_raw(Box::new(token));
-                    }
-                    no_error()
+        Ok(rt) => match rt.block_on(async { app.acquire_token_silent(scopes_ref, None).await }) {
+            Ok(token) => {
+                unsafe {
+                    *out = Box::into_raw(Box::new(token));
                 }
-                Err(e) => make_error_from_msal_error(e),
+                no_error()
             }
-        }
+            Err(e) => make_error_from_msal_error(e),
+        },
         Err(e) => make_error(MSAL_ERROR_CODE::NO_MEMORY, e.to_string()),
     }
 }
@@ -3317,9 +3315,7 @@ mod tests {
         assert_invalid_pointer(unsafe {
             client_token_access_token(std::ptr::null_mut(), &mut out)
         });
-        assert_invalid_pointer(unsafe {
-            client_token_token_type(std::ptr::null_mut(), &mut out)
-        });
+        assert_invalid_pointer(unsafe { client_token_token_type(std::ptr::null_mut(), &mut out) });
         let mut u32_out: u32 = 0;
         assert_invalid_pointer(unsafe {
             client_token_expires_in(std::ptr::null_mut(), &mut u32_out)
@@ -3344,12 +3340,7 @@ mod tests {
         });
 
         assert_invalid_pointer(unsafe {
-            confidential_acquire_token_silent(
-                &mut app,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-            )
+            confidential_acquire_token_silent(&mut app, std::ptr::null(), 0, std::ptr::null_mut())
         });
     }
 
