@@ -1,0 +1,22 @@
+[package]
+name = "paste"
+version = "1.0.15"
+publish = false
+
+authors = [
+    "Aditya Kumar <git@adityais.dev>",
+    "David Tolnay <dtolnay@gmail.com>",
+]
+description = "Macros for all your token pasting needs. Successor of paste."
+rust-version = "1.54"
+edition = "2018"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/as1100k/pastey"
+
+# Note: This shim re-exports from pastey (a proc-macro crate).
+# It cannot be marked as proc-macro = true because proc-macro crates
+# cannot re-export items. The shim works by depending on pastey which
+# is a proc-macro, and re-exporting its macros via pub use.
+
+[dependencies]
+pastey = "^0.2"

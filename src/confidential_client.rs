@@ -588,8 +588,16 @@ mod tests {
     #[cfg(feature = "on_behalf_of")]
     fn test_app(client_id: &str) -> ConfidentialClientApplication {
         let credential = ClientCredential::from_secret("test-secret".to_string());
-        ConfidentialClientApplication::new(client_id, None, credential)
-            .expect("Failed to create test app")
+        ConfidentialClientApplication::new(
+            client_id,
+            None,
+            credential,
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4, IpVersion::V6],
+        )
+        .expect("Failed to create test app")
     }
 
     /// Helper: build a JWT-shaped string (header.payload.signature) from
@@ -718,8 +726,16 @@ mod tests {
     #[cfg(feature = "on_behalf_of")]
     fn test_app_with_authority(client_id: &str, authority: &str) -> ConfidentialClientApplication {
         let credential = ClientCredential::from_secret("test-secret".to_string());
-        ConfidentialClientApplication::new(client_id, Some(authority), credential)
-            .expect("Failed to create test app with authority")
+        ConfidentialClientApplication::new(
+            client_id,
+            Some(authority),
+            credential,
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4, IpVersion::V6],
+        )
+        .expect("Failed to create test app with authority")
     }
 
     /// Helper: compute the OBO authority the same way `acquire_token_on_behalf_of`
