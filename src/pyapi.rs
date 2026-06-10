@@ -19,7 +19,7 @@ use kanidm_hsm_crypto::structures::{
 #[cfg(feature = "tpm")]
 use kanidm_hsm_crypto::tpm::TpmTss;
 use kanidm_hsm_crypto::AuthValue;
-use paste::paste;
+use pastey::paste;
 // Kerberos support temporarily disabled
 // use picky_krb::messages::AsRep;
 #[cfg(feature = "on_behalf_of")]
@@ -457,7 +457,7 @@ pub fn auth_value_generate() -> PyResult<String> {
     AuthValue::generate().map_err(|e| to_pyerr!(e))
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub enum PyAuthOption {
     Fido,
@@ -493,7 +493,7 @@ impl PyAuthInit {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub enum TracingLevel {
     ERROR,
