@@ -461,7 +461,7 @@ impl Services {
             .header(header::ACCEPT, "application/json, text/plain, */*")
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let mut json_resp: Services = resp
                 .json()
@@ -507,7 +507,7 @@ impl Services {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: NonceResp = resp
                 .json()
@@ -583,7 +583,7 @@ impl Services {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let res: DRSResponse = resp
                 .json()
@@ -676,7 +676,7 @@ impl Services {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             Ok(())
         } else {

@@ -688,7 +688,7 @@ impl IntuneForLinux {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: EnrollmentResponse = resp
                 .json()
@@ -788,7 +788,7 @@ impl IntuneForLinux {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -828,7 +828,7 @@ impl IntuneForLinux {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
 
         if resp.status().is_success() {
             let status_resp: IntuneStatus = resp
@@ -872,7 +872,7 @@ impl IntuneForLinux {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
 
         if resp.status().is_success() {
             let json_resp: IntunePolicyResponse = resp
@@ -919,7 +919,7 @@ impl IntuneForLinux {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
 
         if resp.status().is_success() {
             let json_resp: DeviceInfo = resp

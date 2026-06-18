@@ -414,7 +414,7 @@ impl ConfidentialClientApplication {
             .form(&params)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let token: ClientToken = resp
                 .json()

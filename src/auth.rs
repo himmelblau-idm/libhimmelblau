@@ -1663,7 +1663,7 @@ impl ClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let token: UserToken = resp
                 .json()
@@ -1710,7 +1710,7 @@ impl ClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let token: UserToken = resp
                 .json()
@@ -2003,7 +2003,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: DeviceAuthorizationResponse = resp
                 .json()
@@ -2042,7 +2042,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: DeviceAuthorizationResponse = resp
                 .json()
@@ -2092,7 +2092,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let token: UserToken = resp
                 .json()
@@ -2132,7 +2132,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let token: UserToken = resp
                 .json()
@@ -2327,7 +2327,7 @@ impl PublicClientApplication {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let mut sspr_response: SsprResponse = resp
                 .json()
@@ -2367,7 +2367,7 @@ impl PublicClientApplication {
                     .json(&poll_body)
                     .send()
                     .await
-                    .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?
+                    .map_err(|e| MsalError::request_failed(&e))?
                     .json()
                     .await
                     .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
@@ -2412,7 +2412,7 @@ impl PublicClientApplication {
                 .json(&final_body)
                 .send()
                 .await
-                .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+                .map_err(|e| MsalError::request_failed(&e))?;
             if resp.status().is_success() {
                 Ok(())
             } else {
@@ -2533,7 +2533,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         let text;
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
@@ -2590,7 +2590,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         let text;
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
@@ -3508,7 +3508,7 @@ impl PublicClientApplication {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: OneTimeCode = resp
                 .json()
@@ -3567,7 +3567,7 @@ impl PublicClientApplication {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: CredType = resp
                 .json()
@@ -3640,7 +3640,7 @@ impl PublicClientApplication {
             .header(header::USER_AGENT, FIDO_USER_AGENT)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             self.parse_auth_config(
                 &resp.text().await.map_err(|e| {
@@ -3680,7 +3680,7 @@ impl PublicClientApplication {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let text = resp
                 .text()
@@ -3766,9 +3766,7 @@ impl PublicClientApplication {
                 .form(&form_data)
                 .send()
                 .await
-                .map_err(|e| {
-                    MsalError::RequestFailed(format!("Request failed in await_working(): {}", e))
-                })?;
+                .map_err(|e| MsalError::request_failed(&e))?;
             let mut body = Vec::new();
             while let Some(chunk) = resp.chunk().await.map_err(|e| {
                 MsalError::GeneralFailure(format!("Error reading response chunks: {}", e))
@@ -3796,7 +3794,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         let text;
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_redirection() {
@@ -3913,7 +3911,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         let _text;
         (_text, resp) = self.await_working(resp).await?;
         if resp.status().is_redirection() {
@@ -4030,7 +4028,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let token: UserToken = resp
                 .json()
@@ -4118,7 +4116,7 @@ impl PublicClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         let text;
         (text, resp) = self.await_working(resp).await?;
         debug!(
@@ -4452,11 +4450,12 @@ impl PublicClientApplication {
                         .json(&payload)
                         .send()
                         .await
-                        .map_err(|e| {
-                            MsalError::RequestFailed(format!(
+                        .map_err(|e| match MsalError::request_failed(&e) {
+                            MsalError::RequestFailed(msg) => MsalError::RequestFailed(format!(
                                 "Request to {} failed: {}",
-                                url_end_auth, e
-                            ))
+                                url_end_auth, msg
+                            )),
+                            other => other,
                         })?;
                     if resp.status().is_success() {
                         let text = resp.text().await.map_err(|e| {
@@ -4531,7 +4530,7 @@ impl PublicClientApplication {
                         .header("x-ms-ctx", &flow.ctx)
                         .send()
                         .await
-                        .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?
+                        .map_err(|e| MsalError::request_failed(&e))?
                 } else if let Some(url_session_state) = &flow.url_session_state {
                     let url =
                         Url::parse_with_params(url_session_state, [("code", &flow.session_id)])
@@ -4548,7 +4547,7 @@ impl PublicClientApplication {
                         .json(&payload)
                         .send()
                         .await
-                        .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?
+                        .map_err(|e| MsalError::request_failed(&e))?
                 } else {
                     return Err(MsalError::GeneralFailure("Request invalid".to_string()));
                 };
@@ -5273,7 +5272,7 @@ impl BrokerClientApplication {
             .body("grant_type=srv_challenge")
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: Nonce = resp
                 .json()
@@ -5539,7 +5538,7 @@ impl BrokerClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: PrimaryRefreshToken = resp
                 .json()
@@ -5868,7 +5867,7 @@ impl BrokerClientApplication {
             .body(step1_payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
 
         let bearer_token: UserToken = if resp.status().is_success() {
             let resp_text = resp
@@ -5956,7 +5955,7 @@ impl BrokerClientApplication {
             .body(step2_payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
 
         if resp2.status().is_success() {
             let token: UserToken = resp2
@@ -6061,7 +6060,7 @@ impl BrokerClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let enc = resp
                 .text()
@@ -6554,7 +6553,7 @@ impl BrokerClientApplication {
         let mut resp = req
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         let text;
         (text, resp) = self.app.await_working(resp).await?;
         if resp.status().is_redirection() {
@@ -6936,7 +6935,7 @@ impl BrokerClientApplication {
             .body(payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let token: UserToken = resp
                 .json()
@@ -7552,7 +7551,7 @@ impl BrokerClientApplication {
             .body(Body::from(form_body))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("Request error: {:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
 
         if resp.status().is_success() {
             let json_resp: SidToName = resp
