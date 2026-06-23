@@ -1855,7 +1855,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libhimmelblau"
-version = "0.8.22"
+version = "0.8.23"
 dependencies = [
  "base64 0.22.1",
  "cbindgen",
