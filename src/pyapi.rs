@@ -20,8 +20,6 @@ use kanidm_hsm_crypto::structures::{
 use kanidm_hsm_crypto::tpm::TpmTss;
 use kanidm_hsm_crypto::AuthValue;
 use pastey::paste;
-// Kerberos support temporarily disabled
-// use picky_krb::messages::AsRep;
 #[cfg(feature = "on_behalf_of")]
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;

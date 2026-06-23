@@ -177,7 +177,7 @@ async fn request_federation_provider(
         .get(url)
         .send()
         .await
-        .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        .map_err(|e| MsalError::request_failed(&e))?;
     if resp.status().is_success() {
         let json_resp: FederationProvider = resp
             .json()
@@ -329,7 +329,7 @@ impl Graph {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: UserObject = resp
                 .json()
@@ -468,7 +468,7 @@ impl Graph {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -492,7 +492,7 @@ impl Graph {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: GroupObject = resp
                 .json()
@@ -516,7 +516,7 @@ impl Graph {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let content = resp
                 .bytes()
@@ -543,7 +543,7 @@ impl Graph {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: Value = resp
                 .json()
@@ -586,7 +586,7 @@ impl Graph {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: Value = resp
                 .json()
@@ -629,7 +629,7 @@ impl Graph {
             .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: Value = resp
                 .json()
@@ -674,7 +674,7 @@ impl Graph {
             .header(header::ACCEPT, "application/json")
             .send()
             .await
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            .map_err(|e| MsalError::request_failed(&e))?;
         if resp.status().is_success() {
             let json_resp: IntuneServiceEndpoints = resp
                 .json()
@@ -702,7 +702,7 @@ impl Graph {
                 .header("ConsistencyLevel", "eventual")
                 .send()
                 .await
-                .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+                .map_err(|e| MsalError::request_failed(&e))?;
 
             match resp.status() {
                 StatusCode::OK => return Ok(resp),

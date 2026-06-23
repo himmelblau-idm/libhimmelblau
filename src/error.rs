@@ -18,6 +18,7 @@
 
 pub use crate::aadsts_err_gen::*;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fmt;
 
 pub const INVALID_CRED: u32 = 0xC3CE;
@@ -148,6 +149,22 @@ impl fmt::Display for MsalError {
                 )
             }
         }
+    }
+}
+
+impl MsalError {
+    /// Build a [`MsalError::RequestFailed`] from a reqwest error, walking the
+    /// full `source()` chain so transport-level causes (TLS, DNS, timeouts,
+    /// connection resets) are visible. reqwest's `Display` only emits a terse
+    /// "error sending request for url (...)" string that hides these.
+    pub fn request_failed(e: &reqwest::Error) -> Self {
+        let mut msg = format!("{}", e);
+        let mut src = e.source();
+        while let Some(s) = src {
+            msg.push_str(&format!(": {}", s));
+            src = s.source();
+        }
+        MsalError::RequestFailed(msg)
     }
 }
 

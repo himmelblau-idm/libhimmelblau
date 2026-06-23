@@ -1,7 +1,7 @@
 [package]
 name = "libhimmelblau"
 description = "Samba Library for Azure Entra ID Authentication"
-version = "0.8.22"
+version = "0.8.23"
 edition = "2021"
 authors = [
     "David Mulder <dmulder@suse.com>"
@@ -59,11 +59,8 @@ zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
 scraper = "0.25.0"
 tokio = { version = "1.49.0", features = ["full"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-pyo3 = { version = "0.28.0", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.29.0", features = ["extension-module"], optional = true }
 pastey = "^0.2"
-picky-krb = "0.12.0"
-picky-asn1-der = "0.5.4"
-picky-asn1 = "0.10.1"
 chrono = "0.4.43"
 percent-encoding = "2.3.1"
 serde_bytes = "0.11.17"

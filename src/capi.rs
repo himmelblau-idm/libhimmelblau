@@ -386,6 +386,11 @@ pub unsafe extern "C" fn tpm_machine_key_load(
 /// * `cert_key` - An optional LoadableMsDeviceEnrolmentKey which was used to create
 ///   the enrollment CSR.
 ///
+/// * `timeout_secs` - An optional pointer to the request timeout, in seconds,
+///   applied to libhimmelblau's internal HTTP client (most importantly the
+///   device enrollment request). Pass NULL to use the built-in default. Only
+///   present when built with the `set_timeout` feature.
+///
 /// * `out` - An output parameter which will contain the initialized
 ///   BrokerClientApplication.
 ///
@@ -397,8 +402,9 @@ pub unsafe extern "C" fn tpm_machine_key_load(
 /// The calling function must ensure that the `authority` is either a valid c
 /// string, or NULL. It must also ensure that `transport_key` is a valid c
 /// LoadableMsOapxbcRsaKey pointer or NULL, that `cert_key` is a valid c
-/// LoadableMsDeviceEnrolmentKey pointer or NULL, and that `out` is a valid c
-/// BrokerClientApplication double pointer.
+/// LoadableMsDeviceEnrolmentKey pointer or NULL, that `timeout_secs` (when
+/// built with the `set_timeout` feature) is a valid pointer to a uint64_t or
+/// NULL, and that `out` is a valid c BrokerClientApplication double pointer.
 #[cfg(feature = "broker")]
 #[no_mangle]
 pub unsafe extern "C" fn broker_init(
@@ -406,6 +412,7 @@ pub unsafe extern "C" fn broker_init(
     client_id: *const c_char,
     transport_key: *mut LoadableMsOapxbcRsaKey,
     cert_key: *mut LoadableMsDeviceEnrolmentKey,
+    #[cfg(feature = "set_timeout")] timeout_secs: *const u64,
     out: *mut *mut BrokerClientApplication,
 ) -> *mut MSAL_ERROR {
     if out.is_null() {
@@ -428,7 +435,11 @@ pub unsafe extern "C" fn broker_init(
         transport_key,
         cert_key,
         #[cfg(feature = "set_timeout")]
-        std::time::Duration::from_secs(3),
+        if timeout_secs.is_null() {
+            std::time::Duration::from_secs(3)
+        } else {
+            std::time::Duration::from_secs(unsafe { *timeout_secs })
+        },
         #[cfg(feature = "ipvers")]
         &[IpVersion::V4, IpVersion::V6],
     ) {
@@ -3391,5 +3402,69 @@ mod tests {
         unsafe {
             error_free(err);
         }
+    }
+}
+
+#[cfg(all(test, feature = "broker", feature = "set_timeout"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod broker_init_tests {
+    use super::*;
+
+    #[test]
+    fn broker_init_rejects_null_out() {
+        let timeout_secs: u64 = 30;
+        let err = unsafe {
+            broker_init(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &timeout_secs,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!err.is_null());
+        assert!(matches!(
+            unsafe { (*err).code },
+            MSAL_ERROR_CODE::INVALID_POINTER
+        ));
+        unsafe { error_free(err) };
+    }
+
+    #[test]
+    fn broker_init_with_timeout_constructs_client() {
+        let timeout_secs: u64 = 30;
+        let mut out: *mut BrokerClientApplication = std::ptr::null_mut();
+        let err = unsafe {
+            broker_init(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &timeout_secs,
+                &mut out,
+            )
+        };
+        assert!(err.is_null());
+        assert!(!out.is_null());
+        unsafe { broker_free(out) };
+    }
+
+    #[test]
+    fn broker_init_null_timeout_constructs_client() {
+        let mut out: *mut BrokerClientApplication = std::ptr::null_mut();
+        let err = unsafe {
+            broker_init(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut out,
+            )
+        };
+        assert!(err.is_null());
+        assert!(!out.is_null());
+        unsafe { broker_free(out) };
     }
 }
