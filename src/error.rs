@@ -94,6 +94,17 @@ pub enum MsalError {
     /// MFA is required to complete authentication (e.g., when Hello for Business
     /// auth gets an MFA challenge page instead of an auth code)
     MFARequired,
+    /// The user denied the MFA challenge (e.g., rejected the push notification).
+    /// Returned when DeviceCodeStatus.authorization_state == 1.
+    AuthorizationDenied,
+    /// A message-bearing failure on the code-submission path, typically an
+    /// incorrect or expired one-time code while the MFA flow remains valid.
+    /// The String carries the server's message; consumers re-prompt for the
+    /// code rather than treating it as terminal.
+    MFAInvalidCode(String),
+    /// MFA failed and the Device Authorization Grant fallback is disabled
+    /// (NoDAGFallback was active).
+    MFADAGFallbackDisabled,
     #[cfg(feature = "on_behalf_of")]
     /// OBO exchange failed due to Conditional Access requiring user interaction.
     /// The `claims` field must be propagated back to the original client for
@@ -139,6 +150,13 @@ impl fmt::Display for MsalError {
             }
             MsalError::MFARequired => {
                 write!(f, "MFA is required to complete authentication")
+            }
+            MsalError::AuthorizationDenied => write!(f, "Authorization denied"),
+            MsalError::MFAInvalidCode(msg) => {
+                write!(f, "AuthResponse indicates failure: {}", msg)
+            }
+            MsalError::MFADAGFallbackDisabled => {
+                write!(f, "MFA failed and DAG fallback is disabled")
             }
             #[cfg(feature = "on_behalf_of")]
             MsalError::OboInteractionRequired { ref error, .. } => {

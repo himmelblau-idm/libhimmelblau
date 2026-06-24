@@ -2753,9 +2753,7 @@ impl PublicClientApplication {
                     flow.resource = resource.map(|s| s.to_string());
                     return Ok(flow);
                 } else {
-                    return Err(MsalError::GeneralFailure(
-                        "MFA failed and DAG fallback is disabled".to_string(),
-                    ));
+                    return Err(MsalError::MFADAGFallbackDisabled);
                 }
             };
             ($err:expr) => {
@@ -4490,10 +4488,15 @@ impl PublicClientApplication {
                             )
                             .await
                         } else if let Some(msg) = auth_response.message {
-                            Err(MsalError::GeneralFailure(format!(
-                                "AuthResponse indicates failure: {}",
-                                msg
-                            )))
+                            // The submitted code was wrong/expired but the flow
+                            // is still valid. Surface a structured error so
+                            // consumers can re-prompt for the code. We don't
+                            // gate on auth_response.retry here because Entra's
+                            // code-submission path is not confirmed to always
+                            // include it (unlike the polling branch), and
+                            // every message-bearing failure on this path is
+                            // retryable in practice.
+                            Err(MsalError::MFAInvalidCode(msg))
                         } else {
                             Err(MsalError::GeneralFailure("EndAuth failed".to_string()))
                         }
@@ -4607,9 +4610,7 @@ impl PublicClientApplication {
                         if status.authorization_state == 0 {
                             Err(MsalError::MFAPollContinue)
                         } else if status.authorization_state == 1 {
-                            Err(MsalError::GeneralFailure(
-                                "Authorization denied".to_string(),
-                            ))
+                            Err(MsalError::AuthorizationDenied)
                         } else if status.authorization_state == 2 {
                             let auth_code = self
                                 .request_authorization_passwordless_internal(username, flow)

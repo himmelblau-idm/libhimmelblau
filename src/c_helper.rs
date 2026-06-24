@@ -225,6 +225,9 @@ pub enum MSAL_ERROR_CODE {
     CONSENT_REQUESTED,
     AUTH_CODE_RECEIVED,
     MFA_REQUIRED,
+    AUTHORIZATION_DENIED,
+    MFA_INVALID_CODE,
+    MFA_DAG_FALLBACK_DISABLED,
     #[cfg(feature = "on_behalf_of")]
     OBO_INTERACTION_REQUIRED,
 }
@@ -268,6 +271,9 @@ impl From<MsalError> for MSAL_ERROR_CODE {
             MsalError::ConsentRequested(_) => MSAL_ERROR_CODE::CONSENT_REQUESTED,
             MsalError::AuthCodeReceived(_) => MSAL_ERROR_CODE::AUTH_CODE_RECEIVED,
             MsalError::MFARequired => MSAL_ERROR_CODE::MFA_REQUIRED,
+            MsalError::AuthorizationDenied => MSAL_ERROR_CODE::AUTHORIZATION_DENIED,
+            MsalError::MFAInvalidCode(_) => MSAL_ERROR_CODE::MFA_INVALID_CODE,
+            MsalError::MFADAGFallbackDisabled => MSAL_ERROR_CODE::MFA_DAG_FALLBACK_DISABLED,
             #[cfg(feature = "on_behalf_of")]
             MsalError::OboInteractionRequired { .. } => MSAL_ERROR_CODE::OBO_INTERACTION_REQUIRED,
         }
