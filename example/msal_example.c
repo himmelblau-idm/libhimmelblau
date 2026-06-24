@@ -138,9 +138,12 @@ int main() {
 
 	password = getpass("Password: ");
 
+	AuthOption options[] = {NoDAGFallback};
 	err = broker_initiate_acquire_token_by_mfa_flow_for_device_enrollment(client,
 									      username,
 									      password,
+									      options,
+									      sizeof(options) / sizeof(options[0]),
 									      &flow);
 	if (err != NULL) {
 		printf("Failed to initiate an mfa token acquire: %s\n", err->msg);

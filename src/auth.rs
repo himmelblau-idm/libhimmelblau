@@ -1494,6 +1494,7 @@ pub(crate) fn should_attempt_passwordless_qr_bluetooth(
     true
 }
 
+#[repr(C)]
 #[derive(PartialEq)]
 pub enum AuthOption {
     Fido,
