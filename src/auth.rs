@@ -1494,6 +1494,7 @@ pub(crate) fn should_attempt_passwordless_qr_bluetooth(
     true
 }
 
+#[repr(C)]
 #[derive(PartialEq)]
 pub enum AuthOption {
     Fido,
@@ -2752,9 +2753,7 @@ impl PublicClientApplication {
                     flow.resource = resource.map(|s| s.to_string());
                     return Ok(flow);
                 } else {
-                    return Err(MsalError::GeneralFailure(
-                        "MFA failed and DAG fallback is disabled".to_string(),
-                    ));
+                    return Err(MsalError::MFADAGFallbackDisabled);
                 }
             };
             ($err:expr) => {
@@ -4489,10 +4488,15 @@ impl PublicClientApplication {
                             )
                             .await
                         } else if let Some(msg) = auth_response.message {
-                            Err(MsalError::GeneralFailure(format!(
-                                "AuthResponse indicates failure: {}",
-                                msg
-                            )))
+                            // The submitted code was wrong/expired but the flow
+                            // is still valid. Surface a structured error so
+                            // consumers can re-prompt for the code. We don't
+                            // gate on auth_response.retry here because Entra's
+                            // code-submission path is not confirmed to always
+                            // include it (unlike the polling branch), and
+                            // every message-bearing failure on this path is
+                            // retryable in practice.
+                            Err(MsalError::MFAInvalidCode(msg))
                         } else {
                             Err(MsalError::GeneralFailure("EndAuth failed".to_string()))
                         }
@@ -4606,9 +4610,7 @@ impl PublicClientApplication {
                         if status.authorization_state == 0 {
                             Err(MsalError::MFAPollContinue)
                         } else if status.authorization_state == 1 {
-                            Err(MsalError::GeneralFailure(
-                                "Authorization denied".to_string(),
-                            ))
+                            Err(MsalError::AuthorizationDenied)
                         } else if status.authorization_state == 2 {
                             let auth_code = self
                                 .request_authorization_passwordless_internal(username, flow)
@@ -5226,6 +5228,53 @@ impl BrokerClientApplication {
                 password,
                 vec![],
                 Some(intune_resource),
+                options,
+                auth_init,
+                #[cfg(feature = "mfa_method_selection")]
+                selected_method,
+            )
+            .await
+    }
+
+    /// Initiate an MFA flow via user credentials (without enrollment-specific
+    /// resource scoping).
+    ///
+    /// This is the non-enrollment counterpart of
+    /// `initiate_acquire_token_by_mfa_flow_for_device_enrollment`. The resulting
+    /// token is scoped to the default resource (MS Graph) rather than Intune,
+    /// making it suitable for scenarios where device enrollment is not desired.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `password` - The password.
+    ///
+    /// * `options` - Authentication options to enable, such as Fido.
+    ///
+    /// * `auth_init` - The result of `check_user_exists`.
+    ///
+    /// * `selected_method` - Optional specific MFA method ID to use. Only available
+    ///   when the `mfa_method_selection` feature is enabled.
+    ///
+    /// # Returns
+    /// * Success: A MFAAuthContinue containing the information needed to continue the
+    ///   authentication flow.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn initiate_acquire_token_by_mfa_flow(
+        &self,
+        username: &str,
+        password: Option<&str>,
+        options: &[AuthOption],
+        auth_init: Option<AuthInit>,
+        #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
+    ) -> Result<MFAAuthContinue, MsalError> {
+        self.app
+            .initiate_acquire_token_by_mfa_flow(
+                username,
+                password,
+                vec![],
+                None,
                 options,
                 auth_init,
                 #[cfg(feature = "mfa_method_selection")]

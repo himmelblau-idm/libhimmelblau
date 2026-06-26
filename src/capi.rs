@@ -1045,7 +1045,12 @@ pub unsafe extern "C" fn broker_check_user_exists(
     no_error()
 }
 
-/// Initiate an MFA flow for enrollment via user credentials.
+/// Initiate an MFA flow via user credentials (without enrollment-specific
+/// resource scoping).
+///
+/// Unlike `broker_initiate_acquire_token_by_mfa_flow_for_device_enrollment`,
+/// the resulting token is scoped to MS Graph rather than Intune, making it
+/// suitable for scenarios where device enrollment is not desired.
 ///
 /// # Arguments
 ///
@@ -1056,19 +1061,29 @@ pub unsafe extern "C" fn broker_check_user_exists(
 ///
 /// * `password` - The password.
 ///
+/// * `options` - An array of `AuthOption` values controlling the flow. May be
+///   NULL when `options_len` is 0. Pass `NoDAGFallback` to return an error
+///   instead of silently falling back to the Device Authorization Grant when
+///   the native password+MFA challenge cannot be set up.
+///
+/// * `options_len` - The number of entries in `options`.
+///
 /// * `out` - A MFAAuthContinue containing the information needed to continue the
 ///   authentication flow.
 ///
 /// # Safety
 ///
 /// The calling function should ensure that `client`, `username`, and
-/// `password`, are valid pointers to their respective types.
+/// `password`, are valid pointers to their respective types, and that `options`
+/// is either NULL or points to `options_len` valid `AuthOption` values.
 #[cfg(feature = "broker")]
 #[no_mangle]
-pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_enrollment(
+pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
     client: *mut BrokerClientApplication,
     username: *const c_char,
     password: *const c_char,
+    options: *const AuthOption,
+    options_len: usize,
     out: *mut *mut MFAAuthContinue,
 ) -> *mut MSAL_ERROR {
     // Ensure our out parameter is not NULL
@@ -1097,6 +1112,109 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
             );
         }
     };
+    let options: &[AuthOption] = if options.is_null() || options_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(options, options_len) }
+    };
+    #[cfg(not(feature = "mfa_method_selection"))]
+    let flow = match run_async!(
+        client,
+        initiate_acquire_token_by_mfa_flow,
+        &username,
+        Some(&password),
+        options,
+        None,
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    #[cfg(feature = "mfa_method_selection")]
+    let flow = match run_async!(
+        client,
+        initiate_acquire_token_by_mfa_flow,
+        &username,
+        Some(&password),
+        options,
+        None,
+        None, // No specific MFA method
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    unsafe {
+        *out = Box::into_raw(Box::new(flow));
+    }
+    no_error()
+}
+
+/// Initiate an MFA flow for device enrollment via user credentials.
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `username` - Typically a UPN in the form of an email address.
+///
+/// * `password` - The password.
+///
+/// * `options` - An array of `AuthOption` values controlling the flow. May be
+///   NULL when `options_len` is 0. Pass `NoDAGFallback` to return an error
+///   instead of silently falling back to the Device Authorization Grant when
+///   the native password+MFA challenge cannot be set up.
+///
+/// * `options_len` - The number of entries in `options`.
+///
+/// * `out` - A MFAAuthContinue containing the information needed to continue the
+///   authentication flow.
+///
+/// # Safety
+///
+/// The calling function should ensure that `client`, `username`, and
+/// `password`, are valid pointers to their respective types, and that `options`
+/// is either NULL or points to `options_len` valid `AuthOption` values.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_enrollment(
+    client: *mut BrokerClientApplication,
+    username: *const c_char,
+    password: *const c_char,
+    options: *const AuthOption,
+    options_len: usize,
+    out: *mut *mut MFAAuthContinue,
+) -> *mut MSAL_ERROR {
+    // Ensure our out parameter is not NULL
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+    let client = unsafe { &mut *client };
+    let username = match wrap_c_char(username) {
+        Some(username) => username,
+        None => {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input username!".to_string(),
+            );
+        }
+    };
+    let password = match wrap_c_char(password) {
+        Some(password) => password,
+        None => {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input password!".to_string(),
+            );
+        }
+    };
+    let options: &[AuthOption] = if options.is_null() || options_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(options, options_len) }
+    };
     // Call with None for scopes to maintain backward compatibility
     #[cfg(not(feature = "mfa_method_selection"))]
     let flow = match run_async!(
@@ -1104,7 +1222,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
         &username,
         Some(&password),
-        &[],
+        options,
         None,
     ) {
         Ok(resp) => resp,
@@ -1116,7 +1234,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
         &username,
         Some(&password),
-        &[],
+        options,
         None,
         None, // No specific MFA method
     ) {
