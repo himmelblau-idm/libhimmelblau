@@ -487,6 +487,7 @@ pub struct PyAuthInit {
 #[pymethods]
 impl PyAuthInit {
     pub fn exists(&self) -> bool {
+        #[allow(deprecated)]
         self.auth_init.exists()
     }
 }

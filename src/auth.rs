@@ -462,12 +462,12 @@ struct CredType {
     #[serde(rename = "ThrottleStatus")]
     throttle_status: u8,
     #[serde(rename = "IfExistsResult")]
-    if_exists_result: u8,
+    if_exists_result: i32,
 }
 
 impl CredType {
     /// Whether the user exists in the directory
-    pub fn account_exists(&self) -> bool {
+    pub fn account_exists(&self) -> Result<bool, MsalError> {
         /* `ifExistsResult` meanings:
            — 0: the account exists and uses that domain for authentication (i.e., “normal” cloud account)
            — 1: the account does not exist
@@ -476,7 +476,21 @@ impl CredType {
            — 5: the account exists, but is set up to authenticate with a different identity provider (e.g. personal Microsoft account / consumer account / “other IdP”)
            — 6: the account exists, and is set up to support both the domain and a different ID provider (i.e. dual mode)
         */
-        self.if_exists_result == 0 || self.if_exists_result == 5 || self.if_exists_result == 6
+        match self.if_exists_result {
+            0 | 5 | 6 => Ok(true),
+            1 => Ok(false),
+            // TenantThrottlingError
+            2 => Err(MsalError::AADSTSError(AADSTSError::new(90055, None))),
+            // ExternalServerRetryableError
+            -1 | 4 => Err(MsalError::AADSTSError(AADSTSError::new(90006, None))),
+            other => {
+                warn!(
+                    "GetCredentialType returned unknown IfExistsResult={other}, ThrottleStatus={}",
+                    self.throttle_status
+                );
+                Ok(true)
+            }
+        }
     }
 
     pub fn is_personal_account(&self) -> bool {
@@ -1808,7 +1822,27 @@ pub struct AuthInit {
 
 impl AuthInit {
     /// Whether the user exists in the directory
+    ///
+    /// Legacy/best-effort API. If the GetCredentialType response indicates a
+    /// transient lookup failure, log it and preserve the historical 'error
+    /// indicates non-existence' behavior.
+    #[deprecated(
+        since = "0.8.25",
+        note = "use AuthInit::try_exists() to distinguish nonexistent accounts from transient Entra ID lookup failures"
+    )]
     pub fn exists(&self) -> bool {
+        match self.cred_type.account_exists() {
+            Ok(exists) => exists,
+            Err(err) => {
+                warn!("Unable to determine account existence from GetCredentialType: {err:?}");
+                false
+            }
+        }
+    }
+
+    /// Checked account-existence result for callers that need to distinguish
+    /// nonexistent users from transient Entra ID lookup failures.
+    pub fn try_exists(&self) -> Result<bool, MsalError> {
         self.cred_type.account_exists()
     }
 
@@ -3129,14 +3163,13 @@ impl PublicClientApplication {
             dag_fallback!();
         }
         if cred_type.throttle_status == 1 {
-            return Err(MsalError::GeneralFailure(
-                "Authentication throttled. Wait a minute and try again.".to_string(),
-            ));
+            // TenantThrottlingError
+            return Err(MsalError::AADSTSError(AADSTSError::new(90055, None)));
         }
         if cred_type.is_personal_account() {
             dag_personal_fallback!();
         }
-        if !cred_type.account_exists() {
+        if !cred_type.account_exists()? {
             return Err(MsalError::GeneralFailure(
                 "An account with that name does not exist.".to_string(),
             ));
