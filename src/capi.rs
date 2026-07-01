@@ -1039,6 +1039,7 @@ pub unsafe extern "C" fn broker_check_user_exists(
         Ok(resp) => resp,
         Err(e) => return e,
     };
+    #[allow(deprecated)]
     unsafe {
         *out = resp.exists();
     }
