@@ -4134,11 +4134,13 @@ impl PublicClientApplication {
             ("canary", &flow.canary),
             ("flowToken", &flow.flow_token),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
+        // Percent-encode the values: the assertion is a JSON string and the
+        // canary/flowToken values are base64, so they contain characters
+        // ('=', '+', '{', '"', ...) that corrupt a naively joined
+        // application/x-www-form-urlencoded body.
+        let payload = serde_urlencoded::to_string(params).map_err(|e| {
+            MsalError::GeneralFailure(format!("Failed to encode FIDO assertion payload: {}", e))
+        })?;
 
         let mut resp = self
             .client()
