@@ -1063,9 +1063,11 @@ pub unsafe extern "C" fn broker_check_user_exists(
 /// * `password` - The password.
 ///
 /// * `options` - An array of `AuthOption` values controlling the flow. May be
-///   NULL when `options_len` is 0. Pass `NoDAGFallback` to return an error
-///   instead of silently falling back to the Device Authorization Grant when
-///   the native password+MFA challenge cannot be set up.
+///   NULL when `options_len` is 0. Pass `Passwordless` to request primary-factor
+///   passwordless authentication; the `Passwordless*` transport options do not
+///   imply it. Pass `NoDAGFallback` to return an error instead of silently
+///   falling back to the Device Authorization Grant when the native
+///   password+MFA challenge cannot be set up.
 ///
 /// * `options_len` - The number of entries in `options`.
 ///
@@ -1074,9 +1076,10 @@ pub unsafe extern "C" fn broker_check_user_exists(
 ///
 /// # Safety
 ///
-/// The calling function should ensure that `client`, `username`, and
-/// `password`, are valid pointers to their respective types, and that `options`
-/// is either NULL or points to `options_len` valid `AuthOption` values.
+/// The calling function should ensure that `client` and `username` are valid
+/// pointers to their respective types, that `password` is either NULL or a
+/// valid pointer, and that `options` is either NULL or points to `options_len`
+/// valid `AuthOption` values.
 #[cfg(feature = "broker")]
 #[no_mangle]
 pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
@@ -1104,15 +1107,22 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
             );
         }
     };
-    let password = match wrap_c_char(password) {
-        Some(password) => password,
-        None => {
-            return make_error(
-                MSAL_ERROR_CODE::INVALID_POINTER,
-                "Invalid input password!".to_string(),
-            );
-        }
-    };
+    // Passwordless authentication is selected with AuthOption::Passwordless in
+    // `options`: libhimmelblau then negotiates a passwordless method
+    // (Authenticator number-matching, TAP, FIDO, ...) from the user's
+    // credential type. The password is orthogonal to that choice - pass NULL
+    // when there is no password to submit (the usual passwordless case) and a
+    // non-NULL pointer for the classic password + MFA flow. A non-NULL
+    // password that is not valid UTF-8 stays an error rather than being
+    // silently treated as "no password".
+    let password_is_null = password.is_null();
+    let password = wrap_c_char(password);
+    if password.is_none() && !password_is_null {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input password!".to_string(),
+        );
+    }
     let options: &[AuthOption] = if options.is_null() || options_len == 0 {
         &[]
     } else {
@@ -1123,7 +1133,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
         client,
         initiate_acquire_token_by_mfa_flow,
         &username,
-        Some(&password),
+        password.as_deref(),
         options,
         None,
     ) {
@@ -1135,7 +1145,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
         client,
         initiate_acquire_token_by_mfa_flow,
         &username,
-        Some(&password),
+        password.as_deref(),
         options,
         None,
         None, // No specific MFA method
@@ -1409,6 +1419,153 @@ pub unsafe extern "C" fn mfa_auth_continue_max_poll_attempts(flow: *mut MFAAuthC
     match flow.max_poll_attempts {
         Some(max_poll_attempts) => max_poll_attempts as c_int,
         None => -1,
+    }
+}
+
+/// Get the FIDO challenge from a MFAAuthContinue flow
+///
+/// The challenge is only present when Entra ID negotiated a FIDO/security-key
+/// method (e.g. `FidoKey`). When no FIDO challenge is available, `out` is set
+/// to NULL and no error is returned, so callers can distinguish "not a FIDO
+/// flow" from an actual failure.
+///
+/// The consumer is expected to perform the WebAuthn assertion with this
+/// challenge and the allow list from `mfa_auth_continue_fido_allow_list`, and
+/// pass the resulting assertion JSON as the `auth_data` argument of
+/// `broker_acquire_token_by_mfa_flow`.
+///
+/// # Safety
+///
+/// The calling function should ensure that `flow` is a valid MFAAuthContinue
+/// pointer, and that `out` is a valid double c_char pointer. A non-NULL
+/// result must be freed with `string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_fido_challenge(
+    flow: *mut MFAAuthContinue,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if flow.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    let flow = unsafe { &mut *flow };
+    match &flow.fido_challenge {
+        Some(challenge) => {
+            let c_str = wrap_string(challenge);
+            if c_str.is_null() {
+                return make_error(
+                    MSAL_ERROR_CODE::NO_MEMORY,
+                    "Failed to allocate string".to_string(),
+                );
+            }
+            unsafe {
+                *out = c_str;
+            }
+        }
+        None => unsafe {
+            *out = std::ptr::null_mut();
+        },
+    }
+    no_error()
+}
+
+/// Get the FIDO credential allow list from a MFAAuthContinue flow
+///
+/// Returns an array of C strings containing the allowed credential IDs, as
+/// provided by Entra ID. When no allow list is available, `out_list` is set
+/// to NULL and `out_count` to 0 without an error, so callers can distinguish
+/// "not a FIDO flow" from an actual failure.
+///
+/// The caller is responsible for freeing the returned array and strings via
+/// `mfa_auth_continue_free_fido_allow_list`.
+///
+/// # Safety
+///
+/// The calling function should ensure that `flow` is a valid MFAAuthContinue
+/// pointer, and that `out_list` and `out_count` are valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_fido_allow_list(
+    flow: *mut MFAAuthContinue,
+    out_list: *mut *mut *mut c_char,
+    out_count: *mut c_int,
+) -> *mut MSAL_ERROR {
+    if flow.is_null() || out_list.is_null() || out_count.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+
+    let flow = unsafe { &mut *flow };
+    let allow_list = match &flow.fido_allow_list {
+        Some(allow_list) if !allow_list.is_empty() => allow_list,
+        _ => {
+            unsafe {
+                *out_list = std::ptr::null_mut();
+                *out_count = 0;
+            }
+            return no_error();
+        }
+    };
+
+    let mut c_strings: Vec<*mut c_char> = Vec::with_capacity(allow_list.len());
+    for cred_id in allow_list.iter() {
+        let c_str = wrap_string(cred_id);
+        if c_str.is_null() {
+            for prev_str in c_strings {
+                if !prev_str.is_null() {
+                    unsafe {
+                        let _ = CString::from_raw(prev_str);
+                    }
+                }
+            }
+            return make_error(
+                MSAL_ERROR_CODE::NO_MEMORY,
+                "Failed to convert allow list entry".to_string(),
+            );
+        }
+        c_strings.push(c_str);
+    }
+
+    let count = c_strings.len();
+    let boxed_slice = c_strings.into_boxed_slice();
+    let raw_ptr: *mut [*mut c_char] = Box::into_raw(boxed_slice);
+
+    unsafe {
+        *out_list = raw_ptr as *mut *mut c_char;
+        *out_count = count as c_int;
+    }
+
+    no_error()
+}
+
+/// Free an allow list returned by `mfa_auth_continue_fido_allow_list`
+///
+/// # Safety
+///
+/// The calling function should ensure that `list` was returned by
+/// `mfa_auth_continue_fido_allow_list` and that `count` matches the count
+/// returned alongside it.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_free_fido_allow_list(
+    list: *mut *mut c_char,
+    count: c_int,
+) {
+    if list.is_null() || count <= 0 {
+        return;
+    }
+
+    let slice = unsafe { std::slice::from_raw_parts_mut(list, count as usize) };
+    let boxed_slice = unsafe { Box::from_raw(slice) };
+
+    for str_ptr in boxed_slice.iter() {
+        if !str_ptr.is_null() {
+            unsafe {
+                let _ = CString::from_raw(*str_ptr);
+            }
+        }
     }
 }
 
@@ -3524,6 +3681,51 @@ mod tests {
     }
 }
 
+#[cfg(all(test, feature = "broker"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod broker_mfa_input_tests {
+    use super::*;
+
+    #[test]
+    fn broker_mfa_flow_rejects_non_utf8_password() {
+        let mut client = BrokerClientApplication::new(
+            None,
+            None,
+            None,
+            None,
+            #[cfg(feature = "set_timeout")]
+            std::time::Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4, IpVersion::V6],
+        )
+        .unwrap();
+
+        let username = CString::new("user@example.com").unwrap();
+        let invalid_password = [0xff_u8, 0];
+        let mut flow: *mut MFAAuthContinue = std::ptr::null_mut();
+        let err = unsafe {
+            broker_initiate_acquire_token_by_mfa_flow(
+                &mut client,
+                username.as_ptr(),
+                invalid_password.as_ptr().cast(),
+                std::ptr::null(),
+                0,
+                &mut flow,
+            )
+        };
+
+        assert!(!err.is_null());
+        assert!(matches!(
+            unsafe { (*err).code },
+            MSAL_ERROR_CODE::INVALID_POINTER
+        ));
+        assert!(flow.is_null());
+        unsafe {
+            error_free(err);
+        }
+    }
+}
+
 #[cfg(all(test, feature = "broker", feature = "set_timeout"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod broker_init_tests {
@@ -3585,5 +3787,88 @@ mod broker_init_tests {
         assert!(err.is_null());
         assert!(!out.is_null());
         unsafe { broker_free(out) };
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod mfa_fido_accessor_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    fn fido_flow() -> MFAAuthContinue {
+        MFAAuthContinue {
+            fido_challenge: Some("test-challenge".to_string()),
+            fido_allow_list: Some(vec!["credA".to_string(), "credB".to_string()]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fido_challenge_returns_value_when_present() {
+        let mut flow = fido_flow();
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let err = unsafe { mfa_auth_continue_fido_challenge(&mut flow, &mut out) };
+        assert!(err.is_null());
+        assert!(!out.is_null());
+        let challenge = unsafe { CStr::from_ptr(out) }.to_str().unwrap();
+        assert_eq!(challenge, "test-challenge");
+        unsafe { string_free(out) };
+    }
+
+    #[test]
+    fn fido_challenge_returns_null_without_error_when_absent() {
+        let mut flow = MFAAuthContinue::default();
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let err = unsafe { mfa_auth_continue_fido_challenge(&mut flow, &mut out) };
+        assert!(err.is_null());
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn fido_challenge_rejects_invalid_pointers() {
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let err = unsafe { mfa_auth_continue_fido_challenge(std::ptr::null_mut(), &mut out) };
+        assert!(!err.is_null());
+        assert!(matches!(
+            unsafe { (*err).code },
+            MSAL_ERROR_CODE::INVALID_POINTER
+        ));
+        unsafe { error_free(err) };
+
+        let mut flow = fido_flow();
+        let err = unsafe { mfa_auth_continue_fido_challenge(&mut flow, std::ptr::null_mut()) };
+        assert!(!err.is_null());
+        unsafe { error_free(err) };
+    }
+
+    #[test]
+    fn fido_allow_list_returns_entries_when_present() {
+        let mut flow = fido_flow();
+        let mut out: *mut *mut c_char = std::ptr::null_mut();
+        let mut count: c_int = -1;
+        let err = unsafe { mfa_auth_continue_fido_allow_list(&mut flow, &mut out, &mut count) };
+        assert!(err.is_null());
+        assert_eq!(count, 2);
+        assert!(!out.is_null());
+        let entries = unsafe { std::slice::from_raw_parts(out, count as usize) };
+        let first = unsafe { CStr::from_ptr(entries[0]) }.to_str().unwrap();
+        let second = unsafe { CStr::from_ptr(entries[1]) }.to_str().unwrap();
+        assert_eq!(first, "credA");
+        assert_eq!(second, "credB");
+        unsafe { mfa_auth_continue_free_fido_allow_list(out, count) };
+    }
+
+    #[test]
+    fn fido_allow_list_returns_empty_without_error_when_absent() {
+        let mut flow = MFAAuthContinue::default();
+        let mut out: *mut *mut c_char = std::ptr::null_mut();
+        let mut count: c_int = -1;
+        let err = unsafe { mfa_auth_continue_fido_allow_list(&mut flow, &mut out, &mut count) };
+        assert!(err.is_null());
+        assert_eq!(count, 0);
+        assert!(out.is_null());
+        // Freeing the empty result must be a no-op.
+        unsafe { mfa_auth_continue_free_fido_allow_list(out, count) };
     }
 }

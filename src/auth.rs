@@ -1461,15 +1461,24 @@ impl SessionKey {
 ///
 /// Attempts whenever any FIDO method is registered for the user
 /// (FidoParams present in GetCredentialType). The actual key matching
-/// happens via the allow list at the WebAuthn level.
+/// happens via the allow list at the WebAuthn level. Gated on
+/// AuthOption::Fido (so the broker can advertise FIDO capability only
+/// when a security key is reachable) and AuthOption::Passwordless (so FIDO is
+/// only tried as a primary factor when the caller asked for passwordless, never
+/// ahead of validating a submitted password).
 pub(crate) fn should_attempt_passwordless_security_key(
     options: &[AuthOption],
     has_fido_params: bool,
 ) -> bool {
-    let enabled = options.contains(&AuthOption::PasswordlessSecurityKey)
-        || options.contains(&AuthOption::PasswordlessFido);
-    if !enabled {
-        debug!("passwordless_security_key: skipped (not enabled in config)");
+    if !options.contains(&AuthOption::Passwordless) {
+        debug!("passwordless_security_key: skipped (not a passwordless request)");
+        return false;
+    }
+    let can_handle_fido = options.contains(&AuthOption::Fido)
+        || options.contains(&AuthOption::PasswordlessFido)
+        || options.contains(&AuthOption::PasswordlessSecurityKey);
+    if !can_handle_fido {
+        debug!("passwordless_security_key: skipped (caller did not advertise FIDO support)");
         return false;
     }
     if !has_fido_params {
@@ -1485,13 +1494,18 @@ pub(crate) fn should_attempt_passwordless_security_key(
 ///
 /// Uses `has_cross_device_capable_passkey` from GetCredentialType to
 /// determine if the user has a cross-device passkey. No Graph permission
-/// required. Bluetooth hardware availability is checked at runtime in the
-/// PAM layer, not here.
+/// required. Also gated on AuthOption::Passwordless so this never runs
+/// before validating a submitted password. Bluetooth hardware
+/// availability is checked at runtime in the PAM layer, not here.
 pub(crate) fn should_attempt_passwordless_qr_bluetooth(
     options: &[AuthOption],
     has_fido_params: bool,
     user_has_any_cross_device_fido: bool,
 ) -> bool {
+    if !options.contains(&AuthOption::Passwordless) {
+        debug!("passwordless_qr_bluetooth: skipped (not a passwordless request)");
+        return false;
+    }
     if !options.contains(&AuthOption::PasswordlessQrBluetooth) {
         debug!("passwordless_qr_bluetooth: skipped (not enabled in config)");
         return false;
@@ -1509,13 +1523,24 @@ pub(crate) fn should_attempt_passwordless_qr_bluetooth(
 }
 
 #[repr(C)]
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum AuthOption {
+    /// Advertises that the caller can complete a local FIDO assertion.
     Fido,
+    /// Explicitly requests primary-factor passwordless authentication.
+    ///
+    /// This is the sole passwordless intent switch. The `Passwordless*`
+    /// options below only select supported passwordless transports and do not
+    /// imply this option, because callers may also advertise those capabilities
+    /// while submitting a password for password + MFA authentication.
     Passwordless,
+    /// Legacy FIDO capability selector; requires `Passwordless` to be effective.
     PasswordlessFido,
+    /// Enables physical security-key authentication when `Passwordless` is set.
     PasswordlessSecurityKey,
+    /// Enables QR/Bluetooth authentication when `Passwordless` is set.
     PasswordlessQrBluetooth,
+    /// Prevents fallback to the Device Authorization Grant.
     NoDAGFallback,
     /// Demand ngcmfa in the amr_values, which forces MFA authentication.
     /// This should be used for remote connections (SSH) where we want to ensure
@@ -2351,7 +2376,7 @@ impl PublicClientApplication {
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
-                format!("{}/{}", &authority[..index], &url_async_sspr_begin)
+                format!("{}/{}", &authority[..index], url_async_sspr_begin)
             }
             false => url_async_sspr_begin.clone(),
         };
@@ -2383,7 +2408,7 @@ impl PublicClientApplication {
                     let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                         "Failed to splice auth config url".to_string(),
                     ))?;
-                    format!("{}/{}", &authority[..index], &url_async_sspr_poll)
+                    format!("{}/{}", &authority[..index], url_async_sspr_poll)
                 }
                 false => url_async_sspr_poll.clone(),
             };
@@ -2429,7 +2454,7 @@ impl PublicClientApplication {
                     let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                         "Failed to splice auth config url".to_string(),
                     ))?;
-                    format!("{}/{}", &authority[..index], &url_post)
+                    format!("{}/{}", &authority[..index], url_post)
                 }
                 false => url_post.clone(),
             };
@@ -2607,7 +2632,7 @@ impl PublicClientApplication {
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
-                format!("{}/{}", &authority[..index], &url_post)
+                format!("{}/{}", &authority[..index], url_post)
             }
             false => url_post.clone(),
         };
@@ -2759,6 +2784,14 @@ impl PublicClientApplication {
     ) -> Result<MFAAuthContinue, MsalError> {
         #[cfg(not(feature = "mfa_method_selection"))]
         let mfa_method: Option<&str> = None;
+
+        // AuthOption::Passwordless is the single switch that gates every
+        // passwordless factor attempt (TAP, remote-NGC, security key,
+        // QR/Bluetooth). The password argument is orthogonal: it carries the
+        // secret to validate (or none), while this option carries the intent to
+        // attempt passwordless methods, so a caller must set it explicitly
+        // rather than have it inferred from a NULL password.
+        let passwordless = options.contains(&AuthOption::Passwordless);
 
         #[cfg(feature = "optional_mfa")]
         let force_mfa = options.contains(&AuthOption::ForceMFA);
@@ -2922,7 +2955,9 @@ impl PublicClientApplication {
 
         macro_rules! passwordless_tap {
             () => {
-                if cred_type.credentials.has_access_pass.unwrap_or(false) {
+                if !passwordless {
+                    debug!("passwordless_tap: skipped (not a passwordless request)");
+                } else if cred_type.credentials.has_access_pass.unwrap_or(false) {
                     debug!("passwordless_tap: attempting (has_access_pass=true)");
                     let msg = "Enter Temporary Access Pass: ".to_string();
                     let url_post = match &auth_config.url_post {
@@ -2980,7 +3015,9 @@ impl PublicClientApplication {
         let mut remote_ngc_push_attempted = false;
         macro_rules! passwordless_remote_ngc {
             () => {
-                if !passwordless_remote_ngc_called {
+                if !passwordless {
+                    debug!("passwordless_remote_ngc: skipped (not a passwordless request)");
+                } else if !passwordless_remote_ngc_called {
                     passwordless_remote_ngc_called = true;
                     if let Some(ref remote_ngc_params) = cred_type.credentials.remote_ngc_params {
                         debug!("passwordless_remote_ngc: attempting (remote_ngc_params present)");
@@ -3581,6 +3618,7 @@ impl PublicClientApplication {
             "isRemoteNGCSupported": options.contains(&AuthOption::Passwordless),
             "isCookieBannerShown": false,
             "isFidoSupported": options.contains(&AuthOption::Fido),
+            "isAccessPassSupported": options.contains(&AuthOption::Passwordless),
             "originalRequest": &auth_config.sctx,
             "flowToken": &auth_config.sft,
         });
@@ -3930,7 +3968,7 @@ impl PublicClientApplication {
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
-                format!("{}/{}", &authority[..index], &flow.url_post)
+                format!("{}/{}", &authority[..index], flow.url_post)
             }
             false => flow.url_post.clone(),
         };
@@ -4134,11 +4172,13 @@ impl PublicClientApplication {
             ("canary", &flow.canary),
             ("flowToken", &flow.flow_token),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
+        // Percent-encode the values: the assertion is a JSON string and the
+        // canary/flowToken values are base64, so they contain characters
+        // ('=', '+', '{', '"', ...) that corrupt a naively joined
+        // application/x-www-form-urlencoded body.
+        let payload = serde_urlencoded::to_string(params).map_err(|e| {
+            MsalError::GeneralFailure(format!("Failed to encode FIDO assertion payload: {}", e))
+        })?;
 
         let mut resp = self
             .client()
@@ -7797,8 +7837,8 @@ mod tests {
     // Expected: security key flow should NOT be attempted.
     // Legacy flag enables security key when FIDO params present
     #[test]
-    fn passwordless_fido_skipped_when_cross_device_passkey_and_sms_preferred() {
-        let options = vec![AuthOption::PasswordlessFido, AuthOption::Fido];
+    fn passwordless_fido_attempted_when_cross_device_passkey_and_sms_preferred() {
+        let options = vec![AuthOption::Passwordless, AuthOption::Fido];
 
         let result = should_attempt_passwordless_security_key(
             &options, true, // has_fido_params
@@ -7812,7 +7852,10 @@ mod tests {
 
     #[test]
     fn security_key_skipped_when_no_fido_params() {
-        let options = vec![AuthOption::PasswordlessSecurityKey];
+        let options = vec![
+            AuthOption::Passwordless,
+            AuthOption::PasswordlessSecurityKey,
+        ];
         let result = should_attempt_passwordless_security_key(&options, false);
         assert!(
             !result,
@@ -7821,18 +7864,54 @@ mod tests {
     }
 
     #[test]
-    fn security_key_skipped_when_not_enabled() {
+    fn security_key_attempted_when_passwordless_probe_and_fido_supported() {
+        let options = vec![AuthOption::Passwordless, AuthOption::Fido];
+        let result = should_attempt_passwordless_security_key(&options, true);
+        assert!(
+            result,
+            "Should attempt security key when FIDO params exist during a passwordless probe and caller advertises FIDO support"
+        );
+    }
+
+    #[test]
+    fn security_key_attempted_for_legacy_passwordless_security_key_probe() {
+        let options = vec![
+            AuthOption::Passwordless,
+            AuthOption::PasswordlessSecurityKey,
+        ];
+        let result = should_attempt_passwordless_security_key(&options, true);
+        assert!(
+            result,
+            "Legacy PasswordlessSecurityKey should still enable security-key passwordless during a passwordless probe"
+        );
+    }
+
+    #[test]
+    fn security_key_skipped_when_password_was_submitted() {
         let options = vec![AuthOption::Fido];
         let result = should_attempt_passwordless_security_key(&options, true);
         assert!(
             !result,
-            "Should not attempt security key when not enabled in config"
+            "Should not attempt passwordless security key before validating a submitted password"
+        );
+    }
+
+    #[test]
+    fn security_key_skipped_when_fido_not_supported() {
+        let options = vec![AuthOption::Passwordless];
+        let result = should_attempt_passwordless_security_key(&options, true);
+        assert!(
+            !result,
+            "Should not attempt security key when caller cannot perform FIDO assertions"
         );
     }
 
     #[test]
     fn qr_bluetooth_attempted_when_cross_device_passkey() {
-        let options = vec![AuthOption::PasswordlessQrBluetooth];
+        let options = vec![
+            AuthOption::Passwordless,
+            AuthOption::PasswordlessQrBluetooth,
+        ];
         let result = should_attempt_passwordless_qr_bluetooth(&options, true, true);
         assert!(
             result,
@@ -7842,7 +7921,10 @@ mod tests {
 
     #[test]
     fn qr_bluetooth_skipped_when_no_cross_device_passkey() {
-        let options = vec![AuthOption::PasswordlessQrBluetooth];
+        let options = vec![
+            AuthOption::Passwordless,
+            AuthOption::PasswordlessQrBluetooth,
+        ];
         let result = should_attempt_passwordless_qr_bluetooth(&options, true, false);
         assert!(
             !result,
@@ -7851,8 +7933,18 @@ mod tests {
     }
 
     #[test]
+    fn qr_bluetooth_skipped_when_password_was_submitted() {
+        let options = vec![AuthOption::PasswordlessQrBluetooth];
+        let result = should_attempt_passwordless_qr_bluetooth(&options, true, true);
+        assert!(
+            !result,
+            "Should not attempt QR/Bluetooth before validating a submitted password"
+        );
+    }
+
+    #[test]
     fn qr_bluetooth_skipped_when_not_enabled() {
-        let options = vec![AuthOption::PasswordlessFido];
+        let options = vec![AuthOption::Passwordless, AuthOption::PasswordlessFido];
         let result = should_attempt_passwordless_qr_bluetooth(&options, true, true);
         assert!(
             !result,
@@ -7863,6 +7955,8 @@ mod tests {
     #[test]
     fn both_flows_when_fido_params_and_cross_device() {
         let options = vec![
+            AuthOption::Passwordless,
+            AuthOption::Fido,
             AuthOption::PasswordlessSecurityKey,
             AuthOption::PasswordlessQrBluetooth,
         ];
