@@ -2376,7 +2376,7 @@ impl PublicClientApplication {
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
-                format!("{}/{}", &authority[..index], &url_async_sspr_begin)
+                format!("{}/{}", &authority[..index], url_async_sspr_begin)
             }
             false => url_async_sspr_begin.clone(),
         };
@@ -2408,7 +2408,7 @@ impl PublicClientApplication {
                     let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                         "Failed to splice auth config url".to_string(),
                     ))?;
-                    format!("{}/{}", &authority[..index], &url_async_sspr_poll)
+                    format!("{}/{}", &authority[..index], url_async_sspr_poll)
                 }
                 false => url_async_sspr_poll.clone(),
             };
@@ -2454,7 +2454,7 @@ impl PublicClientApplication {
                     let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                         "Failed to splice auth config url".to_string(),
                     ))?;
-                    format!("{}/{}", &authority[..index], &url_post)
+                    format!("{}/{}", &authority[..index], url_post)
                 }
                 false => url_post.clone(),
             };
@@ -2632,7 +2632,7 @@ impl PublicClientApplication {
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
-                format!("{}/{}", &authority[..index], &url_post)
+                format!("{}/{}", &authority[..index], url_post)
             }
             false => url_post.clone(),
         };
@@ -3968,7 +3968,7 @@ impl PublicClientApplication {
                 let index = authority.rfind('/').ok_or(MsalError::GeneralFailure(
                     "Failed to splice auth config url".to_string(),
                 ))?;
-                format!("{}/{}", &authority[..index], &flow.url_post)
+                format!("{}/{}", &authority[..index], flow.url_post)
             }
             false => flow.url_post.clone(),
         };

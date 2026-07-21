@@ -650,7 +650,7 @@ impl IntuneForLinux {
         let enrollment_url = Url::parse_with_params(
             &format!(
                 "{}/enroll",
-                &self.service_endpoints.get("LinuxEnrollmentService")?
+                self.service_endpoints.get("LinuxEnrollmentService")?
             ),
             &[
                 ("api-version", "1.0".to_string()),
@@ -756,7 +756,7 @@ impl IntuneForLinux {
         let checkin_url = Url::parse_with_params(
             &format!(
                 "{}/details",
-                &self.service_endpoints.get("LinuxDeviceCheckinService")?
+                self.service_endpoints.get("LinuxDeviceCheckinService")?
             ),
             &[
                 ("api-version", "1.0".to_string()),
@@ -804,7 +804,7 @@ impl IntuneForLinux {
         let status_url = Url::parse_with_params(
             &format!(
                 "{}/status",
-                &self.service_endpoints.get("LinuxDeviceCheckinService")?
+                self.service_endpoints.get("LinuxDeviceCheckinService")?
             ),
             &[
                 ("api-version", "1.0".to_string()),
@@ -849,7 +849,7 @@ impl IntuneForLinux {
         let url = Url::parse_with_params(
             &format!(
                 "{}/policies/{}",
-                &self.service_endpoints.get("LinuxDeviceCheckinService")?,
+                self.service_endpoints.get("LinuxDeviceCheckinService")?,
                 intune_device_id,
             ),
             &[
@@ -893,7 +893,7 @@ impl IntuneForLinux {
         let url = Url::parse_with_params(
             &format!(
                 "{}/Devices(guid'{}')",
-                &self.service_endpoints.get("IWService")?,
+                self.service_endpoints.get("IWService")?,
                 intune_device_id,
             ),
             &[
