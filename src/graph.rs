@@ -120,6 +120,8 @@ pub struct UserObject {
     pub displayname: String,
     #[serde(rename = "userPrincipalName")]
     pub upn: String,
+    #[serde(rename = "onPremisesSamAccountName")]
+    pub on_premises_sam_account_name: Option<String>,
     pub id: String,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
