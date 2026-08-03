@@ -8,7 +8,8 @@ use crate::error::MsalError;
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
     AuthInit, AuthOption, BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs,
-    MFAAuthContinue, MfaMethodInfo, PublicClientApplication, UserToken,
+    MFAAuthContinue, MfaMethodInfo, P2PCertificate, P2PPrivateKey, PublicClientApplication,
+    UserToken,
 };
 
 use kanidm_hsm_crypto::provider::{BoxedDynTpm, SoftTpm};
@@ -326,6 +327,83 @@ pub struct PySealedData {
     data: SealedData,
 }
 serialize_impl!(SealedData, data);
+
+#[pyclass(name = "P2PCertificate", module = "himmelblau", subclass)]
+pub struct PyP2PCertificate {
+    cert: P2PCertificate,
+}
+
+#[pymethods]
+impl PyP2PCertificate {
+    #[getter]
+    fn certificate_der(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| Ok(PyBytes::new(py, &self.cert.certificate_der).into()))
+    }
+
+    #[getter]
+    fn ca_certificate_der(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| Ok(PyBytes::new(py, &self.cert.ca_certificate_der).into()))
+    }
+
+    /// The PEM encoded issuing CA certificate, or None when the CA material
+    /// returned by Entra could not be parsed as a certificate.
+    #[getter]
+    fn ca_certificate_pem(&self) -> PyResult<Option<String>> {
+        Ok(self.cert.ca_certificate_pem.clone())
+    }
+
+    #[getter]
+    fn subject(&self) -> PyResult<String> {
+        Ok(self.cert.subject.clone())
+    }
+
+    #[getter]
+    fn issuer(&self) -> PyResult<String> {
+        Ok(self.cert.issuer.clone())
+    }
+
+    #[getter]
+    fn thumbprint_sha1(&self) -> PyResult<String> {
+        Ok(self.cert.thumbprint_sha1.clone())
+    }
+
+    #[getter]
+    fn dns_names(&self) -> PyResult<Vec<String>> {
+        Ok(self.cert.dns_names.clone())
+    }
+
+    /// The certificate expiry, in seconds since the unix epoch.
+    #[getter]
+    fn not_after(&self) -> PyResult<i64> {
+        Ok(self.cert.not_after_unix)
+    }
+
+    /// The device enrolment key a device P2P certificate is bound to.
+    #[getter]
+    fn device_private_key(&self) -> PyResult<PyLoadableMsDeviceEnrolmentKey> {
+        match &self.cert.private_key {
+            P2PPrivateKey::ExistingDevice(key) => {
+                Ok(PyLoadableMsDeviceEnrolmentKey { key: key.clone() })
+            }
+            P2PPrivateKey::GeneratedUser(_) => Err(general_py_err!(
+                "This certificate is not bound to a device enrolment key!"
+            )),
+        }
+    }
+
+    /// The generated key a user P2P certificate is bound to. This must be
+    /// persisted to be able to use the certificate, since it is generated per
+    /// request and held nowhere else.
+    #[getter]
+    fn user_private_key(&self) -> PyResult<PyLoadableMsOapxbcRsaKey> {
+        match &self.cert.private_key {
+            P2PPrivateKey::GeneratedUser(key) => Ok(PyLoadableMsOapxbcRsaKey { key: key.clone() }),
+            P2PPrivateKey::ExistingDevice(_) => Err(general_py_err!(
+                "This certificate is not bound to a generated user key!"
+            )),
+        }
+    }
+}
 
 // Kerberos support temporarily disabled
 // #[pyclass(name = "AsRep", module = "himmelblau", subclass)]
@@ -870,6 +948,54 @@ impl PyBrokerClientApplication {
         })
     }
 
+    /// Request a device P2P certificate using the enrolled device
+    /// certificate. `tenant_id` is only a fallback, used when the device
+    /// certificate carries no tenant OID. `dns_names` defaults to
+    /// `device_name`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn acquire_device_p2p_certificate(
+        &self,
+        tenant_id: &str,
+        device_name: &str,
+        dns_names: Option<Vec<String>>,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyStorageKey,
+    ) -> PyResult<PyP2PCertificate> {
+        let dns_names: Option<Vec<&str>> =
+            dns_names.as_ref().map(|dns_names| str_vec_ref!(dns_names));
+        Ok(PyP2PCertificate {
+            cert: run_async!(
+                self.client,
+                acquire_device_p2p_certificate,
+                tenant_id,
+                device_name,
+                dns_names.as_deref(),
+                &mut tpm.tpm,
+                &machine_key.key,
+            ),
+        })
+    }
+
+    /// Request a user P2P certificate using a sealed Primary Refresh Token.
+    /// The returned certificate is bound to a freshly generated key, which
+    /// must be persisted via its `user_private_key`.
+    pub fn acquire_user_p2p_certificate(
+        &self,
+        sealed_prt: &PySealedData,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyStorageKey,
+    ) -> PyResult<PyP2PCertificate> {
+        Ok(PyP2PCertificate {
+            cert: run_async!(
+                self.client,
+                acquire_user_p2p_certificate,
+                &sealed_prt.data,
+                &mut tpm.tpm,
+                &machine_key.key,
+            ),
+        })
+    }
+
     pub fn acquire_user_prt_by_refresh_token(
         &self,
         refresh_token: &str,
@@ -1280,6 +1406,8 @@ fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStorageKey>()?;
     m.add_class::<PyLoadableMsOapxbcRsaKey>()?;
     m.add_class::<PyLoadableMsHelloKey>()?;
+    m.add_class::<PyLoadableMsDeviceEnrolmentKey>()?;
+    m.add_class::<PyP2PCertificate>()?;
     m.add_class::<PyEnrollAttrs>()?;
     m.add_class::<PyDeviceAuthorizationResponse>()?;
     m.add_class::<PyMfaMethodInfo>()?;
