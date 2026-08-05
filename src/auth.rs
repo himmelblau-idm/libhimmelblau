@@ -6023,7 +6023,7 @@ impl BrokerClientApplication {
                 let key = entry.object().nid().short_name().unwrap_or("OID");
                 let value = entry
                     .data()
-                    .as_utf8()
+                    .to_string()
                     .map(|value| value.to_string())
                     .unwrap_or_else(|_| "<non-utf8>".to_string());
                 format!("{}={}", key, value)
