@@ -20,7 +20,15 @@ use crate::aadsts_err_gen::AADSTSError;
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+#[cfg(feature = "broker")]
+use crypto_glue::traits::SpkiEncodePublicKey;
+#[cfg(feature = "broker")]
+use crypto_glue::x509::oiddb::rfc5912;
 use crypto_glue::x509::Certificate;
+#[cfg(feature = "broker")]
+use der::asn1::{BitString, OctetString, SetOfVec};
+#[cfg(feature = "broker")]
+use der::{Decode, Encode, Sequence};
 use kanidm_hsm_crypto::structures::RS256Key;
 use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
@@ -43,6 +51,12 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use urlencoding::encode as url_encode;
 use uuid::Uuid;
+#[cfg(feature = "broker")]
+use x509_cert::attr::Attribute;
+#[cfg(feature = "broker")]
+use x509_cert::name::Name;
+#[cfg(feature = "broker")]
+use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "broker")]
@@ -56,21 +70,26 @@ use compact_jwt::{
 
 #[cfg(feature = "broker")]
 use kanidm_hsm_crypto::{
-    glue::traits::EncodeDer,
-    provider::{BoxedDynTpm, Tpm, TpmMsExtensions},
+    provider::{BoxedDynTpm, Tpm, TpmMsExtensions, TpmRS256},
     structures::{
-        LoadableMsDeviceEnrolmentKey, LoadableMsHelloKey, LoadableMsOapxbcRsaKey, MsOapxbcRsaKey,
-        SealedData, StorageKey,
+        LoadableMsDeviceEnrolmentKey, LoadableMsHelloKey, LoadableMsOapxbcRsaKey, LoadableRS256Key,
+        MsOapxbcRsaKey, SealedData, StorageKey,
     },
     PinValue,
 };
 
 #[cfg(feature = "broker")]
+use openssl::asn1::{Asn1Time, Asn1TimeRef};
+#[cfg(feature = "broker")]
 use openssl::hash::{hash, MessageDigest};
 #[cfg(feature = "broker")]
-use openssl::pkey::Public;
+use openssl::pkey::{PKey, Public};
+#[cfg(feature = "broker")]
+use openssl::rand::rand_bytes;
 #[cfg(feature = "broker")]
 use openssl::rsa::Rsa;
+#[cfg(feature = "broker")]
+use openssl::sign::Signer;
 #[cfg(feature = "broker")]
 use openssl::x509::X509;
 #[cfg(feature = "broker")]
@@ -1153,6 +1172,115 @@ impl DeviceCredentialPayload {
             windows_api_version: Some("2.0.1".to_string()),
         })
     }
+}
+
+#[cfg(feature = "broker")]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
+struct P2PDeviceCertificatePayload {
+    client_id: String,
+    request_nonce: String,
+    win_ver: Option<String>,
+    grant_type: String,
+    cert_token_use: String,
+    csr_type: String,
+    csr: String,
+    netbios_name: String,
+    dns_names: Vec<String>,
+}
+
+#[cfg(feature = "broker")]
+impl P2PDeviceCertificatePayload {
+    fn new(nonce: &str, csr: &str, device_name: &str, dns_names: &[String]) -> Self {
+        let os_release = match OsRelease::new() {
+            Ok(os_release) => Some(format!(
+                "{} {}",
+                os_release.pretty_name, os_release.version_id
+            )),
+            Err(_) => None,
+        };
+        P2PDeviceCertificatePayload {
+            client_id: BROKER_CLIENT_IDENT.to_string(),
+            request_nonce: nonce.to_string(),
+            win_ver: os_release,
+            grant_type: "device_auth".to_string(),
+            cert_token_use: "device_cert".to_string(),
+            csr_type: "http://schemas.microsoft.com/windows/pki/2009/01/enrollment#PKCS10"
+                .to_string(),
+            csr: csr.to_string(),
+            netbios_name: device_name.to_string(),
+            dns_names: dns_names.to_vec(),
+        }
+    }
+}
+
+#[cfg(feature = "broker")]
+#[derive(Serialize)]
+struct P2PDeviceCertificateHeader<'a> {
+    alg: &'static str,
+    typ: &'static str,
+    /// The broker sends the device certificate as a single base64 string here,
+    /// not as the array of certificates specified by RFC 7515. Entra rejects
+    /// the request when the standard array form is used, so this must stay a
+    /// string.
+    x5c: &'a str,
+}
+
+#[cfg(feature = "broker")]
+#[derive(Serialize)]
+struct P2PUserCertificateHeader<'a> {
+    alg: &'static str,
+    typ: &'static str,
+    ctx: &'a str,
+}
+
+#[cfg(feature = "broker")]
+#[derive(Serialize, Clone, Default, Zeroize, ZeroizeOnDrop)]
+struct P2PUserCertificatePayload {
+    iss: String,
+    grant_type: String,
+    aud: String,
+    request_nonce: String,
+    scope: String,
+    refresh_token: String,
+    client_id: String,
+    cert_token_use: String,
+    csr_type: String,
+    csr: String,
+}
+
+#[cfg(feature = "broker")]
+impl P2PUserCertificatePayload {
+    fn new(prt: &PrimaryRefreshToken, nonce: &str, csr: &str) -> Self {
+        P2PUserCertificatePayload {
+            iss: "aad:brokerplugin".to_string(),
+            grant_type: "refresh_token".to_string(),
+            aud: "login.microsoftonline.com".to_string(),
+            request_nonce: nonce.to_string(),
+            scope: "openid aza ugs".to_string(),
+            refresh_token: prt.refresh_token.clone(),
+            client_id: BROKER_CLIENT_IDENT.to_string(),
+            cert_token_use: "user_cert".to_string(),
+            csr_type: "http://schemas.microsoft.com/windows/pki/2009/01/enrollment#PKCS10"
+                .to_string(),
+            csr: csr.to_string(),
+        }
+    }
+
+    /// Serialize the payload with the refresh token replaced, for logging.
+    fn redacted(&self) -> Result<Value, MsalError> {
+        let mut value = serde_json::to_value(self).map_err(|e| {
+            MsalError::InvalidJson(format!("Failed serializing P2P user payload: {}", e))
+        })?;
+        value["refresh_token"] = "**********".into();
+        Ok(value)
+    }
+}
+
+#[cfg(feature = "broker")]
+#[derive(Deserialize)]
+struct P2PCertificateResponse {
+    x5c: String,
+    x5c_ca: String,
 }
 
 #[cfg(feature = "broker")]
@@ -4721,6 +4849,65 @@ struct EnrollmentKeyWrapper {
     cert: Certificate,
 }
 
+/// The private key a P2P certificate is bound to.
+///
+/// The device certificate is issued against the existing device enrolment key,
+/// while a user certificate is issued against a key generated for the request.
+/// A user key must be persisted by the caller alongside the certificate, or the
+/// certificate is useless.
+#[cfg(feature = "broker")]
+#[derive(Clone, Serialize, Deserialize)]
+pub enum P2PPrivateKey {
+    ExistingDevice(LoadableMsDeviceEnrolmentKey),
+    GeneratedUser(LoadableRS256Key),
+}
+
+#[cfg(feature = "broker")]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct P2PCertificate {
+    pub certificate_der: Vec<u8>,
+    /// The DER encoded issuing CA certificate, as returned by Entra.
+    pub ca_certificate_der: Vec<u8>,
+    /// The PEM encoded issuing CA certificate. `None` when the CA material
+    /// returned by Entra could not be parsed as a certificate.
+    pub ca_certificate_pem: Option<String>,
+    pub subject: String,
+    pub issuer: String,
+    pub thumbprint_sha1: String,
+    pub dns_names: Vec<String>,
+    /// The certificate expiry, in seconds since the unix epoch.
+    pub not_after_unix: i64,
+    pub private_key: P2PPrivateKey,
+}
+
+#[cfg(feature = "broker")]
+impl fmt::Debug for P2PCertificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("P2PCertificate")
+            .field("subject", &self.subject)
+            .field("issuer", &self.issuer)
+            .field("thumbprint_sha1", &self.thumbprint_sha1)
+            .field("dns_names", &self.dns_names)
+            .field("not_after_unix", &self.not_after_unix)
+            .field("private_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// PKCS#10 CertificationRequestInfo with an EMPTY constructed context [0] tag.
+/// Microsoft requires the attributes field to be present as an empty CONSTRUCTED
+/// tag, which is why this is hand rolled rather than using
+/// `x509_cert::request::CertReqInfo`.
+#[cfg(feature = "broker")]
+#[derive(Clone, Debug, PartialEq, Eq, Sequence)]
+struct P2PCertReqInfo {
+    pub version: x509_cert::request::Version,
+    pub subject: Name,
+    pub public_key: SubjectPublicKeyInfoOwned,
+    #[asn1(context_specific = "0", tag_mode = "IMPLICIT")]
+    pub attributes: SetOfVec<Attribute>,
+}
+
 #[cfg(feature = "broker")]
 pub struct BrokerClientApplication {
     app: PublicClientApplication,
@@ -4860,6 +5047,150 @@ impl BrokerClientApplication {
     ///   the enrollment CSR.
     pub fn set_cert_key(&mut self, cert_key: Option<LoadableMsDeviceEnrolmentKey>) {
         self.cert_key = cert_key;
+    }
+
+    /// Request a device P2P certificate using the enrolled device certificate.
+    ///
+    /// # Arguments
+    ///
+    /// * `tenant_id` - A fallback Entra tenant id or verified domain, used only
+    ///   when the device certificate carries no tenant OID. When the certificate
+    ///   does carry one it takes precedence and this argument is ignored.
+    /// * `device_name` - Device name used as the netbios name and default DNS name.
+    /// * `dns_names` - Optional DNS names to request. Defaults to `device_name`.
+    /// * `tpm` - The TPM object.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: The issued P2P certificate material and metadata.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_device_p2p_certificate(
+        &self,
+        tenant_id: &str,
+        device_name: &str,
+        dns_names: Option<&[&str]>,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<P2PCertificate, MsalError> {
+        debug!("Acquiring a device P2P certificate");
+
+        let loadable_cert_key = self.cert_key.clone().ok_or_else(|| {
+            MsalError::ConfigError(
+                "The certificate key was not found. Please provide the certificate key during initialize of the BrokerClientApplication, or enroll the device.".to_string(),
+            )
+        })?;
+        let cert_key = self.cert_key(tpm, storage_key)?;
+        let cert_der = cert_key.cert.to_der().map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to convert certificate to DER: {:?}", e))
+        })?;
+        let request_tenant_id =
+            Self::device_certificate_tenant_id(&cert_der)?.unwrap_or_else(|| tenant_id.to_string());
+        if request_tenant_id != tenant_id {
+            warn!(
+                "P2P device certificate tenant {} differs from requested tenant {}; using certificate tenant",
+                request_tenant_id, tenant_id
+            );
+        }
+        let token_endpoint = self.tenant_token_endpoint(&request_tenant_id)?;
+        let nonce = self.request_nonce_from_endpoint(&token_endpoint).await?;
+        let cert = X509::from_der(&cert_der).map_err(|e| {
+            MsalError::CryptoFail(format!("Failed to create X509 from DER: {:?}", e))
+        })?;
+        let subject = Name::from_der(
+            cert.subject_name()
+                .to_der()
+                .map_err(|e| MsalError::CryptoFail(format!("Failed encoding subject: {}", e)))?
+                .as_slice(),
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Failed parsing subject: {:?}", e)))?;
+        let (csr_der, public_key_der) = Self::create_p2p_csr(tpm, &cert_key.key, subject)?;
+        let csr = STANDARD.encode(&csr_der);
+        let dns_names_vec = dns_names
+            .map(|names| names.iter().map(|name| name.to_string()).collect())
+            .unwrap_or_else(|| vec![device_name.to_string()]);
+
+        let payload = P2PDeviceCertificatePayload::new(&nonce, &csr, device_name, &dns_names_vec);
+        if let Ok(pretty) = to_string_pretty(&payload) {
+            debug!("P2P Device Certificate Payload: {}", pretty);
+        }
+
+        let signed_jwt = Self::sign_p2p_device_jwt(&payload, &cert_der, tpm, &cert_key.key)?;
+        let response = self
+            .post_p2p_certificate_request(&token_endpoint, &signed_jwt, "2.0")
+            .await?;
+
+        Self::p2p_certificate_from_response(
+            &response,
+            P2PPrivateKey::ExistingDevice(loadable_cert_key),
+            &public_key_der,
+        )
+    }
+
+    /// Request a user P2P certificate using a sealed Primary Refresh Token.
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_prt` - An encrypted Primary Refresh Token.
+    /// * `tpm` - The TPM object.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: The issued P2P certificate material and metadata.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_user_p2p_certificate(
+        &self,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<P2PCertificate, MsalError> {
+        debug!("Acquiring a user P2P certificate");
+
+        let transport_key = self.transport_key(tpm, storage_key)?;
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
+        let tenant_id = if !prt.id_token.tid.is_empty() {
+            prt.id_token.tid.clone()
+        } else if let Some(utid) = prt.client_info.utid {
+            utid.to_string()
+        } else {
+            return Err(MsalError::GeneralFailure(
+                "No tenant id available for P2P user certificate request".to_string(),
+            ));
+        };
+        let token_endpoint = self.tenant_token_endpoint(&tenant_id)?;
+        let nonce = self.request_nonce_from_endpoint(&token_endpoint).await?;
+        let session_key = prt.session_key()?;
+
+        let loadable_user_key = tpm
+            .rs256_create(storage_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed creating P2P user key: {:?}", e)))?;
+        let user_key = tpm
+            .rs256_load(storage_key, &loadable_user_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed loading P2P user key: {:?}", e)))?;
+        let subject = Name::from_str("CN=")
+            .map_err(|e| MsalError::CryptoFail(format!("Failed parsing subject: {:?}", e)))?;
+        let (csr_der, public_key_der) = Self::create_p2p_csr(tpm, &user_key, subject)?;
+        let csr = STANDARD.encode(&csr_der);
+
+        let payload = P2PUserCertificatePayload::new(&prt, &nonce, &csr);
+        if let Ok(pretty) = payload.redacted().and_then(|redacted| {
+            to_string_pretty(&redacted).map_err(|e| MsalError::InvalidJson(format!("{}", e)))
+        }) {
+            debug!("P2P User Certificate Payload: {}", pretty);
+        }
+
+        let signed_jwt =
+            self.sign_p2p_user_jwt(&payload, tpm, storage_key, &transport_key, &session_key)?;
+        let response = self
+            .post_p2p_certificate_request(&token_endpoint, &signed_jwt, "1.0")
+            .await?;
+
+        Self::p2p_certificate_from_response(
+            &response,
+            P2PPrivateKey::GeneratedUser(loadable_user_key),
+            &public_key_der,
+        )
     }
 
     /// Enroll the device in the directory.
@@ -5388,9 +5719,29 @@ impl BrokerClientApplication {
 
     // TODO: add condition here to support v2 endpoints?
     async fn request_nonce(&self) -> Result<String, MsalError> {
+        let token_endpoint = format!("{}/oauth2/token", self.authority()?);
+        self.request_nonce_from_endpoint(&token_endpoint).await
+    }
+
+    fn tenant_token_endpoint(&self, tenant_id: &str) -> Result<String, MsalError> {
+        if tenant_id.is_empty() || tenant_id.contains('/') {
+            return Err(MsalError::ConfigError(
+                "Invalid tenant id for P2P certificate request".to_string(),
+            ));
+        }
+
+        let mut authority = Url::parse(&self.authority()?)
+            .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+        authority.set_path(&format!("{}/oauth2/token", tenant_id));
+        authority.set_query(None);
+        authority.set_fragment(None);
+        Ok(authority.to_string())
+    }
+
+    async fn request_nonce_from_endpoint(&self, token_endpoint: &str) -> Result<String, MsalError> {
         let resp = self
             .client()
-            .post(format!("{}/oauth2/token", self.authority()?))
+            .post(token_endpoint)
             .body("grant_type=srv_challenge")
             .send()
             .await
@@ -5401,6 +5752,399 @@ impl BrokerClientApplication {
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
             Ok(json_resp.nonce)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    fn device_certificate_tenant_id(cert_der: &[u8]) -> Result<Option<String>, MsalError> {
+        const TENANT_ID_OID: &str = "1.2.840.113556.1.5.284.5";
+
+        let cert = x509_cert::Certificate::from_der(cert_der).map_err(|e| {
+            MsalError::CryptoFail(format!("Failed parsing device certificate DER: {:?}", e))
+        })?;
+        let extensions = match cert.tbs_certificate.extensions.as_ref() {
+            Some(extensions) => extensions,
+            None => return Ok(None),
+        };
+        let raw = extensions
+            .iter()
+            .find(|ext| ext.extn_id.to_string() == TENANT_ID_OID)
+            .map(|ext| ext.extn_value.as_bytes());
+        let raw = match raw {
+            Some(raw) => raw,
+            None => return Ok(None),
+        };
+        // A tenant OID we can't make sense of is not fatal, since the caller
+        // supplies a fallback tenant id.
+        match Self::tenant_id_from_device_certificate_oid(raw) {
+            Ok(tenant_id) => Ok(Some(tenant_id)),
+            Err(e) => {
+                warn!("Ignoring device certificate tenant OID: {:?}", e);
+                Ok(None)
+            }
+        }
+    }
+
+    fn tenant_id_from_device_certificate_oid(raw: &[u8]) -> Result<String, MsalError> {
+        let tenant_bytes = Self::device_certificate_oid_guid(raw).ok_or_else(|| {
+            MsalError::CryptoFail("Invalid device certificate tenant OID length".to_string())
+        })?;
+
+        Ok(Uuid::from_bytes_le(tenant_bytes).to_string())
+    }
+
+    /// The tenant OID value is an OCTET STRING wrapping the raw tenant GUID,
+    /// but the encoding varies, so take whichever reading yields a GUID.
+    fn device_certificate_oid_guid(raw: &[u8]) -> Option<[u8; 16]> {
+        // Canonical DER, `04 10 <guid>`.
+        if let Ok(octet_string) = OctetString::from_der(raw) {
+            if let Ok(guid) = octet_string.as_bytes().try_into() {
+                return Some(guid);
+            }
+        }
+        // A BER long form length, `04 81 10 <guid>`, which the der crate
+        // rejects as non canonical but Entra does emit.
+        if let [0x04, 0x81, len, guid @ ..] = raw {
+            if usize::from(*len) == guid.len() {
+                if let Ok(guid) = guid.try_into() {
+                    return Some(guid);
+                }
+            }
+        }
+        // The bare GUID, with no OCTET STRING wrapper at all.
+        raw.try_into().ok()
+    }
+
+    fn p2p_compact_signing_input<T: Serialize, U: Serialize>(
+        header: &T,
+        payload: &U,
+    ) -> Result<String, MsalError> {
+        let header_json = json_to_vec(header).map_err(|e| {
+            MsalError::InvalidJson(format!("Failed serializing P2P JWT header: {}", e))
+        })?;
+        let payload_json = json_to_vec(payload).map_err(|e| {
+            MsalError::InvalidJson(format!("Failed serializing P2P JWT payload: {}", e))
+        })?;
+
+        Ok(format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header_json),
+            URL_SAFE_NO_PAD.encode(payload_json)
+        ))
+    }
+
+    fn sign_p2p_device_jwt(
+        payload: &P2PDeviceCertificatePayload,
+        cert_der: &[u8],
+        tpm: &mut BoxedDynTpm,
+        signing_key: &RS256Key,
+    ) -> Result<String, MsalError> {
+        let x5c = STANDARD.encode(cert_der);
+        let header = P2PDeviceCertificateHeader {
+            alg: "RS256",
+            typ: "JWT",
+            x5c: &x5c,
+        };
+        debug!(
+            "P2P Device Certificate Header: {}",
+            json!({
+                "alg": header.alg,
+                "typ": header.typ,
+                "x5c": "<base64 DER certificate>"
+            })
+        );
+        let signing_input = Self::p2p_compact_signing_input(&header, payload)?;
+        let signature = tpm
+            .rs256_sign(signing_key, signing_input.as_bytes())
+            .map_err(|e| MsalError::TPMFail(format!("Failed signing P2P device JWT: {:?}", e)))?;
+        let signature_bytes: Box<[u8]> = signature.into();
+
+        Ok(format!(
+            "{}.{}",
+            signing_input,
+            URL_SAFE_NO_PAD.encode(&signature_bytes)
+        ))
+    }
+
+    fn sign_p2p_user_jwt_with_key(
+        payload: &P2PUserCertificatePayload,
+        ctx: &[u8],
+        hmac_key: &[u8],
+    ) -> Result<String, MsalError> {
+        let ctx = STANDARD.encode(ctx);
+        let header = P2PUserCertificateHeader {
+            alg: "HS256",
+            typ: "JWT",
+            ctx: &ctx,
+        };
+        debug!(
+            "P2P User Certificate Header: {}",
+            json!({
+                "alg": header.alg,
+                "typ": header.typ,
+                "ctx": "<base64 context>"
+            })
+        );
+        let signing_input = Self::p2p_compact_signing_input(&header, payload)?;
+        let signature = Self::hmac_sha256(hmac_key, signing_input.as_bytes())?;
+
+        Ok(format!(
+            "{}.{}",
+            signing_input,
+            URL_SAFE_NO_PAD.encode(signature)
+        ))
+    }
+
+    fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, MsalError> {
+        let key = PKey::hmac(key)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed creating HMAC key: {}", e)))?;
+        let mut signer = Signer::new(MessageDigest::sha256(), &key)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed creating HMAC signer: {}", e)))?;
+        signer
+            .update(data)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed updating HMAC signer: {}", e)))?;
+        signer
+            .sign_to_vec()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed signing HMAC: {}", e)))
+    }
+
+    /// Sign a P2P user certificate request with the PRT session key.
+    ///
+    /// This deliberately avoids `sign_session_key_jwt`, which goes through
+    /// compact_jwt's `MsOapxbcSessionKey::sign`. That implementation embeds a
+    /// `kid` header and uses a 32 byte context, while the broker sends exactly
+    /// three header fields (`alg`, `typ`, `ctx`) and a 24 byte context. Entra
+    /// rejects the P2P request otherwise. The KDF label and the
+    /// `derive_key_aes256(key, label, ctx)` argument order below match
+    /// compact_jwt, so the server derives the same key from our `ctx`.
+    fn sign_p2p_user_jwt(
+        &self,
+        payload: &P2PUserCertificatePayload,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+        transport_key: &MsOapxbcRsaKey,
+        session_key: &SessionKey,
+    ) -> Result<String, MsalError> {
+        const P2P_CTX_LEN: usize = 24;
+        const AAD_KDF_LABEL: &[u8; 26] = b"AzureAD-SecureConversation";
+
+        let mut ctx = [0u8; P2P_CTX_LEN];
+        rand_bytes(&mut ctx)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed creating P2P context: {}", e)))?;
+
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+        let session_key = MsOapxbcSessionKey::complete_tpm_rsa_oaep_key_agreement(
+            tpm,
+            prt_storage_key,
+            transport_key,
+            &session_key.session_key_jwe,
+        )
+        .map_err(|e| MsalError::CryptoFail(format!("Unable to decipher session_key_jwe: {}", e)))?;
+        let MsOapxbcSessionKey::A256GCM { sealed_session_key } = session_key;
+        let aes_key = tpm
+            .unseal_data(prt_storage_key, &sealed_session_key)
+            .map_err(|e| {
+                MsalError::TPMFail(format!("Failed unsealing PRT session key: {:?}", e))
+            })?;
+        let derived_key = crypto_glue::nist_sp800_108_kdf_hmac_sha256::derive_key_aes256(
+            &aes_key,
+            AAD_KDF_LABEL,
+            &ctx,
+        )
+        .ok_or_else(|| {
+            MsalError::CryptoFail("Failed deriving P2P user JWT signing key".to_string())
+        })?;
+
+        Self::sign_p2p_user_jwt_with_key(payload, &ctx, &derived_key)
+    }
+
+    fn create_p2p_csr(
+        tpm: &mut BoxedDynTpm,
+        signing_key: &RS256Key,
+        subject: Name,
+    ) -> Result<(Vec<u8>, Vec<u8>), MsalError> {
+        let public_key = tpm
+            .rs256_public(signing_key)
+            .map_err(|e| MsalError::TPMFail(format!("Failed getting public key: {:?}", e)))?;
+        let public_key_der = public_key
+            .to_public_key_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed encoding public key: {:?}", e)))?;
+        let spki = SubjectPublicKeyInfoOwned::try_from(public_key_der.as_bytes())
+            .map_err(|e| MsalError::CryptoFail(format!("Failed parsing SPKI: {:?}", e)))?;
+
+        let cert_req_info = P2PCertReqInfo {
+            version: x509_cert::request::Version::V1,
+            subject,
+            public_key: spki,
+            attributes: SetOfVec::new(),
+        };
+        let tbs_der = cert_req_info
+            .to_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed encoding CSR info: {:?}", e)))?;
+        let signature = tpm
+            .rs256_sign(signing_key, &tbs_der)
+            .map_err(|e| MsalError::TPMFail(format!("Failed signing CSR: {:?}", e)))?;
+        let signature_bytes: Box<[u8]> = signature.into();
+        let signature_algorithm = AlgorithmIdentifierOwned {
+            oid: rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
+            parameters: Some(der::asn1::AnyRef::from(der::asn1::Null).into()),
+        };
+
+        #[derive(Sequence)]
+        struct P2PCertReq {
+            info: P2PCertReqInfo,
+            algorithm: AlgorithmIdentifierOwned,
+            signature: BitString,
+        }
+
+        let cert_req = P2PCertReq {
+            info: cert_req_info,
+            algorithm: signature_algorithm,
+            signature: BitString::from_bytes(&signature_bytes).map_err(|e| {
+                MsalError::CryptoFail(format!("Failed creating CSR signature: {:?}", e))
+            })?,
+        };
+        let csr_der = cert_req
+            .to_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed encoding CSR: {:?}", e)))?;
+
+        Ok((csr_der, public_key_der.to_vec()))
+    }
+
+    fn x509_name_to_string(name: &openssl::x509::X509NameRef) -> String {
+        name.entries()
+            .map(|entry| {
+                let key = entry.object().nid().short_name().unwrap_or("OID");
+                let value = entry
+                    .data()
+                    .as_utf8()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|_| "<non-utf8>".to_string());
+                format!("{}={}", key, value)
+            })
+            .collect::<Vec<String>>()
+            .join(", ")
+    }
+
+    fn p2p_certificate_from_response(
+        response: &P2PCertificateResponse,
+        private_key: P2PPrivateKey,
+        expected_public_key_der: &[u8],
+    ) -> Result<P2PCertificate, MsalError> {
+        let certificate_der = STANDARD
+            .decode(&response.x5c)
+            .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?;
+        let cert = X509::from_der(&certificate_der)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed parsing P2P certificate: {}", e)))?;
+        let cert_public_key_der = cert
+            .public_key()
+            .and_then(|key| key.public_key_to_der())
+            .map_err(|e| {
+                MsalError::CryptoFail(format!("Failed reading P2P certificate public key: {}", e))
+            })?;
+        if cert_public_key_der != expected_public_key_der {
+            return Err(MsalError::CryptoFail(
+                "P2P certificate public key does not match CSR key".to_string(),
+            ));
+        }
+
+        let thumbprint_sha1 = hash(MessageDigest::sha1(), &certificate_der)
+            .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?
+            .iter()
+            .map(|byte| format!("{:02X}", byte))
+            .collect::<String>();
+        let dns_names = cert
+            .subject_alt_names()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.dnsname().map(|dns| dns.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let not_after_unix = Self::asn1_time_to_unix(cert.not_after())?;
+
+        // x5c_ca carries the DER encoded issuing CA certificate. Failing to
+        // parse it isn't fatal, since the issued certificate is what the caller
+        // asked for, but don't claim it's a certificate when it doesn't parse.
+        let ca_certificate_der = STANDARD
+            .decode(&response.x5c_ca)
+            .map_err(|e| MsalError::InvalidBase64(format!("{}", e)))?;
+        let ca_certificate_pem = match X509::from_der(&ca_certificate_der) {
+            Ok(_) => Some(format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                response.x5c_ca
+            )),
+            Err(e) => {
+                warn!("Failed parsing the P2P issuing CA certificate: {}", e);
+                None
+            }
+        };
+
+        Ok(P2PCertificate {
+            certificate_der,
+            ca_certificate_der,
+            ca_certificate_pem,
+            subject: Self::x509_name_to_string(cert.subject_name()),
+            issuer: Self::x509_name_to_string(cert.issuer_name()),
+            thumbprint_sha1,
+            dns_names,
+            not_after_unix,
+            private_key,
+        })
+    }
+
+    fn asn1_time_to_unix(time: &Asn1TimeRef) -> Result<i64, MsalError> {
+        let epoch = Asn1Time::from_unix(0)
+            .map_err(|e| MsalError::CryptoFail(format!("Failed creating unix epoch: {}", e)))?;
+        let diff = epoch.diff(time).map_err(|e| {
+            MsalError::CryptoFail(format!("Failed comparing certificate time: {}", e))
+        })?;
+
+        Ok(i64::from(diff.days) * 86400 + i64::from(diff.secs))
+    }
+
+    async fn post_p2p_certificate_request(
+        &self,
+        token_endpoint: &str,
+        signed_jwt: &str,
+        windows_api_version: &str,
+    ) -> Result<P2PCertificateResponse, MsalError> {
+        let params = [
+            ("windows_api_version", windows_api_version),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("request", signed_jwt),
+        ];
+        let payload = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
+            .collect::<Vec<String>>()
+            .join("&");
+
+        let mut debug_payload = params;
+        debug_payload[2] = ("request", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_payload) {
+            debug!("POST {}: {}", token_endpoint, pretty);
+        }
+
+        let resp = self
+            .client()
+            .post(token_endpoint)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::request_failed(&e))?;
+        if resp.status().is_success() {
+            resp.json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
@@ -7721,13 +8465,127 @@ impl BrokerClientApplication {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "broker")]
+    use kanidm_hsm_crypto::{provider::SoftTpm, AuthValue};
+    #[cfg(feature = "broker")]
+    use openssl::{
+        asn1::{Asn1Object, Asn1OctetString, Asn1Time},
+        bn::BigNum,
+        pkey::{PKey, Private},
+        sign::Verifier,
+        x509::{X509Builder, X509Extension, X509NameBuilder},
+    };
 
     fn build_access_token(payload_json: &str) -> String {
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#.as_bytes());
         let payload = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         format!("{}.{}.", header, payload)
+    }
+
+    #[cfg(feature = "broker")]
+    const TEST_TENANT_GUID: &str = "6973bb37-65f8-440e-b39e-dd57da64f6cf";
+    /// `TEST_TENANT_GUID` in the little endian layout Entra uses for the
+    /// device certificate tenant OID.
+    #[cfg(feature = "broker")]
+    const TEST_TENANT_BYTES_LE: [u8; 16] = [
+        0x37, 0xbb, 0x73, 0x69, 0xf8, 0x65, 0x0e, 0x44, 0xb3, 0x9e, 0xdd, 0x57, 0xda, 0x64, 0xf6,
+        0xcf,
+    ];
+    #[cfg(feature = "broker")]
+    const TENANT_ID_OID: &str = "1.2.840.113556.1.5.284.5";
+
+    #[cfg(feature = "broker")]
+    fn test_tpm() -> (BoxedDynTpm, StorageKey) {
+        let mut tpm = BoxedDynTpm::new(SoftTpm::new());
+        let auth_str = AuthValue::generate().unwrap();
+        let auth_value = AuthValue::from_str(&auth_str).unwrap();
+        let loadable_machine_key = tpm.root_storage_key_create(&auth_value).unwrap();
+        let machine_key = tpm
+            .root_storage_key_load(&auth_value, &loadable_machine_key)
+            .unwrap();
+
+        (tpm, machine_key)
+    }
+
+    #[cfg(feature = "broker")]
+    fn test_prt(refresh_token: &str) -> PrimaryRefreshToken {
+        PrimaryRefreshToken {
+            token_type: "Bearer".to_string(),
+            expires_in: "3600".to_string(),
+            ext_expires_in: "3600".to_string(),
+            expires_on: "9999999999".to_string(),
+            refresh_token: refresh_token.to_string(),
+            refresh_token_expires_in: 3600,
+            session_key_jwe: None,
+            id_token: IdToken::default(),
+            client_info: ClientInfo::default(),
+            device_tenant_id: None,
+            tgt_ad: TGT::default(),
+            tgt_cloud: TGT::default(),
+            kerberos_top_level_names: None,
+        }
+    }
+
+    #[cfg(feature = "broker")]
+    fn self_signed_cert(pkey: &PKey<Private>, extensions: &[X509Extension]) -> Vec<u8> {
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "p2p-test").unwrap();
+        let name = name.build();
+        let mut builder = X509Builder::new().unwrap();
+        builder.set_version(2).unwrap();
+        let serial = BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap();
+        builder.set_serial_number(&serial).unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(pkey).unwrap();
+        builder
+            .set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+            .unwrap();
+        builder
+            .set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+            .unwrap();
+        for extension in extensions {
+            builder.append_extension2(extension).unwrap();
+        }
+        builder.sign(pkey, MessageDigest::sha256()).unwrap();
+
+        builder.build().to_der().unwrap()
+    }
+
+    /// Build the device certificate tenant OID extension, holding `value` as
+    /// the raw extnValue octets.
+    #[cfg(feature = "broker")]
+    fn tenant_oid_extension(value: &[u8]) -> X509Extension {
+        let oid = Asn1Object::from_str(TENANT_ID_OID).unwrap();
+        let value = Asn1OctetString::new_from_bytes(value).unwrap();
+
+        X509Extension::new_from_der(&oid, false, &value).unwrap()
+    }
+
+    #[cfg(feature = "broker")]
+    fn test_broker_app(authority: &str) -> BrokerClientApplication {
+        BrokerClientApplication::new(
+            Some(authority),
+            None,
+            None,
+            None,
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(30),
+            #[cfg(feature = "ipvers")]
+            &[],
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "broker")]
+    fn decode_jwt_header(jwt: &str) -> Value {
+        let header = jwt.split('.').next().unwrap();
+        let header = URL_SAFE_NO_PAD.decode(header).unwrap();
+        json_from_slice(&header).unwrap()
     }
 
     fn build_user_token(access_token: String) -> UserToken {
@@ -7743,6 +8601,368 @@ mod tests {
             #[cfg(feature = "broker")]
             prt: None,
         }
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_device_payload_serializes_expected_fields() {
+        let payload = P2PDeviceCertificatePayload::new(
+            "nonce",
+            "csr",
+            "host1",
+            &["host1.example.com".to_string()],
+        );
+        let value: Value = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(value["client_id"], BROKER_CLIENT_IDENT);
+        assert_eq!(value["request_nonce"], "nonce");
+        assert_eq!(value["grant_type"], "device_auth");
+        assert_eq!(value["cert_token_use"], "device_cert");
+        assert_eq!(
+            value["csr_type"],
+            "http://schemas.microsoft.com/windows/pki/2009/01/enrollment#PKCS10"
+        );
+        assert_eq!(value["csr"], "csr");
+        assert_eq!(value["netbios_name"], "host1");
+        assert_eq!(value["dns_names"][0], "host1.example.com");
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_device_jwt_header_matches_broker_shape() {
+        let (mut tpm, machine_key) = test_tpm();
+        let loadable_key = tpm.rs256_create(&machine_key).unwrap();
+        let key = tpm.rs256_load(&machine_key, &loadable_key).unwrap();
+        let cert_der = vec![0x30, 0x03, 0x02, 0x01, 0x00];
+        let payload =
+            P2PDeviceCertificatePayload::new("nonce", "csr", "host1", &["host1".to_string()]);
+
+        let jwt = BrokerClientApplication::sign_p2p_device_jwt(&payload, &cert_der, &mut tpm, &key)
+            .unwrap();
+        let header = decode_jwt_header(&jwt);
+        let header = header.as_object().unwrap();
+
+        assert_eq!(header.len(), 3);
+        assert_eq!(header["alg"], "RS256");
+        assert_eq!(header["typ"], "JWT");
+        // The broker sends x5c as a single string, not the RFC 7515 array.
+        assert_eq!(header["x5c"], STANDARD.encode(cert_der));
+        assert!(!header.contains_key("kid"));
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_device_jwt_signature_verifies() {
+        let (mut tpm, machine_key) = test_tpm();
+        let loadable_key = tpm.rs256_create(&machine_key).unwrap();
+        let key = tpm.rs256_load(&machine_key, &loadable_key).unwrap();
+        let payload =
+            P2PDeviceCertificatePayload::new("nonce", "csr", "host1", &["host1".to_string()]);
+
+        let jwt =
+            BrokerClientApplication::sign_p2p_device_jwt(&payload, &[0x30, 0x00], &mut tpm, &key)
+                .unwrap();
+        let (signing_input, signature) = jwt.rsplit_once('.').unwrap();
+        let signature = URL_SAFE_NO_PAD.decode(signature).unwrap();
+
+        let public_key = PKey::public_key_from_der(&tpm.rs256_public_der(&key).unwrap()).unwrap();
+        let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key).unwrap();
+        verifier.update(signing_input.as_bytes()).unwrap();
+
+        assert!(verifier.verify(&signature).unwrap());
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_user_payload_serializes_expected_fields() {
+        let prt = test_prt("prt-refresh-token");
+
+        let payload = P2PUserCertificatePayload::new(&prt, "nonce", "csr");
+        let value: Value = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(value["iss"], "aad:brokerplugin");
+        assert_eq!(value["aud"], "login.microsoftonline.com");
+        assert_eq!(value["grant_type"], "refresh_token");
+        assert_eq!(value["scope"], "openid aza ugs");
+        assert_eq!(value["refresh_token"], "prt-refresh-token");
+        assert_eq!(value["client_id"], BROKER_CLIENT_IDENT);
+        assert_eq!(value["cert_token_use"], "user_cert");
+        assert_eq!(value["csr"], "csr");
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_user_payload_redacts_refresh_token() {
+        let prt = test_prt("prt-refresh-token");
+        let payload = P2PUserCertificatePayload::new(&prt, "nonce", "csr");
+
+        let redacted = payload.redacted().unwrap();
+
+        assert_eq!(redacted["refresh_token"], "**********");
+        // Only the logged copy is redacted, the payload still carries the PRT.
+        assert_eq!(redacted["csr"], "csr");
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap()["refresh_token"],
+            "prt-refresh-token"
+        );
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_user_jwt_header_matches_broker_shape() {
+        let prt = test_prt("prt-refresh-token");
+        let payload = P2PUserCertificatePayload::new(&prt, "nonce", "csr");
+        let ctx = [0xA5; 24];
+        let hmac_key = [0x5A; 32];
+
+        let jwt =
+            BrokerClientApplication::sign_p2p_user_jwt_with_key(&payload, &ctx, &hmac_key).unwrap();
+        let header = decode_jwt_header(&jwt);
+        let header = header.as_object().unwrap();
+
+        assert_eq!(header.len(), 3);
+        assert_eq!(header["alg"], "HS256");
+        assert_eq!(header["typ"], "JWT");
+        assert_eq!(
+            STANDARD
+                .decode(header["ctx"].as_str().unwrap())
+                .unwrap()
+                .len(),
+            24
+        );
+        assert!(!header.contains_key("kid"));
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_device_tenant_oid_uses_little_endian_guid() {
+        let raw = [
+            0x04, 0x81, 0x10, 0x37, 0xbb, 0x73, 0x69, 0xf8, 0x65, 0x0e, 0x44, 0xb3, 0x9e, 0xdd,
+            0x57, 0xda, 0x64, 0xf6, 0xcf,
+        ];
+
+        assert_eq!(
+            BrokerClientApplication::tenant_id_from_device_certificate_oid(&raw).unwrap(),
+            TEST_TENANT_GUID
+        );
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_tenant_oid_accepts_all_encodings() {
+        // Long form length, short form length, and a bare GUID with no
+        // OCTET STRING wrapper at all.
+        let mut long_form = vec![0x04, 0x81, 0x10];
+        long_form.extend_from_slice(&TEST_TENANT_BYTES_LE);
+        let mut short_form = vec![0x04, 0x10];
+        short_form.extend_from_slice(&TEST_TENANT_BYTES_LE);
+
+        for raw in [long_form, short_form, TEST_TENANT_BYTES_LE.to_vec()] {
+            assert_eq!(
+                BrokerClientApplication::tenant_id_from_device_certificate_oid(&raw).unwrap(),
+                TEST_TENANT_GUID
+            );
+        }
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_device_tenant_id_absent_extension() {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        let cert_der = self_signed_cert(&pkey, &[]);
+
+        assert_eq!(
+            BrokerClientApplication::device_certificate_tenant_id(&cert_der).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_device_tenant_id_extracts_from_extension() {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        let tenant_value = OctetString::new(TEST_TENANT_BYTES_LE)
+            .unwrap()
+            .to_der()
+            .unwrap();
+        let cert_der = self_signed_cert(&pkey, &[tenant_oid_extension(&tenant_value)]);
+
+        assert_eq!(
+            BrokerClientApplication::device_certificate_tenant_id(&cert_der).unwrap(),
+            Some(TEST_TENANT_GUID.to_string())
+        );
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_device_tenant_id_ignores_malformed_oid() {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        // Some devices carry a verified domain here rather than a GUID. That
+        // must fall back to the caller supplied tenant id, not fail the flow.
+        let cert_der = self_signed_cert(&pkey, &[tenant_oid_extension(b"contoso.onmicrosoft.com")]);
+
+        assert_eq!(
+            BrokerClientApplication::device_certificate_tenant_id(&cert_der).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_tenant_endpoint_uses_current_authority_host() {
+        let app = test_broker_app("https://login.microsoftonline.com/common");
+        assert_eq!(
+            app.tenant_token_endpoint("11111111-1111-1111-1111-111111111111")
+                .unwrap(),
+            "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/oauth2/token"
+        );
+
+        let app = test_broker_app("https://login.microsoftonline.us/organizations");
+        assert_eq!(
+            app.tenant_token_endpoint("contoso.com").unwrap(),
+            "https://login.microsoftonline.us/contoso.com/oauth2/token"
+        );
+        assert!(app.tenant_token_endpoint("../bad").is_err());
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_tenant_endpoint_rejects_empty_tenant() {
+        let app = test_broker_app("https://login.microsoftonline.com/common");
+
+        assert!(app.tenant_token_endpoint("").is_err());
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_csr_is_der_and_matches_key() {
+        let (mut tpm, machine_key) = test_tpm();
+        let loadable_key = tpm.rs256_create(&machine_key).unwrap();
+        let key = tpm.rs256_load(&machine_key, &loadable_key).unwrap();
+        let subject = Name::from_str("CN=test-device").unwrap();
+
+        let (csr_der, public_key_der) =
+            BrokerClientApplication::create_p2p_csr(&mut tpm, &key, subject).unwrap();
+
+        assert!(!csr_der.is_empty());
+        assert_eq!(public_key_der, tpm.rs256_public_der(&key).unwrap());
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_user_csr_accepts_blank_common_name() {
+        let (mut tpm, machine_key) = test_tpm();
+        let loadable_key = tpm.rs256_create(&machine_key).unwrap();
+        let key = tpm.rs256_load(&machine_key, &loadable_key).unwrap();
+        let subject = Name::from_str("CN=").unwrap();
+
+        let (csr_der, public_key_der) =
+            BrokerClientApplication::create_p2p_csr(&mut tpm, &key, subject).unwrap();
+
+        assert!(!csr_der.is_empty());
+        assert_eq!(public_key_der, tpm.rs256_public_der(&key).unwrap());
+    }
+
+    #[cfg(feature = "broker")]
+    fn test_private_key() -> P2PPrivateKey {
+        P2PPrivateKey::GeneratedUser(LoadableRS256Key::Soft2048V2 {
+            key: vec![],
+            tag: [0; 16],
+            iv: [0; 16],
+        })
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_response_parses_certificate_metadata() {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        let public_key_der = pkey.public_key_to_der().unwrap();
+        let cert_der = self_signed_cert(&pkey, &[]);
+
+        let cert = BrokerClientApplication::p2p_certificate_from_response(
+            &P2PCertificateResponse {
+                x5c: STANDARD.encode(&cert_der),
+                x5c_ca: STANDARD.encode(&cert_der),
+            },
+            test_private_key(),
+            &public_key_der,
+        )
+        .unwrap();
+
+        assert_eq!(cert.certificate_der, cert_der);
+        assert_eq!(cert.subject, "CN=p2p-test");
+        assert_eq!(cert.issuer, "CN=p2p-test");
+        assert_eq!(cert.thumbprint_sha1.len(), 40);
+        // The certificate is valid for a day, so it expires in the future.
+        assert!(cert.not_after_unix > 0);
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_response_parses_ca_certificate() {
+        let rsa = Rsa::generate(2048).unwrap();
+        let pkey = PKey::from_rsa(rsa).unwrap();
+        let public_key_der = pkey.public_key_to_der().unwrap();
+        let cert_der = self_signed_cert(&pkey, &[]);
+        let ca_der = self_signed_cert(&pkey, &[]);
+
+        let cert = BrokerClientApplication::p2p_certificate_from_response(
+            &P2PCertificateResponse {
+                x5c: STANDARD.encode(&cert_der),
+                x5c_ca: STANDARD.encode(&ca_der),
+            },
+            test_private_key(),
+            &public_key_der,
+        )
+        .unwrap();
+
+        assert_eq!(cert.ca_certificate_der, ca_der);
+        assert_eq!(
+            cert.ca_certificate_pem,
+            Some(format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                STANDARD.encode(&ca_der)
+            ))
+        );
+
+        // A CA blob we can't parse is not fatal, but it must not be handed
+        // back labelled as a certificate.
+        let cert = BrokerClientApplication::p2p_certificate_from_response(
+            &P2PCertificateResponse {
+                x5c: STANDARD.encode(&cert_der),
+                x5c_ca: "AQID".to_string(),
+            },
+            test_private_key(),
+            &public_key_der,
+        )
+        .unwrap();
+
+        assert_eq!(cert.ca_certificate_der, vec![0x01, 0x02, 0x03]);
+        assert_eq!(cert.ca_certificate_pem, None);
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn p2p_response_rejects_public_key_mismatch() {
+        let pkey = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let other = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let cert_der = self_signed_cert(&pkey, &[]);
+
+        // Entra returning a certificate bound to a key we don't hold means the
+        // certificate is unusable, so this must not be accepted.
+        assert!(BrokerClientApplication::p2p_certificate_from_response(
+            &P2PCertificateResponse {
+                x5c: STANDARD.encode(&cert_der),
+                x5c_ca: STANDARD.encode(&cert_der),
+            },
+            test_private_key(),
+            &other.public_key_to_der().unwrap(),
+        )
+        .is_err());
     }
 
     #[test]

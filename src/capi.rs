@@ -2569,6 +2569,498 @@ pub unsafe extern "C" fn broker_unseal_prt_kerberos_top_level_names(
     )
 }
 
+/// Request a device P2P certificate using the enrolled device certificate.
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `tenant_id` - A fallback Entra tenant id or verified domain, used only
+///   when the device certificate carries no tenant OID.
+///
+/// * `device_name` - Device name used as the netbios name and default DNS
+///   name.
+///
+/// * `dns_names` - The DNS names to request. May be NULL with a
+///   `dns_names_len` of 0, which defaults to `device_name`.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// * `out` - The issued P2PCertificate, which must be freed with
+///   `p2p_certificate_free`.
+///
+/// # Safety
+///
+/// The calling function must ensure that `client`, `tpm`, `machine_key`, are
+/// valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_acquire_device_p2p_certificate(
+    client: *mut BrokerClientApplication,
+    tenant_id: *const c_char,
+    device_name: *const c_char,
+    dns_names: *const *const c_char,
+    dns_names_len: c_int,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out: *mut *mut P2PCertificate,
+) -> *mut MSAL_ERROR {
+    if client.is_null() || tpm.is_null() || machine_key.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
+    }
+    // Ensure our out parameter is not NULL
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+
+    let client = unsafe { &mut *client };
+    let tenant_id = match wrap_c_char(tenant_id) {
+        Some(tenant_id) => tenant_id,
+        None => {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input tenant_id!".to_string(),
+            );
+        }
+    };
+    let device_name = match wrap_c_char(device_name) {
+        Some(device_name) => device_name,
+        None => {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input device_name!".to_string(),
+            );
+        }
+    };
+    let dns_names = match str_array_to_vec(dns_names, dns_names_len) {
+        Ok(dns_names) => dns_names,
+        Err(e) => return e,
+    };
+    // An empty list means the caller wants the device_name default.
+    let dns_names: Option<Vec<&str>> = if dns_names.is_empty() {
+        None
+    } else {
+        Some(str_vec_ref!(dns_names))
+    };
+    let tpm = unsafe { &mut *tpm };
+    let machine_key = unsafe { &mut *machine_key };
+    let resp = match run_async!(
+        client,
+        acquire_device_p2p_certificate,
+        &tenant_id,
+        &device_name,
+        dns_names.as_deref(),
+        &mut tpm.0,
+        &machine_key.0,
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    unsafe {
+        *out = Box::into_raw(Box::new(resp));
+    }
+    no_error()
+}
+
+/// Request a user P2P certificate using a sealed Primary Refresh Token.
+///
+/// # Arguments
+///
+/// * `client` - A BrokerClientApplication created by a call to
+///   `broker_init`.
+///
+/// * `sealed_prt` - An encrypted Primary Refresh Token.
+///
+/// * `tpm` - The tpm object.
+///
+/// * `machine_key` - The TPM MachineKey associated with this application.
+///
+/// * `out` - The issued P2PCertificate, which must be freed with
+///   `p2p_certificate_free`. The user certificate is bound to a freshly
+///   generated key, which must be persisted via
+///   `p2p_certificate_user_private_key`.
+///
+/// # Safety
+///
+/// The calling function must ensure that `client`, `sealed_prt`, `tpm`, and
+/// `machine_key` are valid pointers to their respective types.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_acquire_user_p2p_certificate(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out: *mut *mut P2PCertificate,
+) -> *mut MSAL_ERROR {
+    if client.is_null() || sealed_prt.is_null() || tpm.is_null() || machine_key.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
+    }
+    // Ensure our out parameter is not NULL
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+
+    let client = unsafe { &mut *client };
+    let sealed_prt = unsafe { &mut *sealed_prt };
+    let tpm = unsafe { &mut *tpm };
+    let machine_key = unsafe { &mut *machine_key };
+    let resp = match run_async!(
+        client,
+        acquire_user_p2p_certificate,
+        &sealed_prt.0,
+        &mut tpm.0,
+        &machine_key.0,
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    unsafe {
+        *out = Box::into_raw(Box::new(resp));
+    }
+    no_error()
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `cert` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer to a char*.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_subject(
+    cert: *mut P2PCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(cert, subject, out)
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `cert` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer to a char*.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_issuer(
+    cert: *mut P2PCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(cert, issuer, out)
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `cert` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer to a char*.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_thumbprint_sha1(
+    cert: *mut P2PCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(cert, thumbprint_sha1, out)
+}
+
+/// Get the PEM encoded issuing CA certificate.
+///
+/// This fails when Entra returned CA material which could not be parsed as a
+/// certificate. The raw bytes remain available via
+/// `p2p_certificate_ca_certificate_der`.
+///
+/// # Safety
+///
+/// The calling function must ensure that the `cert` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer to a char*.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_ca_certificate_pem(
+    cert: *mut P2PCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_option_string!(cert, ca_certificate_pem, out)
+}
+
+macro_rules! p2p_certificate_der {
+    ($cert:ident, $item:ident, $out_buf:ident, $out_len:ident) => {{
+        if $cert.is_null() || $out_buf.is_null() || $out_len.is_null() {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid parameters".to_string(),
+            );
+        }
+
+        let cert = unsafe { &mut *$cert };
+        let mut bytes = std::mem::ManuallyDrop::new(cert.$item.clone().into_boxed_slice());
+        unsafe {
+            *$out_buf = bytes.as_mut_ptr();
+            *$out_len = bytes.len();
+        }
+
+        no_error()
+    }};
+}
+
+/// Get the DER encoded P2P certificate.
+///
+/// The caller is responsible for freeing the returned bytes via
+/// `raw_serialized_free`.
+///
+/// # Safety
+///
+/// The calling function must ensure that `cert` is a valid P2PCertificate
+/// pointer, and that the `out_buf` is safely accessed within the bounds
+/// specified by `out_len`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_certificate_der(
+    cert: *mut P2PCertificate,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+) -> *mut MSAL_ERROR {
+    p2p_certificate_der!(cert, certificate_der, out_buf, out_len)
+}
+
+/// Get the DER encoded issuing CA certificate.
+///
+/// The caller is responsible for freeing the returned bytes via
+/// `raw_serialized_free`.
+///
+/// # Safety
+///
+/// The calling function must ensure that `cert` is a valid P2PCertificate
+/// pointer, and that the `out_buf` is safely accessed within the bounds
+/// specified by `out_len`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_ca_certificate_der(
+    cert: *mut P2PCertificate,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+) -> *mut MSAL_ERROR {
+    p2p_certificate_der!(cert, ca_certificate_der, out_buf, out_len)
+}
+
+/// Get the DNS names the P2P certificate was issued for.
+///
+/// Returns an array of C strings. When the certificate carries no DNS names,
+/// `out_list` is set to NULL and `out_count` to 0 without an error.
+///
+/// The caller is responsible for freeing the returned array and strings via
+/// `p2p_certificate_free_dns_names`.
+///
+/// # Safety
+///
+/// The calling function should ensure that `cert` is a valid P2PCertificate
+/// pointer, and that `out_list` and `out_count` are valid pointers.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_dns_names(
+    cert: *mut P2PCertificate,
+    out_list: *mut *mut *mut c_char,
+    out_count: *mut c_int,
+) -> *mut MSAL_ERROR {
+    if cert.is_null() || out_list.is_null() || out_count.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+
+    let cert = unsafe { &mut *cert };
+    if cert.dns_names.is_empty() {
+        unsafe {
+            *out_list = std::ptr::null_mut();
+            *out_count = 0;
+        }
+        return no_error();
+    }
+
+    let mut c_strings: Vec<*mut c_char> = Vec::with_capacity(cert.dns_names.len());
+    for dns_name in cert.dns_names.iter() {
+        let c_str = wrap_string(dns_name);
+        if c_str.is_null() {
+            for prev_str in c_strings {
+                if !prev_str.is_null() {
+                    unsafe {
+                        let _ = CString::from_raw(prev_str);
+                    }
+                }
+            }
+            return make_error(
+                MSAL_ERROR_CODE::NO_MEMORY,
+                "Failed to convert DNS name".to_string(),
+            );
+        }
+        c_strings.push(c_str);
+    }
+
+    let count = c_strings.len();
+    let boxed_slice = c_strings.into_boxed_slice();
+    let raw_ptr: *mut [*mut c_char] = Box::into_raw(boxed_slice);
+
+    unsafe {
+        *out_list = raw_ptr as *mut *mut c_char;
+        *out_count = count as c_int;
+    }
+
+    no_error()
+}
+
+/// Free a DNS name list returned by `p2p_certificate_dns_names`
+///
+/// # Safety
+///
+/// The calling function should ensure that `list` was returned by
+/// `p2p_certificate_dns_names` and that `count` matches the count returned
+/// alongside it.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_free_dns_names(list: *mut *mut c_char, count: c_int) {
+    if list.is_null() || count <= 0 {
+        return;
+    }
+
+    let slice = unsafe { std::slice::from_raw_parts_mut(list, count as usize) };
+    let boxed_slice = unsafe { Box::from_raw(slice) };
+
+    for str_ptr in boxed_slice.iter() {
+        if !str_ptr.is_null() {
+            unsafe {
+                let _ = CString::from_raw(*str_ptr);
+            }
+        }
+    }
+}
+
+/// Get the P2P certificate expiry, in seconds since the unix epoch.
+///
+/// # Safety
+///
+/// The calling function must ensure that the `cert` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer to an int64_t.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_not_after(
+    cert: *mut P2PCertificate,
+    out: *mut i64,
+) -> *mut MSAL_ERROR {
+    if cert.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+
+    let cert = unsafe { &mut *cert };
+    unsafe {
+        *out = cert.not_after_unix;
+    }
+
+    no_error()
+}
+
+/// Get the device enrolment key a device P2P certificate is bound to.
+///
+/// This fails for a user P2P certificate, which is bound to a generated key
+/// obtained via `p2p_certificate_user_private_key` instead.
+///
+/// # Safety
+///
+/// The calling function must ensure that the `cert` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_device_private_key(
+    cert: *mut P2PCertificate,
+    out: *mut *mut LoadableMsDeviceEnrolmentKey,
+) -> *mut MSAL_ERROR {
+    if cert.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+
+    let cert = unsafe { &mut *cert };
+    match &cert.private_key {
+        P2PPrivateKey::ExistingDevice(key) => {
+            unsafe {
+                *out = Box::into_raw(Box::new(LoadableMsDeviceEnrolmentKey(key.clone())));
+            }
+            no_error()
+        }
+        P2PPrivateKey::GeneratedUser(_) => make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "This certificate is not bound to a device enrolment key!".to_string(),
+        ),
+    }
+}
+
+/// Get the generated key a user P2P certificate is bound to.
+///
+/// The caller must persist this key (via
+/// `serialize_loadable_ms_oapxbc_rsa_key`) to be able to use the certificate,
+/// since it is generated per request and held nowhere else.
+///
+/// This fails for a device P2P certificate, which is bound to the enrolment
+/// key obtained via `p2p_certificate_device_private_key` instead.
+///
+/// # Safety
+///
+/// The calling function must ensure that the `cert` raw pointer is valid and
+/// can be dereferenced, and that `out` is a valid pointer.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_user_private_key(
+    cert: *mut P2PCertificate,
+    out: *mut *mut LoadableMsOapxbcRsaKey,
+) -> *mut MSAL_ERROR {
+    if cert.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+
+    let cert = unsafe { &mut *cert };
+    match &cert.private_key {
+        P2PPrivateKey::GeneratedUser(key) => {
+            unsafe {
+                *out = Box::into_raw(Box::new(LoadableMsOapxbcRsaKey(key.clone())));
+            }
+            no_error()
+        }
+        P2PPrivateKey::ExistingDevice(_) => make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "This certificate is not bound to a generated user key!".to_string(),
+        ),
+    }
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `input` raw pointer is valid and
+/// can be dereferenced.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn p2p_certificate_free(input: *mut P2PCertificate) {
+    free_object!(input);
+}
+
 /// # Safety
 ///
 /// The calling function must ensure that the `error` raw pointer is valid and
