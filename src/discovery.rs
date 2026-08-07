@@ -601,7 +601,7 @@ impl Services {
             let device_id = match subject_name.entries().next() {
                 Some(entry) => entry
                     .data()
-                    .as_utf8()
+                    .to_string()
                     .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?,
                 None => {
                     return Err(MsalError::GeneralFailure(
