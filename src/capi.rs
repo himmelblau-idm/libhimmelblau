@@ -1060,7 +1060,9 @@ pub unsafe extern "C" fn broker_check_user_exists(
 ///
 /// * `username` - Typically a UPN in the form of an email address.
 ///
-/// * `password` - The password.
+/// * `password` - The password, or NULL when there is none to submit. NULL is
+///   the C spelling of the `Option<&str>` the Rust and Python APIs take; it does
+///   not select a flow, which factors may be negotiated is decided by `options`.
 ///
 /// * `options` - An array of `AuthOption` values controlling the flow. May be
 ///   NULL when `options_len` is 0. Pass `NoDAGFallback` to return an error
@@ -1074,9 +1076,10 @@ pub unsafe extern "C" fn broker_check_user_exists(
 ///
 /// # Safety
 ///
-/// The calling function should ensure that `client`, `username`, and
-/// `password`, are valid pointers to their respective types, and that `options`
-/// is either NULL or points to `options_len` valid `AuthOption` values.
+/// The calling function should ensure that `client` and `username` are valid
+/// pointers to their respective types, that `password` is either NULL or a
+/// valid pointer, and that `options` is either NULL or points to `options_len`
+/// valid `AuthOption` values.
 #[cfg(feature = "broker")]
 #[no_mangle]
 pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
@@ -1104,15 +1107,16 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
             );
         }
     };
-    let password = match wrap_c_char(password) {
-        Some(password) => password,
-        None => {
-            return make_error(
-                MSAL_ERROR_CODE::INVALID_POINTER,
-                "Invalid input password!".to_string(),
-            );
-        }
-    };
+    // A NULL password is `None`; a non-NULL one that is not valid UTF-8 stays
+    // an error rather than being silently read as "no password".
+    let password_is_null = password.is_null();
+    let password = wrap_c_char(password);
+    if password.is_none() && !password_is_null {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input password!".to_string(),
+        );
+    }
     let options: &[AuthOption] = if options.is_null() || options_len == 0 {
         &[]
     } else {
@@ -1123,7 +1127,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
         client,
         initiate_acquire_token_by_mfa_flow,
         &username,
-        Some(&password),
+        password.as_deref(),
         options,
         None,
     ) {
@@ -1135,7 +1139,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
         client,
         initiate_acquire_token_by_mfa_flow,
         &username,
-        Some(&password),
+        password.as_deref(),
         options,
         None,
         None, // No specific MFA method
@@ -4157,6 +4161,51 @@ mod tests {
         ));
         assert!(!unsafe { (*err).claims }.is_null());
         assert_eq!(unsafe { (*err).acquire_token_error_codes_len }, 2);
+        unsafe {
+            error_free(err);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "broker"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod broker_mfa_input_tests {
+    use super::*;
+
+    #[test]
+    fn broker_mfa_flow_rejects_non_utf8_password() {
+        let mut client = BrokerClientApplication::new(
+            None,
+            None,
+            None,
+            None,
+            #[cfg(feature = "set_timeout")]
+            std::time::Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4, IpVersion::V6],
+        )
+        .unwrap();
+
+        let username = CString::new("user@example.com").unwrap();
+        let invalid_password = [0xff_u8, 0];
+        let mut flow: *mut MFAAuthContinue = std::ptr::null_mut();
+        let err = unsafe {
+            broker_initiate_acquire_token_by_mfa_flow(
+                &mut client,
+                username.as_ptr(),
+                invalid_password.as_ptr().cast(),
+                std::ptr::null(),
+                0,
+                &mut flow,
+            )
+        };
+
+        assert!(!err.is_null());
+        assert!(matches!(
+            unsafe { (*err).code },
+            MSAL_ERROR_CODE::INVALID_POINTER
+        ));
+        assert!(flow.is_null());
         unsafe {
             error_free(err);
         }
