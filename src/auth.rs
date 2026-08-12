@@ -3746,7 +3746,7 @@ impl PublicClientApplication {
             "isRemoteNGCSupported": options.contains(&AuthOption::Passwordless),
             "isCookieBannerShown": false,
             "isFidoSupported": options.contains(&AuthOption::Fido),
-            "isAccessPassSupported": options.contains(&AuthOption::Passwordless),
+            "isAccessPassSupported": true,
             "originalRequest": &auth_config.sctx,
             "flowToken": &auth_config.sft,
         });
