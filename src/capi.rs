@@ -1162,7 +1162,12 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
 ///
 /// * `username` - Typically a UPN in the form of an email address.
 ///
-/// * `password` - The password.
+/// * `password` - The password, or NULL when there is none to submit. NULL is
+///   the C spelling of the `Option<&str>` the Rust and Python APIs take; it does
+///   not select a flow, which factors may be negotiated is decided by `options`.
+///   The device certificate and transport key are generated locally via the
+///   TPM and are not derived from the password, so passwordless enrollment is
+///   supported the same way passwordless MFA is.
 ///
 /// * `options` - An array of `AuthOption` values controlling the flow. May be
 ///   NULL when `options_len` is 0. Pass `NoDAGFallback` to return an error
@@ -1176,9 +1181,10 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow(
 ///
 /// # Safety
 ///
-/// The calling function should ensure that `client`, `username`, and
-/// `password`, are valid pointers to their respective types, and that `options`
-/// is either NULL or points to `options_len` valid `AuthOption` values.
+/// The calling function should ensure that `client` and `username` are valid
+/// pointers to their respective types, that `password` is either NULL or a
+/// valid pointer, and that `options` is either NULL or points to `options_len`
+/// valid `AuthOption` values.
 #[cfg(feature = "broker")]
 #[no_mangle]
 pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_enrollment(
@@ -1206,15 +1212,16 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
             );
         }
     };
-    let password = match wrap_c_char(password) {
-        Some(password) => password,
-        None => {
-            return make_error(
-                MSAL_ERROR_CODE::INVALID_POINTER,
-                "Invalid input password!".to_string(),
-            );
-        }
-    };
+    // A NULL password is `None`; a non-NULL one that is not valid UTF-8 stays
+    // an error rather than being silently read as "no password".
+    let password_is_null = password.is_null();
+    let password = wrap_c_char(password);
+    if password.is_none() && !password_is_null {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input password!".to_string(),
+        );
+    }
     let options: &[AuthOption] = if options.is_null() || options_len == 0 {
         &[]
     } else {
@@ -1226,7 +1233,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         client,
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
         &username,
-        Some(&password),
+        password.as_deref(),
         options,
         None,
     ) {
@@ -1238,7 +1245,7 @@ pub unsafe extern "C" fn broker_initiate_acquire_token_by_mfa_flow_for_device_en
         client,
         initiate_acquire_token_by_mfa_flow_for_device_enrollment,
         &username,
-        Some(&password),
+        password.as_deref(),
         options,
         None,
         None, // No specific MFA method
@@ -4191,6 +4198,45 @@ mod broker_mfa_input_tests {
         let mut flow: *mut MFAAuthContinue = std::ptr::null_mut();
         let err = unsafe {
             broker_initiate_acquire_token_by_mfa_flow(
+                &mut client,
+                username.as_ptr(),
+                invalid_password.as_ptr().cast(),
+                std::ptr::null(),
+                0,
+                &mut flow,
+            )
+        };
+
+        assert!(!err.is_null());
+        assert!(matches!(
+            unsafe { (*err).code },
+            MSAL_ERROR_CODE::INVALID_POINTER
+        ));
+        assert!(flow.is_null());
+        unsafe {
+            error_free(err);
+        }
+    }
+
+    #[test]
+    fn broker_mfa_flow_for_device_enrollment_rejects_non_utf8_password() {
+        let mut client = BrokerClientApplication::new(
+            None,
+            None,
+            None,
+            None,
+            #[cfg(feature = "set_timeout")]
+            std::time::Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4, IpVersion::V6],
+        )
+        .unwrap();
+
+        let username = CString::new("user@example.com").unwrap();
+        let invalid_password = [0xff_u8, 0];
+        let mut flow: *mut MFAAuthContinue = std::ptr::null_mut();
+        let err = unsafe {
+            broker_initiate_acquire_token_by_mfa_flow_for_device_enrollment(
                 &mut client,
                 username.as_ptr(),
                 invalid_password.as_ptr().cast(),
