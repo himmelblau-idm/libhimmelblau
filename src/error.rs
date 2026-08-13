@@ -95,7 +95,9 @@ pub enum MsalError {
     /// auth gets an MFA challenge page instead of an auth code)
     MFARequired,
     /// The user denied the MFA challenge (e.g., rejected the push notification).
-    /// Returned when DeviceCodeStatus.authorization_state == 1.
+    /// Returned for terminal MFA responses, including
+    /// DeviceCodeStatus.authorization_state == 1 and direct MFA EndAuth
+    /// responses with Retry=false.
     AuthorizationDenied,
     /// A message-bearing failure on the code-submission path, typically an
     /// incorrect or expired one-time code while the MFA flow remains valid.
