@@ -4756,16 +4756,10 @@ impl PublicClientApplication {
                         } else if !auth_response.retry.ok_or(MsalError::GeneralFailure(
                             "Auth response Retry missing".to_string(),
                         ))? {
-                            if let Some(msg) = auth_response.message {
-                                return Err(MsalError::GeneralFailure(format!(
-                                    "AuthResponse did not indicate success: {}",
-                                    msg
-                                )));
-                            } else {
-                                return Err(MsalError::GeneralFailure(
-                                    "EndAuth failed".to_string(),
-                                ));
-                            }
+                            // The server explicitly said not to retry. Treat
+                            // this terminal MFA response as an authorization
+                            // denial rather than restarting a dead flow.
+                            return Err(MsalError::AuthorizationDenied);
                         }
                         Err(MsalError::MFAPollContinue)
                     } else {
