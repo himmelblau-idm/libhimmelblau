@@ -31,6 +31,7 @@ use kanidm_hsm_crypto::{
     structures::{LoadableMsDeviceEnrolmentKey, LoadableRS256Key, StorageKey as MachineKey},
 };
 use openssl::x509::X509;
+use os_release::OsRelease;
 #[cfg(feature = "intune_portal_vers_selection")]
 use regex::Regex;
 use reqwest::header;
@@ -430,6 +431,32 @@ pub async fn fetch_intune_portal_versions(
 
 // Microsoft requires that the app version match a version of their Intune Portal for Linux.
 static APP_VERSION: &str = "1.2511.7";
+
+fn intune_architecture(architecture: &str) -> &str {
+    match architecture {
+        "x86_64" => "X64",
+        "aarch64" => "ARM64",
+        "x86" | "i686" => "X86",
+        architecture => architecture,
+    }
+}
+
+fn device_state_query_parameters(
+    app_version: &str,
+    os_version: &str,
+    architecture: &str,
+) -> [(&'static str, String); 8] {
+    [
+        ("api-version", "16.4".to_string()),
+        ("ssp", "LinuxCP".to_string()),
+        ("ssp-version", app_version.to_string()),
+        ("os", "Linux".to_string()),
+        ("os-version", os_version.to_string()),
+        ("os-sub", "None".to_string()),
+        ("arch", intune_architecture(architecture).to_string()),
+        ("mgmt-agent", "mdm".to_string()),
+    ]
+}
 
 /// PKCS#10 CertificationRequestInfo with an EMPTY constructed context [0] tag.
 /// Microsoft requires the attributes field to be present as an empty CONSTRUCTED tag.
@@ -890,19 +917,19 @@ impl IntuneForLinux {
         token: &UserToken,
         intune_device_id: &str,
     ) -> Result<DeviceInfo, MsalError> {
+        let os_release =
+            OsRelease::new().map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
         let url = Url::parse_with_params(
             &format!(
                 "{}/Devices(guid'{}')",
                 self.service_endpoints.get("IWService")?,
                 intune_device_id,
             ),
-            &[
-                ("api-version", "16.4".to_string()),
-                ("ssp", "LinuxCP".to_string()),
-                ("ssp-version", self.app_vers.clone()),
-                ("os", "Linux".to_string()),
-                ("mgmt-agent", "mdm".to_string()),
-            ],
+            &device_state_query_parameters(
+                &self.app_vers,
+                &os_release.version_id,
+                std::env::consts::ARCH,
+            ),
         )
         .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
 
@@ -930,5 +957,36 @@ impl IntuneForLinux {
         } else {
             Err(MsalError::GeneralFailure(format!("{}", resp.status())))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{device_state_query_parameters, intune_architecture};
+
+    #[test]
+    fn intune_architecture_normalizes_known_values() {
+        assert_eq!(intune_architecture("x86_64"), "X64");
+        assert_eq!(intune_architecture("aarch64"), "ARM64");
+        assert_eq!(intune_architecture("x86"), "X86");
+        assert_eq!(intune_architecture("i686"), "X86");
+        assert_eq!(intune_architecture("riscv64"), "riscv64");
+    }
+
+    #[test]
+    fn device_state_query_contains_platform_metadata() {
+        assert_eq!(
+            device_state_query_parameters("1.2607.4", "24.04", "x86_64"),
+            [
+                ("api-version", "16.4".to_string()),
+                ("ssp", "LinuxCP".to_string()),
+                ("ssp-version", "1.2607.4".to_string()),
+                ("os", "Linux".to_string()),
+                ("os-version", "24.04".to_string()),
+                ("os-sub", "None".to_string()),
+                ("arch", "X64".to_string()),
+                ("mgmt-agent", "mdm".to_string()),
+            ]
+        );
     }
 }
