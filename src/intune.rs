@@ -31,6 +31,7 @@ use kanidm_hsm_crypto::{
     structures::{LoadableMsDeviceEnrolmentKey, LoadableRS256Key, StorageKey as MachineKey},
 };
 use openssl::x509::X509;
+use os_release::OsRelease;
 #[cfg(feature = "intune_portal_vers_selection")]
 use regex::Regex;
 use reqwest::header;
@@ -46,6 +47,7 @@ use serde_json::json;
 use std::collections::BTreeSet;
 #[cfg(feature = "intune_portal_vers_selection")]
 use std::error::Error;
+use std::fs;
 use std::str::FromStr;
 use std::{fmt, time::Duration};
 use x509_cert::attr::Attribute;
@@ -430,6 +432,106 @@ pub async fn fetch_intune_portal_versions(
 
 // Microsoft requires that the app version match a version of their Intune Portal for Linux.
 static APP_VERSION: &str = "1.2511.7";
+const UNKNOWN_OS_VERSION: &str = "0";
+const MAX_HTTP_ERROR_BODY_LEN: usize = 4096;
+
+fn intune_architecture(architecture: &str) -> &str {
+    match architecture {
+        "x86_64" => "X64",
+        "aarch64" => "ARM64",
+        "x86" | "i686" => "X86",
+        architecture => architecture,
+    }
+}
+
+fn device_state_query_parameters(
+    app_version: &str,
+    os_version: &str,
+    architecture: &str,
+) -> [(&'static str, String); 8] {
+    [
+        ("api-version", "16.4".to_string()),
+        ("ssp", "LinuxCP".to_string()),
+        ("ssp-version", app_version.to_string()),
+        ("os", "Linux".to_string()),
+        ("os-version", os_version.to_string()),
+        ("os-sub", "None".to_string()),
+        ("arch", intune_architecture(architecture).to_string()),
+        ("mgmt-agent", "mdm".to_string()),
+    ]
+}
+
+fn select_device_state_os_version(
+    distro_version: Option<&str>,
+    kernel_version: Option<&str>,
+) -> String {
+    distro_version
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .or_else(|| {
+            kernel_version
+                .map(str::trim)
+                .filter(|version| !version.is_empty())
+        })
+        .unwrap_or(UNKNOWN_OS_VERSION)
+        .to_string()
+}
+
+fn device_state_os_version() -> String {
+    let distro_version = OsRelease::new().ok().map(|release| release.version_id);
+    let kernel_version = fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+
+    select_device_state_os_version(distro_version.as_deref(), kernel_version.as_deref())
+}
+
+fn device_state_url(
+    iwservice_url: &str,
+    intune_device_id: &str,
+    app_version: &str,
+    os_version: &str,
+    architecture: &str,
+) -> Result<Url, MsalError> {
+    Url::parse_with_params(
+        &format!("{}/Devices(guid'{}')", iwservice_url, intune_device_id),
+        &device_state_query_parameters(app_version, os_version, architecture),
+    )
+    .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))
+}
+
+fn device_state_request(
+    client: &reqwest::Client,
+    url: Url,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .get(url)
+        .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+        .header(header::ACCEPT, "application/json")
+}
+
+fn sanitize_http_error_body(body: &str) -> String {
+    body.chars()
+        .flat_map(char::escape_default)
+        .take(MAX_HTTP_ERROR_BODY_LEN)
+        .collect()
+}
+
+async fn http_status_error(operation: &str, resp: reqwest::Response) -> MsalError {
+    let status = resp.status();
+    let body = match resp.text().await {
+        Ok(body) => sanitize_http_error_body(&body),
+        Err(e) => format!("unable to read response body: {}", e),
+    };
+
+    if body.is_empty() {
+        MsalError::GeneralFailure(format!("{} request failed: {}", operation, status))
+    } else {
+        MsalError::GeneralFailure(format!(
+            "{} request failed: {}: {}",
+            operation, status, body
+        ))
+    }
+}
 
 /// PKCS#10 CertificationRequestInfo with an EMPTY constructed context [0] tag.
 /// Microsoft requires the attributes field to be present as an empty CONSTRUCTED tag.
@@ -792,7 +894,7 @@ impl IntuneForLinux {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+            Err(http_status_error("details", resp).await)
         }
     }
 
@@ -837,7 +939,7 @@ impl IntuneForLinux {
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(status_resp)
         } else {
-            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+            Err(http_status_error("status", resp).await)
         }
     }
 
@@ -881,7 +983,7 @@ impl IntuneForLinux {
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(json_resp.policies)
         } else {
-            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+            Err(http_status_error("policies", resp).await)
         }
     }
 
@@ -890,21 +992,14 @@ impl IntuneForLinux {
         token: &UserToken,
         intune_device_id: &str,
     ) -> Result<DeviceInfo, MsalError> {
-        let url = Url::parse_with_params(
-            &format!(
-                "{}/Devices(guid'{}')",
-                self.service_endpoints.get("IWService")?,
-                intune_device_id,
-            ),
-            &[
-                ("api-version", "16.4".to_string()),
-                ("ssp", "LinuxCP".to_string()),
-                ("ssp-version", self.app_vers.clone()),
-                ("os", "Linux".to_string()),
-                ("mgmt-agent", "mdm".to_string()),
-            ],
-        )
-        .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+        let os_version = device_state_os_version();
+        let url = device_state_url(
+            self.service_endpoints.get("IWService")?,
+            intune_device_id,
+            &self.app_vers,
+            &os_version,
+            std::env::consts::ARCH,
+        )?;
 
         // The access token must be for the resource b8066b99-6e67-41be-abfa-75db1a2c8809
         let access_token = token.access_token.as_ref().ok_or_else(|| {
@@ -913,10 +1008,7 @@ impl IntuneForLinux {
             )
         })?;
 
-        let resp = self
-            .client
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+        let resp = device_state_request(&self.client, url, access_token)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -928,7 +1020,112 @@ impl IntuneForLinux {
                 .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Ok(json_resp)
         } else {
-            Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+            Err(http_status_error("device-state", resp).await)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        device_state_query_parameters, device_state_request, device_state_url, intune_architecture,
+        sanitize_http_error_body, select_device_state_os_version, MAX_HTTP_ERROR_BODY_LEN,
+    };
+    use reqwest::header;
+
+    #[test]
+    fn intune_architecture_normalizes_known_values() {
+        assert_eq!(intune_architecture("x86_64"), "X64");
+        assert_eq!(intune_architecture("aarch64"), "ARM64");
+        assert_eq!(intune_architecture("x86"), "X86");
+        assert_eq!(intune_architecture("i686"), "X86");
+        assert_eq!(intune_architecture("riscv64"), "riscv64");
+    }
+
+    #[test]
+    fn device_state_query_contains_platform_metadata() {
+        assert_eq!(
+            device_state_query_parameters("1.2607.4", "24.04", "x86_64"),
+            [
+                ("api-version", "16.4".to_string()),
+                ("ssp", "LinuxCP".to_string()),
+                ("ssp-version", "1.2607.4".to_string()),
+                ("os", "Linux".to_string()),
+                ("os-version", "24.04".to_string()),
+                ("os-sub", "None".to_string()),
+                ("arch", "X64".to_string()),
+                ("mgmt-agent", "mdm".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn device_state_os_version_uses_fail_soft_fallbacks() {
+        assert_eq!(
+            select_device_state_os_version(Some(" 24.04 \n"), Some("6.8.0-79-generic")),
+            "24.04"
+        );
+        assert_eq!(
+            select_device_state_os_version(Some("  "), Some(" 6.8.0-79-generic\n")),
+            "6.8.0-79-generic"
+        );
+        assert_eq!(
+            select_device_state_os_version(None, Some("6.8.0-79-generic")),
+            "6.8.0-79-generic"
+        );
+        assert_eq!(select_device_state_os_version(Some(""), Some("\n")), "0");
+        assert_eq!(select_device_state_os_version(None, None), "0");
+    }
+
+    #[test]
+    fn device_state_request_matches_wire_format() -> Result<(), String> {
+        let url = device_state_url(
+            "https://example.test/StatelessIWService",
+            "33ca45ed-7b2a-42d1-b96d-ab07aecf330a",
+            "1.2607.4",
+            "24.04",
+            "x86_64",
+        )
+        .map_err(|e| format!("{:?}", e))?;
+        let request = device_state_request(&reqwest::Client::new(), url, "secret")
+            .build()
+            .map_err(|e| format!("{:?}", e))?;
+        let query: std::collections::BTreeMap<_, _> =
+            request.url().query_pairs().into_owned().collect();
+
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(
+            request.headers().get(header::ACCEPT),
+            Some(&header::HeaderValue::from_static("application/json"))
+        );
+        assert_eq!(query.get("api-version").map(String::as_str), Some("16.4"));
+        assert_eq!(query.get("ssp").map(String::as_str), Some("LinuxCP"));
+        assert_eq!(
+            query.get("ssp-version").map(String::as_str),
+            Some("1.2607.4")
+        );
+        assert_eq!(query.get("os").map(String::as_str), Some("Linux"));
+        assert_eq!(query.get("os-version").map(String::as_str), Some("24.04"));
+        assert_eq!(query.get("os-sub").map(String::as_str), Some("None"));
+        assert_eq!(query.get("arch").map(String::as_str), Some("X64"));
+        assert_eq!(query.get("mgmt-agent").map(String::as_str), Some("mdm"));
+        assert_eq!(query.len(), 8);
+
+        Ok(())
+    }
+
+    #[test]
+    fn http_error_body_is_escaped_and_bounded() {
+        let body = format!(
+            "line one\nline two\0{}",
+            "x".repeat(MAX_HTTP_ERROR_BODY_LEN)
+        );
+        let sanitized = sanitize_http_error_body(&body);
+
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\0'));
+        assert!(sanitized.contains("\\n"));
+        assert!(sanitized.contains("\\u{0}"));
+        assert_eq!(sanitized.len(), MAX_HTTP_ERROR_BODY_LEN);
     }
 }
