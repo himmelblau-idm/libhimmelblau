@@ -84,10 +84,10 @@ use openssl::asn1::{Asn1Time, Asn1TimeRef};
 use openssl::hash::{hash, MessageDigest};
 #[cfg(feature = "broker")]
 use openssl::pkey::{PKey, Public};
-#[cfg(feature = "broker")]
 use openssl::rand::rand_bytes;
 #[cfg(feature = "broker")]
 use openssl::rsa::Rsa;
+use openssl::sha::sha256;
 #[cfg(feature = "broker")]
 use openssl::sign::Signer;
 #[cfg(feature = "broker")]
@@ -703,6 +703,40 @@ pub struct UserToken {
     #[cfg(feature = "broker")]
     #[zeroize(skip)]
     pub prt: Option<SealedData>,
+}
+
+#[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+pub struct AuthorizationCodePkceFlow {
+    pub auth_url: String,
+    pub redirect_uri: String,
+    pub state: String,
+    scope: String,
+    code_verifier: String,
+}
+
+impl AuthorizationCodePkceFlow {
+    pub fn auth_url(&self) -> &str {
+        &self.auth_url
+    }
+
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+}
+
+fn generate_base64url_random(bytes_len: usize) -> Result<String, MsalError> {
+    let mut bytes = vec![0u8; bytes_len];
+    rand_bytes(&mut bytes)
+        .map_err(|e| MsalError::CryptoFail(format!("Failed generating random bytes: {}", e)))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn pkce_code_challenge(code_verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(sha256(code_verifier.as_bytes()))
 }
 
 impl UserToken {
@@ -2129,6 +2163,141 @@ impl PublicClientApplication {
         self.app
             .acquire_token_by_refresh_token(refresh_token, scopes)
             .await
+    }
+
+    /// Initiate an OAuth 2.0 authorization code flow with PKCE.
+    ///
+    /// This returns the authentication URL and flow state. The caller is
+    /// responsible for opening or presenting the URL and capturing the final
+    /// redirect URI.
+    ///
+    /// # Arguments
+    ///
+    /// * `scopes` - Scopes requested to access a protected API.
+    /// * `redirect_uri` - A redirect URI registered for the application.
+    ///
+    /// # Returns
+    ///
+    /// * Success: An AuthorizationCodePkceFlow containing the authentication URL.
+    /// * Failure: An MsalError, indicating the failure.
+    pub fn initiate_authorization_code_pkce_flow(
+        &self,
+        scopes: Vec<&str>,
+        redirect_uri: &str,
+    ) -> Result<AuthorizationCodePkceFlow, MsalError> {
+        if redirect_uri.trim().is_empty() {
+            return Err(MsalError::ConfigError(
+                "redirect_uri must not be empty".to_string(),
+            ));
+        }
+
+        let mut all_scopes = vec!["openid", "profile", "offline_access"];
+        all_scopes.extend(scopes);
+        let scope = all_scopes.join(" ");
+        let code_verifier = generate_base64url_random(32)?;
+        let code_challenge = pkce_code_challenge(&code_verifier);
+        let state = generate_base64url_random(32)?;
+
+        let url = Url::parse_with_params(
+            &format!("{}/oauth2/v2.0/authorize", self.authority()?),
+            [
+                ("client_id", self.client_id()),
+                ("response_type", "code"),
+                ("redirect_uri", redirect_uri),
+                ("response_mode", "query"),
+                ("scope", &scope),
+                ("state", &state),
+                ("code_challenge", &code_challenge),
+                ("code_challenge_method", "S256"),
+            ],
+        )
+        .map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+
+        Ok(AuthorizationCodePkceFlow {
+            auth_url: url.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            state,
+            scope,
+            code_verifier,
+        })
+    }
+
+    /// Exchange a captured authorization-code redirect for a token.
+    ///
+    /// The supplied `redirect_url` should be the full URI received by the
+    /// caller after the user-agent redirects back to the registered redirect
+    /// URI. This function parses the authorization code, validates `state`,
+    /// and submits the PKCE verifier.
+    pub async fn acquire_token_by_authorization_code_pkce_flow(
+        &self,
+        flow: &AuthorizationCodePkceFlow,
+        redirect_url: &str,
+    ) -> Result<UserToken, MsalError> {
+        let url =
+            Url::parse(redirect_url).map_err(|e| MsalError::URLFormatFailed(format!("{}", e)))?;
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+
+        if let Some(error) = params.get("error") {
+            return Err(MsalError::AcquireTokenFailed(ErrorResponse {
+                error: error.clone(),
+                error_description: params.get("error_description").cloned().unwrap_or_default(),
+                suberror: params.get("suberror").cloned(),
+                error_codes: Vec::new(),
+            }));
+        }
+
+        let returned_state = params
+            .get("state")
+            .ok_or_else(|| MsalError::InvalidParse("state missing from redirect".to_string()))?;
+        if returned_state != &flow.state {
+            return Err(MsalError::InvalidParse(
+                "state returned by redirect does not match the PKCE flow".to_string(),
+            ));
+        }
+
+        let code = params
+            .get("code")
+            .ok_or_else(|| MsalError::InvalidParse("code missing from redirect".to_string()))?;
+
+        let form = self.authorization_code_pkce_token_form(flow, code);
+
+        let resp = self
+            .client()
+            .post(format!("{}/oauth2/v2.0/token", self.authority()?))
+            .header(header::ACCEPT, "application/json")
+            .form(&form)
+            .send()
+            .await
+            .map_err(|e| MsalError::request_failed(&e))?;
+        if resp.status().is_success() {
+            let token: UserToken = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Ok(token)
+        } else {
+            let json_resp: ErrorResponse = resp
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(json_resp))
+        }
+    }
+
+    fn authorization_code_pkce_token_form<'a>(
+        &'a self,
+        flow: &'a AuthorizationCodePkceFlow,
+        code: &'a str,
+    ) -> [(&'static str, &'a str); 7] {
+        [
+            ("client_id", self.client_id()),
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", flow.redirect_uri.as_str()),
+            ("scope", flow.scope.as_str()),
+            ("code_verifier", flow.code_verifier.as_str()),
+            ("client_info", "1"),
+        ]
     }
 
     /// Initiate a Device Flow instance, which will be used in
@@ -5440,6 +5609,30 @@ impl BrokerClientApplication {
         Ok(token)
     }
 
+    /// Initiate an OAuth 2.0 authorization code flow with PKCE.
+    ///
+    /// The caller is responsible for opening or presenting the returned URL
+    /// and capturing the final redirect URI.
+    pub fn initiate_authorization_code_pkce_flow(
+        &self,
+        scopes: Vec<&str>,
+        redirect_uri: &str,
+    ) -> Result<AuthorizationCodePkceFlow, MsalError> {
+        self.app
+            .initiate_authorization_code_pkce_flow(scopes, redirect_uri)
+    }
+
+    /// Exchange a captured authorization-code redirect for a token.
+    pub async fn acquire_token_by_authorization_code_pkce_flow(
+        &self,
+        flow: &AuthorizationCodePkceFlow,
+        redirect_url: &str,
+    ) -> Result<UserToken, MsalError> {
+        self.app
+            .acquire_token_by_authorization_code_pkce_flow(flow, redirect_url)
+            .await
+    }
+
     /// Gets a token for enrollment via user credentials.
     ///
     /// # Arguments
@@ -8558,6 +8751,139 @@ mod tests {
             #[cfg(feature = "broker")]
             prt: None,
         }
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_vector() {
+        assert_eq!(
+            pkce_code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn initiate_authorization_code_pkce_flow_builds_expected_url() {
+        let app = PublicClientApplication::new(
+            "client-id",
+            Some("https://login.microsoftonline.com/tenant"),
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[],
+        )
+        .unwrap();
+
+        let flow = app
+            .initiate_authorization_code_pkce_flow(
+                vec!["https://graph.microsoft.com/User.Read"],
+                "http://localhost/callback",
+            )
+            .unwrap();
+        let url = Url::parse(&flow.auth_url).unwrap();
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+
+        assert_eq!(
+            url.as_str().split('?').next().unwrap(),
+            "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize"
+        );
+        assert_eq!(params["client_id"], "client-id");
+        assert_eq!(params["response_type"], "code");
+        assert_eq!(params["redirect_uri"], "http://localhost/callback");
+        assert_eq!(params["response_mode"], "query");
+        assert_eq!(
+            params["scope"],
+            "openid profile offline_access https://graph.microsoft.com/User.Read"
+        );
+        assert_eq!(params["state"], flow.state);
+        assert_eq!(
+            params["code_challenge"],
+            pkce_code_challenge(&flow.code_verifier)
+        );
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert!(flow.code_verifier.len() >= 43);
+    }
+
+    #[tokio::test]
+    async fn acquire_token_by_authorization_code_pkce_flow_rejects_wrong_state() {
+        let app = PublicClientApplication::new(
+            "client-id",
+            Some("https://login.microsoftonline.com/tenant"),
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[],
+        )
+        .unwrap();
+        let flow = app
+            .initiate_authorization_code_pkce_flow(vec!["User.Read"], "http://localhost/callback")
+            .unwrap();
+
+        let result = app
+            .acquire_token_by_authorization_code_pkce_flow(
+                &flow,
+                "http://localhost/callback?code=abc&state=wrong",
+            )
+            .await;
+
+        assert!(matches!(result, Err(MsalError::InvalidParse(_))));
+    }
+
+    #[tokio::test]
+    async fn acquire_token_by_authorization_code_pkce_flow_maps_redirect_error() {
+        let app = PublicClientApplication::new(
+            "client-id",
+            Some("https://login.microsoftonline.com/tenant"),
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[],
+        )
+        .unwrap();
+        let flow = app
+            .initiate_authorization_code_pkce_flow(vec!["User.Read"], "http://localhost/callback")
+            .unwrap();
+        let redirect = format!(
+            "http://localhost/callback?error=access_denied&error_description=nope&state={}",
+            flow.state
+        );
+
+        let result = app
+            .acquire_token_by_authorization_code_pkce_flow(&flow, &redirect)
+            .await;
+
+        assert!(matches!(result, Err(MsalError::AcquireTokenFailed(_))));
+        if let Err(MsalError::AcquireTokenFailed(error)) = result {
+            assert_eq!(error.error, "access_denied");
+            assert_eq!(error.error_description, "nope");
+        }
+    }
+
+    #[test]
+    fn authorization_code_pkce_token_form_contains_expected_fields() {
+        let app = PublicClientApplication::new(
+            "client-id",
+            Some("https://login.microsoftonline.com/tenant"),
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(3),
+            #[cfg(feature = "ipvers")]
+            &[],
+        )
+        .unwrap();
+        let flow = app
+            .initiate_authorization_code_pkce_flow(vec!["User.Read"], "http://localhost/callback")
+            .unwrap();
+        let form: HashMap<&str, &str> = app
+            .authorization_code_pkce_token_form(&flow, "auth-code")
+            .into_iter()
+            .collect();
+
+        assert_eq!(form["client_id"], "client-id");
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["code"], "auth-code");
+        assert_eq!(form["redirect_uri"], "http://localhost/callback");
+        assert_eq!(form["scope"], "openid profile offline_access User.Read");
+        assert_eq!(form["code_verifier"], flow.code_verifier);
+        assert_eq!(form["client_info"], "1");
     }
 
     #[cfg(feature = "broker")]
