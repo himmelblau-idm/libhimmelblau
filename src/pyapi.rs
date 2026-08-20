@@ -7,9 +7,9 @@ use crate::confidential_client::{ClientCredential, ConfidentialClientApplication
 use crate::error::MsalError;
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
-    AuthInit, AuthOption, BrokerClientApplication, DeviceAuthorizationResponse, EnrollAttrs,
-    MFAAuthContinue, MfaMethodInfo, P2PCertificate, P2PPrivateKey, PublicClientApplication,
-    UserToken,
+    AuthInit, AuthOption, AuthorizationCodePkceFlow, BrokerClientApplication,
+    DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue, MfaMethodInfo, P2PCertificate,
+    P2PPrivateKey, PublicClientApplication, UserToken,
 };
 
 use kanidm_hsm_crypto::provider::{BoxedDynTpm, SoftTpm};
@@ -146,6 +146,41 @@ serialize_impl!(LoadableMsDeviceEnrolmentKey, key);
 #[pyclass(name = "DeviceAuthorizationResponse", module = "himmelblau", subclass)]
 pub struct PyDeviceAuthorizationResponse {
     flow: DeviceAuthorizationResponse,
+}
+
+#[pyclass(name = "AuthorizationCodePkceFlow", module = "himmelblau", subclass)]
+pub struct PyAuthorizationCodePkceFlow {
+    flow: AuthorizationCodePkceFlow,
+}
+
+#[pymethods]
+impl PyAuthorizationCodePkceFlow {
+    fn to_bytes(&self) -> PyResult<Py<PyAny>> {
+        let bytes = serialize_obj(&self.flow).map_err(|e| to_pyerr!(e))?;
+        Python::attach(|py| Ok(PyBytes::new(py, &bytes).into()))
+    }
+
+    #[classmethod]
+    fn from_bytes(_cls: &Bound<'_, PyType>, bytes: &Bound<'_, PyBytes>) -> PyResult<Self> {
+        let flow: AuthorizationCodePkceFlow =
+            deserialize_obj(bytes.as_bytes()).map_err(|e| to_pyerr!(e))?;
+        Ok(PyAuthorizationCodePkceFlow { flow })
+    }
+
+    #[getter]
+    fn auth_url(&self) -> PyResult<String> {
+        Ok(self.flow.auth_url.clone())
+    }
+
+    #[getter]
+    fn redirect_uri(&self) -> PyResult<String> {
+        Ok(self.flow.redirect_uri.clone())
+    }
+
+    #[getter]
+    fn state(&self) -> PyResult<String> {
+        Ok(self.flow.state.clone())
+    }
 }
 
 #[pyclass(name = "MfaMethodInfo", module = "himmelblau", subclass)]
@@ -714,6 +749,34 @@ impl PyPublicClientApplication {
     }
 
     #[allow(clippy::needless_pass_by_value)]
+    pub fn initiate_authorization_code_pkce_flow(
+        &self,
+        scopes: Vec<String>,
+        redirect_uri: &str,
+    ) -> PyResult<PyAuthorizationCodePkceFlow> {
+        let flow = self
+            .client
+            .initiate_authorization_code_pkce_flow(str_vec_ref!(scopes), redirect_uri)
+            .map_err(|e| to_pyerr!(e))?;
+        Ok(PyAuthorizationCodePkceFlow { flow })
+    }
+
+    pub fn acquire_token_by_authorization_code_pkce_flow(
+        &self,
+        flow: &PyAuthorizationCodePkceFlow,
+        redirect_url: &str,
+    ) -> PyResult<PyUserToken> {
+        Ok(PyUserToken {
+            token: run_async!(
+                self.client,
+                acquire_token_by_authorization_code_pkce_flow,
+                &flow.flow,
+                redirect_url
+            ),
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
     pub fn acquire_token_by_username_password(
         &self,
         username: &str,
@@ -805,6 +868,7 @@ impl PyBrokerClientApplication {
                 password,
                 str_vec_ref!(scopes),
                 request_resource,
+                #[cfg(feature = "on_behalf_of")]
                 None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
@@ -828,6 +892,7 @@ impl PyBrokerClientApplication {
                 refresh_token,
                 str_vec_ref!(scopes),
                 request_resource,
+                #[cfg(feature = "on_behalf_of")]
                 None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
@@ -870,6 +935,34 @@ impl PyBrokerClientApplication {
     pub fn check_user_exists(&self, username: &str) -> PyResult<PyAuthInit> {
         let auth_init = run_async!(self.client, check_user_exists, username, &[]);
         Ok(PyAuthInit { auth_init })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn initiate_authorization_code_pkce_flow(
+        &self,
+        scopes: Vec<String>,
+        redirect_uri: &str,
+    ) -> PyResult<PyAuthorizationCodePkceFlow> {
+        let flow = self
+            .client
+            .initiate_authorization_code_pkce_flow(str_vec_ref!(scopes), redirect_uri)
+            .map_err(|e| to_pyerr!(e))?;
+        Ok(PyAuthorizationCodePkceFlow { flow })
+    }
+
+    pub fn acquire_token_by_authorization_code_pkce_flow(
+        &self,
+        flow: &PyAuthorizationCodePkceFlow,
+        redirect_url: &str,
+    ) -> PyResult<PyUserToken> {
+        Ok(PyUserToken {
+            token: run_async!(
+                self.client,
+                acquire_token_by_authorization_code_pkce_flow,
+                &flow.flow,
+                redirect_url
+            ),
+        })
     }
 
     #[allow(clippy::needless_pass_by_value)] // PyO3 requires owned types
@@ -1029,6 +1122,7 @@ impl PyBrokerClientApplication {
                 &sealed_prt.data,
                 str_vec_ref!(scope),
                 request_resource,
+                #[cfg(feature = "on_behalf_of")]
                 None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
@@ -1127,6 +1221,7 @@ impl PyBrokerClientApplication {
                 &key.key,
                 str_vec_ref!(scopes),
                 request_resource,
+                #[cfg(feature = "on_behalf_of")]
                 None, // on_behalf_of_client_id
                 &mut tpm.tpm,
                 &machine_key.key,
@@ -1410,6 +1505,7 @@ fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyP2PCertificate>()?;
     m.add_class::<PyEnrollAttrs>()?;
     m.add_class::<PyDeviceAuthorizationResponse>()?;
+    m.add_class::<PyAuthorizationCodePkceFlow>()?;
     m.add_class::<PyMfaMethodInfo>()?;
     m.add_class::<PyMFAAuthContinue>()?;
     m.add_class::<PyUserToken>()?;

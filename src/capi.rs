@@ -819,6 +819,123 @@ pub unsafe extern "C" fn broker_acquire_token_by_refresh_token(
     no_error()
 }
 
+/// Initiate an OAuth 2.0 authorization code flow with PKCE.
+///
+/// This returns an AuthorizationCodePkceFlow containing an auth URL. The
+/// caller is responsible for opening or presenting the URL and capturing the
+/// final redirect URI.
+///
+/// # Safety
+///
+/// The calling function must ensure that `client` is a valid
+/// BrokerClientApplication pointer, `scopes` is either NULL when `scopes_len`
+/// is 0 or points to `scopes_len` valid C strings, `redirect_uri` is a valid
+/// C string, and `out` is a valid output pointer.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_initiate_authorization_code_pkce_flow(
+    client: *mut BrokerClientApplication,
+    scopes: *const *const c_char,
+    scopes_len: c_int,
+    redirect_uri: *const c_char,
+    out: *mut *mut AuthorizationCodePkceFlow,
+) -> *mut MSAL_ERROR {
+    if client.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input client!".to_string(),
+        );
+    }
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+
+    let client = unsafe { &mut *client };
+    let scopes = match str_array_to_vec(scopes, scopes_len) {
+        Ok(scopes) => scopes,
+        Err(e) => return e,
+    };
+    let redirect_uri = match wrap_c_char(redirect_uri) {
+        Some(redirect_uri) => redirect_uri,
+        None => {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input redirect_uri!".to_string(),
+            );
+        }
+    };
+
+    match client.initiate_authorization_code_pkce_flow(str_vec_ref!(scopes), &redirect_uri) {
+        Ok(flow) => {
+            unsafe {
+                *out = Box::into_raw(Box::new(flow));
+            }
+            no_error()
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            make_error(MSAL_ERROR_CODE::from(e), msg)
+        }
+    }
+}
+
+/// Exchange a captured authorization-code redirect for a token.
+///
+/// # Safety
+///
+/// The calling function must ensure that `client`, `flow`, `redirect_url`, and
+/// `out` are valid pointers.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_acquire_token_by_authorization_code_pkce_flow(
+    client: *mut BrokerClientApplication,
+    flow: *mut AuthorizationCodePkceFlow,
+    redirect_url: *const c_char,
+    out: *mut *mut UserToken,
+) -> *mut MSAL_ERROR {
+    if client.is_null() || flow.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
+    }
+    if out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid output parameter!".to_string(),
+        );
+    }
+
+    let client = unsafe { &mut *client };
+    let flow = unsafe { &mut *flow };
+    let redirect_url = match wrap_c_char(redirect_url) {
+        Some(redirect_url) => redirect_url,
+        None => {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid input redirect_url!".to_string(),
+            );
+        }
+    };
+
+    let resp = match run_async!(
+        client,
+        acquire_token_by_authorization_code_pkce_flow,
+        flow,
+        &redirect_url,
+    ) {
+        Ok(resp) => resp,
+        Err(e) => return e,
+    };
+    unsafe {
+        *out = Box::into_raw(Box::new(resp));
+    }
+    no_error()
+}
+
 /// Gets a token for enrollment via user credentials.
 ///
 /// # Arguments
@@ -2422,6 +2539,63 @@ pub unsafe extern "C" fn user_token_prt(
     }
 }
 
+/// Get the authentication URL from an AuthorizationCodePkceFlow.
+///
+/// # Safety
+///
+/// The calling function must ensure that `flow` and `out` are valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn authorization_code_pkce_flow_auth_url(
+    flow: *mut AuthorizationCodePkceFlow,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if flow.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
+    }
+    c_str_from_object_string!(flow, auth_url, out)
+}
+
+/// Get the redirect URI from an AuthorizationCodePkceFlow.
+///
+/// # Safety
+///
+/// The calling function must ensure that `flow` and `out` are valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn authorization_code_pkce_flow_redirect_uri(
+    flow: *mut AuthorizationCodePkceFlow,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if flow.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
+    }
+    c_str_from_object_string!(flow, redirect_uri, out)
+}
+
+/// Get the state from an AuthorizationCodePkceFlow.
+///
+/// # Safety
+///
+/// The calling function must ensure that `flow` and `out` are valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn authorization_code_pkce_flow_state(
+    flow: *mut AuthorizationCodePkceFlow,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if flow.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
+    }
+    c_str_from_object_string!(flow, state, out)
+}
+
 macro_rules! broker_store_tgt {
     ($func:ident, $client:ident, $sealed_prt:ident, $filename:ident, $tpm:ident, $machine_key:ident) => {{
         if $client.is_null() || $sealed_prt.is_null() || $tpm.is_null() || $machine_key.is_null() {
@@ -3168,6 +3342,15 @@ pub unsafe extern "C" fn loadable_ms_hello_key_free(input: *mut LoadableMsHelloK
 /// can be dereferenced.
 #[no_mangle]
 pub unsafe extern "C" fn user_token_free(input: *mut UserToken) {
+    free_object!(input);
+}
+
+/// # Safety
+///
+/// The calling function must ensure that the `input` raw pointer is valid and
+/// can be dereferenced.
+#[no_mangle]
+pub unsafe extern "C" fn authorization_code_pkce_flow_free(input: *mut AuthorizationCodePkceFlow) {
     free_object!(input);
 }
 
