@@ -534,6 +534,131 @@ impl CredType {
     }
 }
 
+const MAX_ADFS_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ADFS_REDIRECTS: usize = 5;
+
+#[derive(Debug, PartialEq, Eq)]
+struct WsFedForm {
+    wa: String,
+    wresult: String,
+    wctx: String,
+}
+
+fn parse_adfs_federation_url(value: &str) -> Result<Option<Url>, MsalError> {
+    let url = Url::parse(value)
+        .map_err(|e| MsalError::URLFormatFailed(format!("Invalid federation URL: {e}")))?;
+    let is_adfs = url
+        .path_segments()
+        .map(|segments| {
+            segments
+                .into_iter()
+                .any(|segment| segment.eq_ignore_ascii_case("adfs"))
+        })
+        .unwrap_or(false);
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || !is_adfs
+    {
+        return Ok(None);
+    }
+    Ok(Some(url))
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdfsRequestMethod {
+    Get,
+    PostCredentials,
+}
+
+fn resolve_adfs_redirect(
+    origin: &Url,
+    current: &Url,
+    location: &str,
+    status: u16,
+    method: AdfsRequestMethod,
+) -> Result<(Url, AdfsRequestMethod), MsalError> {
+    let next = current
+        .join(location)
+        .map_err(|e| MsalError::URLFormatFailed(format!("Invalid AD FS redirect URL: {e}")))?;
+    if next.scheme() != "https"
+        || !same_origin(origin, &next)
+        || !next.username().is_empty()
+        || next.password().is_some()
+        || next.fragment().is_some()
+    {
+        return Err(MsalError::GeneralFailure(
+            "AD FS attempted an unsafe redirect".to_string(),
+        ));
+    }
+    let next_method = if matches!(status, 307 | 308) {
+        method
+    } else {
+        AdfsRequestMethod::Get
+    };
+    Ok((next, next_method))
+}
+
+fn entra_login_srf_url(authority: &str) -> Result<Url, MsalError> {
+    let mut url = Url::parse(authority)
+        .map_err(|e| MsalError::URLFormatFailed(format!("Invalid authority URL: {e}")))?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err(MsalError::URLFormatFailed(
+            "Entra authority must be an absolute HTTPS URL".to_string(),
+        ));
+    }
+    url.set_path("/login.srf");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn parse_ws_fed_form(text: &str) -> Result<WsFedForm, MsalError> {
+    let document = Html::parse_document(text);
+    let form_selector = Selector::parse("form")
+        .map_err(|e| MsalError::InvalidParse(format!("Failed parsing AD FS form: {e:?}")))?;
+    let input_selector = Selector::parse("input")
+        .map_err(|e| MsalError::InvalidParse(format!("Failed parsing AD FS inputs: {e:?}")))?;
+
+    for form in document.select(&form_selector) {
+        let mut wa = None;
+        let mut wresult = None;
+        let mut wctx = None;
+        for input in form.select(&input_selector) {
+            let Some(name) = input.value().attr("name") else {
+                continue;
+            };
+            let Some(value) = input.value().attr("value") else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("wa") {
+                wa = Some(value.to_string());
+            } else if name.eq_ignore_ascii_case("wresult") {
+                wresult = Some(value.to_string());
+            } else if name.eq_ignore_ascii_case("wctx") {
+                wctx = Some(value.to_string());
+            }
+        }
+        if let (Some(wa), Some(wresult), Some(wctx)) = (wa, wresult, wctx) {
+            if wa == "wsignin1.0" && !wresult.is_empty() && !wctx.is_empty() {
+                return Ok(WsFedForm { wa, wresult, wctx });
+            }
+        }
+    }
+
+    Err(MsalError::GeneralFailure(
+        "AD FS did not return a supported WS-Federation sign-in response".to_string(),
+    ))
+}
+
 #[derive(Default, Clone, Deserialize, Serialize)]
 #[cfg_attr(test, derive(Eq, PartialEq, Debug))]
 pub struct IdToken {
@@ -3117,7 +3242,7 @@ impl PublicClientApplication {
         } else {
             env!("CARGO_PKG_NAME")
         };
-        let mut resp = self
+        let resp = self
             .client()
             .post(url)
             .header(header::USER_AGENT, user_agent)
@@ -3126,12 +3251,24 @@ impl PublicClientApplication {
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
+        self.handle_auth_config_response_internal(resp, password_change)
+            .await
+    }
+
+    async fn handle_auth_config_response_internal(
+        &self,
+        mut resp: Response,
+        password_change: bool,
+    ) -> Result<AuthConfig, MsalError> {
         let text;
         (text, resp) = self.await_working(resp).await?;
         if resp.status().is_success() {
             self.parse_auth_config(&text, false, password_change)
         } else if resp.status().is_redirection() {
-            let redirect = resp.headers()["location"]
+            let redirect = resp
+                .headers()
+                .get(header::LOCATION)
+                .ok_or_else(|| MsalError::InvalidParse("Redirect location is missing".to_string()))?
                 .to_str()
                 .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?;
             let url =
@@ -3184,6 +3321,128 @@ impl PublicClientApplication {
         }
     }
 
+    async fn read_adfs_response_body(&self, mut resp: Response) -> Result<String, MsalError> {
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| MsalError::RequestFailed(format!("Failed reading AD FS response: {e}")))?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_ADFS_RESPONSE_BYTES {
+                return Err(MsalError::GeneralFailure(
+                    "AD FS response exceeded the 2 MiB limit".to_string(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        String::from_utf8(body)
+            .map_err(|e| MsalError::InvalidParse(format!("AD FS response was not UTF-8: {e}")))
+    }
+
+    async fn request_adfs_form_internal(
+        &self,
+        federation_url: Url,
+        username: &str,
+        password: &str,
+    ) -> Result<String, MsalError> {
+        let origin = federation_url.clone();
+        let mut url = federation_url;
+        let mut method = AdfsRequestMethod::PostCredentials;
+
+        for redirect_count in 0..=MAX_ADFS_REDIRECTS {
+            let response = if method == AdfsRequestMethod::PostCredentials {
+                self.client()
+                    .post(url.clone())
+                    .header(header::USER_AGENT, FIDO_USER_AGENT)
+                    .form(&[
+                        ("UserName", username),
+                        ("Password", password),
+                        ("Kmsi", ""),
+                        ("AuthMethod", "FormsAuthentication"),
+                    ])
+                    .send()
+                    .await
+            } else {
+                self.client()
+                    .get(url.clone())
+                    .header(header::USER_AGENT, FIDO_USER_AGENT)
+                    .send()
+                    .await
+            }
+            .map_err(|e| MsalError::request_failed(&e))?;
+
+            if response.status().is_redirection() {
+                if redirect_count == MAX_ADFS_REDIRECTS {
+                    return Err(MsalError::GeneralFailure(
+                        "AD FS redirect limit exceeded".to_string(),
+                    ));
+                }
+                let location = response
+                    .headers()
+                    .get(header::LOCATION)
+                    .ok_or_else(|| {
+                        MsalError::InvalidParse(
+                            "AD FS redirect did not include a location".to_string(),
+                        )
+                    })?
+                    .to_str()
+                    .map_err(|e| {
+                        MsalError::InvalidParse(format!("Invalid AD FS redirect location: {e}"))
+                    })?;
+                (url, method) = resolve_adfs_redirect(
+                    &origin,
+                    &url,
+                    location,
+                    response.status().as_u16(),
+                    method,
+                )?;
+                continue;
+            }
+
+            if !response.status().is_success() {
+                return Err(MsalError::GeneralFailure(format!(
+                    "AD FS authentication failed with HTTP status {}",
+                    response.status()
+                )));
+            }
+            let content_type = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_default();
+            if !content_type.starts_with("text/html")
+                && !content_type.starts_with("application/xhtml+xml")
+            {
+                return Err(MsalError::GeneralFailure(
+                    "AD FS returned an unsupported content type".to_string(),
+                ));
+            }
+            return self.read_adfs_response_body(response).await;
+        }
+
+        Err(MsalError::GeneralFailure(
+            "AD FS redirect limit exceeded".to_string(),
+        ))
+    }
+
+    async fn submit_ws_fed_form_internal(&self, form: &WsFedForm) -> Result<AuthConfig, MsalError> {
+        let login_srf = entra_login_srf_url(&self.authority()?)?;
+        let resp = self
+            .client()
+            .post(login_srf)
+            .header(header::USER_AGENT, FIDO_USER_AGENT)
+            .form(&[
+                ("wa", form.wa.as_str()),
+                ("wresult", form.wresult.as_str()),
+                ("wctx", form.wctx.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|e| MsalError::request_failed(&e))?;
+        self.handle_auth_config_response_internal(resp, false).await
+    }
+
     /// Check if a user exists in Azure Entra ID
     ///
     /// # Arguments
@@ -3226,6 +3485,11 @@ impl PublicClientApplication {
     }
 
     /// Initiate an MFA flow via user credentials.
+    ///
+    /// For accounts whose GetCredentialType response identifies a standard
+    /// HTTPS AD FS endpoint, this automatically performs AD FS forms
+    /// authentication and submits the resulting WS-Federation assertion to
+    /// Entra before continuing with the normal MFA or authorization-code flow.
     ///
     /// # Arguments
     ///
@@ -3658,50 +3922,74 @@ impl PublicClientApplication {
         debug!("passwordless_remote_ngc triggered via fallthrough");
         passwordless_remote_ngc!();
 
-        if cred_type.credentials.federation_redirect_url.is_some() {
-            info!("Federated identities are not supported.");
-            dag_fallback!();
-        }
-        if cred_type.is_personal_account() {
-            dag_personal_fallback!();
-        }
         if !cred_type.account_exists()? {
             return Err(MsalError::GeneralFailure(
                 "An account with that name does not exist.".to_string(),
             ));
         }
-        if !cred_type.credentials.has_password {
-            info!("Password authentication is not supported.");
-            dag_fallback!();
+        if cred_type.is_personal_account() {
+            dag_personal_fallback!();
         }
 
-        let sctx = match &auth_config.sctx {
-            Some(sctx) => sctx.clone(),
-            None => {
-                info!("sCtx is missing");
-                dag_fallback!();
-            }
-        };
-        let sft = match &auth_config.sft {
-            Some(sft) => sft.clone(),
-            None => {
-                info!("sFt is missing");
-                dag_fallback!();
-            }
-        };
-        let params = vec![
-            ("login", username),
-            ("passwd", password.ok_or(MsalError::PasswordRequired)?),
-            ("ctx", &sctx),
-            ("flowToken", &sft),
-            ("canary", &auth_config.canary),
-            ("client_id", self.client_id()),
-            ("client-request-id", &request_id),
-        ];
-        match self
-            .handle_auth_config_req_internal(&params, &auth_config, options, false)
-            .await
+        let auth_response = if let Some(ref federation_redirect_url) =
+            cred_type.credentials.federation_redirect_url
         {
+            let federation_url = match parse_adfs_federation_url(federation_redirect_url) {
+                Ok(Some(url)) => url,
+                Ok(None) => {
+                    info!("Federated identity is not a supported AD FS HTTPS endpoint.");
+                    dag_fallback!();
+                }
+                Err(e) => {
+                    error!("Unable to parse federation endpoint: {e}");
+                    dag_fallback!(e);
+                }
+            };
+            info!(
+                "Attempting AD FS forms authentication against {}",
+                federation_url.host_str().unwrap_or("unknown host")
+            );
+            let password = password.ok_or(MsalError::PasswordRequired)?;
+            match self
+                .request_adfs_form_internal(federation_url, username, password)
+                .await
+                .and_then(|text| parse_ws_fed_form(&text))
+            {
+                Ok(form) => self.submit_ws_fed_form_internal(&form).await,
+                Err(e) => Err(e),
+            }
+        } else {
+            if !cred_type.credentials.has_password {
+                info!("Password authentication is not supported.");
+                dag_fallback!();
+            }
+            let sctx = match &auth_config.sctx {
+                Some(sctx) => sctx.clone(),
+                None => {
+                    info!("sCtx is missing");
+                    dag_fallback!();
+                }
+            };
+            let sft = match &auth_config.sft {
+                Some(sft) => sft.clone(),
+                None => {
+                    info!("sFt is missing");
+                    dag_fallback!();
+                }
+            };
+            let params = vec![
+                ("login", username),
+                ("passwd", password.ok_or(MsalError::PasswordRequired)?),
+                ("ctx", &sctx),
+                ("flowToken", &sft),
+                ("canary", &auth_config.canary),
+                ("client_id", self.client_id()),
+                ("client-request-id", &request_id),
+            ];
+            self.handle_auth_config_req_internal(&params, &auth_config, options, false)
+                .await
+        };
+        match auth_response {
             Ok(mut auth_config) => {
                 if let Some(msg) = auth_config.service_exception_msg {
                     error!("{}", msg);
@@ -8855,6 +9143,118 @@ mod tests {
             "IfExistsResult": if_exists_result
         }))
         .expect("test credential type should deserialize")
+    }
+
+    #[test]
+    fn adfs_url_detection_requires_a_secure_complete_path_segment() {
+        for value in [
+            "https://fs.example.com/adfs/ls/?wa=wsignin1.0",
+            "https://fs.example.com/ADFS/LS/",
+            "https://fs.example.com:8443/prefix/adfs/ls",
+        ] {
+            assert!(parse_adfs_federation_url(value).unwrap().is_some());
+        }
+
+        for value in [
+            "http://fs.example.com/adfs/ls/",
+            "https://user:secret@fs.example.com/adfs/ls/",
+            "https://adfs.example.com/login/",
+            "https://fs.example.com/notadfs/ls/",
+            "https://fs.example.com/login/?next=/adfs/ls/",
+            "https://fs.example.com/adfs/ls/#fragment",
+        ] {
+            assert!(parse_adfs_federation_url(value).unwrap().is_none());
+        }
+        assert!(parse_adfs_federation_url("not a URL").is_err());
+    }
+
+    #[test]
+    fn ws_fed_form_parser_selects_complete_form_and_decodes_entities() {
+        let html = r#"
+            <html><body>
+              <form><input name="UserName" value="ignored"></form>
+              <form action="https://untrusted.example/collect">
+                <input type="hidden" name="WCTX" value="ctx&amp;value">
+                <input type="hidden" name="wresult" value="&lt;Assertion&gt;ok&lt;/Assertion&gt;">
+                <input type="hidden" name="WA" value="wsignin1.0">
+                <input type="hidden" name="Password" value="must-not-be-forwarded">
+              </form>
+            </body></html>
+        "#;
+        let form = parse_ws_fed_form(html).unwrap();
+        assert_eq!(form.wa, "wsignin1.0");
+        assert_eq!(form.wctx, "ctx&value");
+        assert_eq!(form.wresult, "<Assertion>ok</Assertion>");
+    }
+
+    #[test]
+    fn ws_fed_form_parser_rejects_login_and_incomplete_forms() {
+        for html in [
+            r#"<form><input name="UserName"><input name="Password"></form>"#,
+            r#"<form><input name="wa" value="wsignin1.0"><input name="wctx" value="ctx"></form>"#,
+            r#"<form><input name="wa" value="wrong"><input name="wctx" value="ctx"><input name="wresult" value="assertion"></form>"#,
+            r#"<form><input name="wa" value="wsignin1.0"><input name="wctx" value=""><input name="wresult" value="assertion"></form>"#,
+        ] {
+            assert!(parse_ws_fed_form(html).is_err());
+        }
+    }
+
+    #[test]
+    fn login_srf_is_derived_from_authority_origin() {
+        assert_eq!(
+            entra_login_srf_url("https://login.microsoftonline.com/common/?ignored=true")
+                .unwrap()
+                .as_str(),
+            "https://login.microsoftonline.com/login.srf"
+        );
+        assert_eq!(
+            entra_login_srf_url("https://login.microsoftonline.us:8443/tenant")
+                .unwrap()
+                .as_str(),
+            "https://login.microsoftonline.us:8443/login.srf"
+        );
+        assert!(entra_login_srf_url("http://login.example.com/common").is_err());
+    }
+
+    #[test]
+    fn adfs_redirects_stay_on_https_origin_and_control_password_replay() {
+        let origin = Url::parse("https://fs.example.com/adfs/ls/").unwrap();
+        let (next, method) = resolve_adfs_redirect(
+            &origin,
+            &origin,
+            "../continue",
+            302,
+            AdfsRequestMethod::PostCredentials,
+        )
+        .unwrap();
+        assert_eq!(next.as_str(), "https://fs.example.com/adfs/continue");
+        assert_eq!(method, AdfsRequestMethod::Get);
+
+        let (_, method) = resolve_adfs_redirect(
+            &origin,
+            &origin,
+            "/adfs/resubmit",
+            307,
+            AdfsRequestMethod::PostCredentials,
+        )
+        .unwrap();
+        assert_eq!(method, AdfsRequestMethod::PostCredentials);
+
+        for location in [
+            "http://fs.example.com/adfs/continue",
+            "https://other.example.com/adfs/continue",
+            "https://user:secret@fs.example.com/adfs/continue",
+            "/adfs/continue#fragment",
+        ] {
+            assert!(resolve_adfs_redirect(
+                &origin,
+                &origin,
+                location,
+                302,
+                AdfsRequestMethod::PostCredentials,
+            )
+            .is_err());
+        }
     }
 
     #[test]
