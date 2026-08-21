@@ -486,6 +486,22 @@ struct CredType {
 }
 
 impl CredType {
+    /// Record backend throttling telemetry returned by GetCredentialType.
+    ///
+    /// Microsoft's converged-login client defines these values as
+    /// NotThrottled (0), AadThrottled (1), and MsaThrottled (2). This field is
+    /// not the lookup outcome: IfExistsResult=2 is the terminal "Throttled"
+    /// result. A nonzero ThrottleStatus can accompany an otherwise usable
+    /// response, so it must not control authentication.
+    fn log_throttle_status(&self) {
+        match self.throttle_status {
+            0 => {}
+            1 => debug!("GetCredentialType reports AAD backend throttling"),
+            2 => debug!("GetCredentialType reports MSA backend throttling"),
+            other => warn!("GetCredentialType returned unknown ThrottleStatus={other}"),
+        }
+    }
+
     /// Whether the user exists in the directory
     pub fn account_exists(&self) -> Result<bool, MsalError> {
         /* `ifExistsResult` meanings:
@@ -3646,10 +3662,6 @@ impl PublicClientApplication {
             info!("Federated identities are not supported.");
             dag_fallback!();
         }
-        if cred_type.throttle_status == 1 {
-            // TenantThrottlingError
-            return Err(MsalError::AADSTSError(AADSTSError::new(90055, None)));
-        }
         if cred_type.is_personal_account() {
             dag_personal_fallback!();
         }
@@ -4090,6 +4102,7 @@ impl PublicClientApplication {
                 .json()
                 .await
                 .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            json_resp.log_throttle_status();
             Ok(json_resp)
         } else {
             let json_resp: ErrorResponse = resp
@@ -8831,6 +8844,46 @@ mod tests {
         sign::Verifier,
         x509::{X509Builder, X509Extension, X509NameBuilder},
     };
+
+    fn test_cred_type(if_exists_result: i32, throttle_status: u8) -> CredType {
+        serde_json::from_value(json!({
+            "Credentials": {
+                "PrefCredential": 1,
+                "HasPassword": true
+            },
+            "ThrottleStatus": throttle_status,
+            "IfExistsResult": if_exists_result
+        }))
+        .expect("test credential type should deserialize")
+    }
+
+    #[test]
+    fn usable_account_result_is_not_rejected_by_backend_throttle_status() {
+        for throttle_status in [0, 1, 2, u8::MAX] {
+            let cred_type = test_cred_type(0, throttle_status);
+            assert!(cred_type.account_exists().unwrap());
+        }
+    }
+
+    #[test]
+    fn throttled_account_lookup_remains_retryable_error() {
+        let cred_type = test_cred_type(2, 0);
+        assert!(matches!(
+            cred_type.account_exists(),
+            Err(MsalError::AADSTSError(err)) if err.code == 90055
+        ));
+    }
+
+    #[test]
+    fn retryable_account_lookup_failures_keep_existing_error() {
+        for if_exists_result in [-1, 4] {
+            let cred_type = test_cred_type(if_exists_result, 0);
+            assert!(matches!(
+                cred_type.account_exists(),
+                Err(MsalError::AADSTSError(err)) if err.code == 90006
+            ));
+        }
+    }
 
     fn build_access_token(payload_json: &str) -> String {
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#.as_bytes());
