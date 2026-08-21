@@ -36,8 +36,9 @@ use reqwest::redirect::Policy;
 use reqwest::Proxy;
 use reqwest::{header, Body, Client, Response, Url};
 use scraper::{Html, Selector};
-use serde::de::{self, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde::ser::{SerializeMap, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::{from_str as json_from_str, json, Value};
 #[cfg(feature = "set_timeout")]
 use std::cmp::min;
@@ -1546,22 +1547,86 @@ impl Tgt for RawTgt {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
-#[serde(untagged)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 #[cfg_attr(test, derive(Eq, PartialEq, Debug))]
 enum OnPremTgt {
-    /// `{ "tgt_ad": { ... } }`
-    Structured { tgt_ad: StructuredTgt },
     /// `{ "tgt_message_buffer": "...", "tgt_client_key": "...", "tgt_key_type": 18 }`
     Raw(RawTgt),
-    /// Neither form present. MUST stay last: it matches any map.
-    #[serde(skip_serializing)]
-    Absent {},
+    /// `{ "tgt_ad": { ... } }`
+    Structured {
+        tgt_ad: StructuredTgt,
+    },
+    Absent,
 }
 
-impl Default for OnPremTgt {
-    fn default() -> Self {
-        OnPremTgt::Absent {}
+impl Serialize for OnPremTgt {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Raw is itself a struct with 3 fields -> emit them inline
+            OnPremTgt::Raw(raw) => {
+                let mut m = serializer.serialize_map(Some(3))?;
+                m.serialize_entry("tgt_message_buffer", &raw.tgt_message_buffer)?;
+                m.serialize_entry("tgt_client_key", &raw.tgt_client_key)?;
+                m.serialize_entry("tgt_key_type", &raw.tgt_key_type)?;
+                m.end()
+            }
+            OnPremTgt::Structured { tgt_ad } => {
+                let mut m = serializer.serialize_map(Some(1))?;
+                m.serialize_entry("tgt_ad", tgt_ad)?;
+                m.end()
+            }
+            // emit nothing at all
+            OnPremTgt::Absent => serializer.serialize_map(Some(0))?.end(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OnPremTgt {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+
+        impl<'de> Visitor<'de> for V {
+            type Value = OnPremTgt;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("on-prem TGT fields (raw or structured)")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut tgt_message_buffer = None;
+                let mut tgt_client_key = None;
+                let mut tgt_key_type = None;
+                let mut tgt_ad: Option<StructuredTgt> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "tgt_message_buffer" => tgt_message_buffer = Some(map.next_value()?),
+                        "tgt_client_key" => tgt_client_key = Some(map.next_value()?),
+                        "tgt_key_type" => tgt_key_type = Some(map.next_value()?),
+                        "tgt_ad" => tgt_ad = Some(map.next_value()?),
+                        // critical: other flattened/sibling fields land here
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                match (tgt_ad, tgt_message_buffer, tgt_client_key, tgt_key_type) {
+                    (Some(tgt_ad), None, None, None) => Ok(OnPremTgt::Structured { tgt_ad }),
+                    (None, Some(buf), Some(key), Some(kt)) => Ok(OnPremTgt::Raw(RawTgt {
+                        tgt_message_buffer: buf,
+                        tgt_client_key: key,
+                        tgt_key_type: kt,
+                    })),
+                    (None, None, None, None) => Ok(OnPremTgt::Absent),
+                    _ => Err(de::Error::custom(
+                        "on-prem TGT is a mix of raw and structured, or is incomplete",
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(V)
     }
 }
 
@@ -8465,7 +8530,7 @@ impl BrokerClientApplication {
                 let as_rep = raw_tgt.as_rep()?;
                 (client_key, as_rep)
             }
-            OnPremTgt::Absent {} => {
+            OnPremTgt::Absent => {
                 return Err(MsalError::Missing(
                     "No on-prem partial ticket bundled".to_string(),
                 ))
@@ -8811,7 +8876,7 @@ mod tests {
             id_token: IdToken::default(),
             client_info: ClientInfo::default(),
             device_tenant_id: None,
-            tgt_on_prem: OnPremTgt::default(),
+            tgt_on_prem: OnPremTgt::Absent,
             tgt_cloud: StructuredTgt::default(),
             kerberos_top_level_names: None,
         }
