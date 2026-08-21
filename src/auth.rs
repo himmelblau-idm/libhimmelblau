@@ -518,6 +518,7 @@ impl CredType {
 }
 
 #[derive(Default, Clone, Deserialize, Serialize)]
+#[cfg_attr(test, derive(Eq, PartialEq, Debug))]
 pub struct IdToken {
     pub name: String,
     pub oid: String,
@@ -598,6 +599,7 @@ impl FromStr for IdToken {
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
+#[cfg_attr(test, derive(Eq, PartialEq, Debug))]
 pub struct ClientInfo {
     pub uid: Option<Uuid>,
     pub utid: Option<Uuid>,
@@ -1349,6 +1351,7 @@ impl FromStr for StructuredTgt {
 
 #[cfg(feature = "broker")]
 #[derive(Default, Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[cfg_attr(test, derive(Eq, PartialEq, Debug))]
 pub struct StructuredTgt {
     #[serde(rename = "clientKey")]
     client_key: Option<String>,
@@ -1460,6 +1463,7 @@ impl Tgt for StructuredTgt {
 }
 
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[cfg_attr(test, derive(Eq, PartialEq, Debug))]
 struct RawTgt {
     /// Base64 encoded KERB_MESSAGE_BUFFER.
     tgt_message_buffer: String,
@@ -1544,6 +1548,7 @@ impl Tgt for RawTgt {
 
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 #[serde(untagged)]
+#[cfg_attr(test, derive(Eq, PartialEq, Debug))]
 enum OnPremTgt {
     /// `{ "tgt_ad": { ... } }`
     Structured { tgt_ad: StructuredTgt },
@@ -1562,6 +1567,7 @@ impl Default for OnPremTgt {
 
 #[cfg(feature = "broker")]
 #[derive(Clone, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[cfg_attr(test, derive(Debug, Eq, PartialEq))]
 struct PrimaryRefreshToken {
     token_type: String,
     expires_in: String,
@@ -9544,5 +9550,284 @@ mod tests {
         let qr_bluetooth = should_attempt_passwordless_qr_bluetooth(&options, true, true);
         assert!(security_key, "Should attempt security key");
         assert!(qr_bluetooth, "Should attempt QR/Bluetooth");
+    }
+
+    #[test]
+    fn prt_serialize_deserialize() {
+        let prt = PrimaryRefreshToken {
+            token_type: "Bearer".to_string(),
+            expires_in: "3600".to_string(),
+            ext_expires_in: "3600".to_string(),
+            expires_on: "9999999999".to_string(),
+            refresh_token: "refresh_token".to_string(),
+            refresh_token_expires_in: 3600,
+            session_key_jwe: None,
+            id_token: IdToken::default(),
+            client_info: ClientInfo::default(),
+            device_tenant_id: None,
+            tgt_on_prem: OnPremTgt::Absent {},
+            tgt_cloud: StructuredTgt::default(),
+            kerberos_top_level_names: None,
+        };
+        let prt_json = r#"
+        {
+            "token_type":"Bearer",
+            "expires_in":"3600",
+            "ext_expires_in":"3600",
+            "expires_on":"9999999999",
+            "refresh_token":"refresh_token",
+            "refresh_token_expires_in":3600,
+            "session_key_jwe":null,
+            "id_token":{
+                "name":"",
+                "oid":"",
+                "preferred_username":null,
+                "puid":null,
+                "tenant_region_scope":null,
+                "tid":""
+            },
+            "client_info":{
+                "uid":null,
+                "utid":null
+            },
+            "device_tenant_id":null,
+            "tgt_cloud":{
+                "clientKey":null,
+                "keyType":0,
+                "error":null,
+                "messageBuffer":null,
+                "realm":null,
+                "sn":null,
+                "cn":null,
+                "sessionKeyType":0,
+                "accountType":0
+            },
+            "kerberos_top_level_names":null
+        }
+        "#
+        .to_string()
+        .replace("\n", "")
+        .replace(" ", "");
+        let se = serde_json::to_string(&prt).expect("Failed to serialize");
+        assert_eq!(prt_json, se);
+
+        let de: PrimaryRefreshToken = serde_json::from_str(&se).expect("Falied to deserialize");
+        assert_eq!(prt, de);
+    }
+
+    #[test]
+    fn prt_serialize_deserialize_tgt_ad() {
+        let prt = PrimaryRefreshToken {
+            token_type: "Bearer".to_string(),
+            expires_in: "3600".to_string(),
+            ext_expires_in: "3600".to_string(),
+            expires_on: "9999999999".to_string(),
+            refresh_token: "refresh_token".to_string(),
+            refresh_token_expires_in: 3600,
+            session_key_jwe: None,
+            id_token: IdToken::default(),
+            client_info: ClientInfo::default(),
+            device_tenant_id: None,
+            tgt_on_prem: OnPremTgt::Structured {
+                tgt_ad: StructuredTgt {
+                    client_key: Some("a".to_string()),
+                    key_type: 18,
+                    error: None,
+                    message_buffer: Some("b".to_string()),
+                    realm: Some("c".to_string()),
+                    sn: Some("d".to_string()),
+                    cn: Some("e".to_string()),
+                    session_key_type: 18,
+                    account_type: 1,
+                },
+            },
+            tgt_cloud: StructuredTgt::default(),
+            kerberos_top_level_names: None,
+        };
+        let prt_json = r#"
+        {
+            "token_type":"Bearer",
+            "expires_in":"3600",
+            "ext_expires_in":"3600",
+            "expires_on":"9999999999",
+            "refresh_token":"refresh_token",
+            "refresh_token_expires_in":3600,
+            "session_key_jwe":null,
+            "id_token":{
+                "name":"",
+                "oid":"",
+                "preferred_username":null,
+                "puid":null,
+                "tenant_region_scope":null,
+                "tid":""
+            },
+            "client_info":{
+                "uid":null,
+                "utid":null
+            },
+            "device_tenant_id":null,
+            "tgt_ad":{
+                "clientKey":"a",
+                "keyType":18,
+                "error":null,
+                "messageBuffer":"b",
+                "realm":"c",
+                "sn":"d",
+                "cn":"e",
+                "sessionKeyType":18,
+                "accountType":1
+            },
+            "tgt_cloud":{
+                "clientKey":null,
+                "keyType":0,
+                "error":null,
+                "messageBuffer":null,
+                "realm":null,
+                "sn":null,
+                "cn":null,
+                "sessionKeyType":0,
+                "accountType":0
+            },
+            "kerberos_top_level_names":null
+        }
+        "#
+        .to_string()
+        .replace("\n", "")
+        .replace(" ", "");
+        let se = serde_json::to_string(&prt).expect("Failed to serialize");
+        assert_eq!(prt_json, se);
+
+        let de: PrimaryRefreshToken = serde_json::from_str(&se).expect("Falied to deserialize");
+        assert_eq!(prt, de);
+    }
+
+    #[test]
+    fn prt_serialize_deserialize_tgt_message_buffer() {
+        let prt = PrimaryRefreshToken {
+            token_type: "Bearer".to_string(),
+            expires_in: "3600".to_string(),
+            ext_expires_in: "3600".to_string(),
+            expires_on: "9999999999".to_string(),
+            refresh_token: "refresh_token".to_string(),
+            refresh_token_expires_in: 3600,
+            session_key_jwe: None,
+            id_token: IdToken::default(),
+            client_info: ClientInfo::default(),
+            device_tenant_id: None,
+            tgt_on_prem: OnPremTgt::Raw(RawTgt {
+                tgt_message_buffer: "a".to_string(),
+                tgt_client_key: "b".to_string(),
+                tgt_key_type: 18,
+            }),
+            tgt_cloud: StructuredTgt::default(),
+            kerberos_top_level_names: None,
+        };
+        let prt_json = r#"
+        {
+            "token_type":"Bearer",
+            "expires_in":"3600",
+            "ext_expires_in":"3600",
+            "expires_on":"9999999999",
+            "refresh_token":"refresh_token",
+            "refresh_token_expires_in":3600,
+            "session_key_jwe":null,
+            "id_token":{
+                "name":"",
+                "oid":"",
+                "preferred_username":null,
+                "puid":null,
+                "tenant_region_scope":null,
+                "tid":""
+            },
+            "client_info":{
+                "uid":null,
+                "utid":null
+            },
+            "device_tenant_id":null,
+            "tgt_message_buffer":"a",
+            "tgt_client_key":"b",
+            "tgt_key_type":18,
+            "tgt_cloud":{
+                "clientKey":null,
+                "keyType":0,
+                "error":null,
+                "messageBuffer":null,
+                "realm":null,
+                "sn":null,
+                "cn":null,
+                "sessionKeyType":0,
+                "accountType":0
+            },
+            "kerberos_top_level_names":null
+        }
+        "#
+        .to_string()
+        .replace("\n", "")
+        .replace(" ", "");
+        let se = serde_json::to_string(&prt).expect("Failed to serialize");
+        assert_eq!(prt_json, se);
+
+        let de: PrimaryRefreshToken = serde_json::from_str(&se).expect("Falied to deserialize");
+        assert_eq!(prt, de);
+    }
+
+    #[test]
+    fn prt_deserialize_invalid() {
+        let se = r#"
+        {
+            "token_type":"Bearer",
+            "expires_in":"3600",
+            "ext_expires_in":"3600",
+            "expires_on":"9999999999",
+            "refresh_token":"refresh_token",
+            "refresh_token_expires_in":3600,
+            "session_key_jwe":null,
+            "id_token":{
+                "name":"",
+                "oid":"",
+                "preferred_username":null,
+                "puid":null,
+                "tenant_region_scope":null,
+                "tid":""
+            },
+            "client_info":{
+                "uid":null,
+                "utid":null
+            },
+            "device_tenant_id":null,
+            "tgt_message_buffer":"a",
+            "tgt_client_key":"b",
+            "tgt_key_type":18,
+            "tgt_ad":{
+                "clientKey":"a",
+                "keyType":18,
+                "error":null,
+                "messageBuffer":"b",
+                "realm":"c",
+                "sn":"d",
+                "cn":"e",
+                "sessionKeyType":18,
+                "accountType":1
+            },
+            "tgt_cloud":{
+                "clientKey":null,
+                "keyType":0,
+                "error":null,
+                "messageBuffer":null,
+                "realm":null,
+                "sn":null,
+                "cn":null,
+                "sessionKeyType":0,
+                "accountType":0
+            },
+            "kerberos_top_level_names":null
+        }
+        "#
+        .to_string()
+        .replace("\n", "")
+        .replace(" ", "");
+        let de = serde_json::from_str::<PrimaryRefreshToken>(&se);
+        assert!(de.is_err());
+        //Error("on-prem TGT is a mix of raw and structured, or is incomplete", line: 1, column: 729)
     }
 }
