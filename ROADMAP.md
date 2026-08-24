@@ -349,17 +349,6 @@ Before implementation, capture the exact request/response JSON and JOSE profile 
 
 # Part II — client behavior for `himmelblau`
 
-## CLIENT-01 — Federated account sign-in orchestration
-
-**Priority:** P0
-**Depends on:** LIB-01 and LIB-02.
-
-Route sign-in by realm discovery instead of treating federation as an authentication failure. For username/password PAM flows, invoke the WS-Trust username-mixed path only when the tenant advertises it and tenant policy permits password collection. For integrated federation or browser-only providers, return the appropriate interactive continuation; never scrape arbitrary AD FS forms.
-
-Map federation faults into useful PAM/broker outcomes without revealing whether a guessed account exists more precisely than current behavior. Apply bounded timeouts and cancellation to discovery, MEX, federation and redemption as one transaction. Cache non-secret realm/MEX metadata with expiry and origin binding, but never cache passwords or SAML assertions.
-
-**Acceptance criteria:** managed flows regress unchanged; WS-Trust federated fixture/integration flows work; unsupported federation produces an actionable interactive-required result; cancellation and offline behavior are deterministic; logs contain no credentials/assertions.
-
 ## CLIENT-02 — Atomic remote leave and local device cleanup
 
 **Priority:** P0
