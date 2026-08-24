@@ -18,6 +18,11 @@
 
 use crate::aadsts_err_gen::AADSTSError;
 use crate::error::{ErrorResponse, MsalError, AUTH_PENDING};
+#[cfg(feature = "broker")]
+use crate::ssh::{
+    build_ssh_certificate_request_form, parse_ssh_certificate_response, ssh_rsa_public_key_to_jwk,
+    EntraSshCertificate, SshCertificateTokenResponse, SshRsaJwk, AZURE_CLI_APP_ID,
+};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 #[cfg(feature = "broker")]
@@ -7078,6 +7083,73 @@ impl BrokerClientApplication {
         Ok(format!("{}", signed_jwt))
     }
 
+    /// Request a Microsoft-issued OpenSSH user certificate using a sealed PRT.
+    ///
+    /// This reuses the PRT JWT-bearer exchange to obtain a normal refresh token,
+    /// then performs the Azure SSH certificate token exchange. The caller owns
+    /// the matching RSA private key.
+    pub async fn exchange_prt_for_ssh_certificate(
+        &self,
+        sealed_prt: &SealedData,
+        openssh_public_key: &str,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<EntraSshCertificate, MsalError> {
+        let jwk = ssh_rsa_public_key_to_jwk(openssh_public_key)?;
+        let transport_key = self.transport_key(tpm, storage_key)?;
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+        let prt = self.unseal_user_prt(sealed_prt, tpm, prt_storage_key)?;
+        let session_key = prt.session_key()?;
+        let redirect_uri = self.app.get_auth_redirect_uri(Some(AZURE_CLI_APP_ID), None);
+        let bearer_token = self
+            .exchange_prt_for_refresh_token_jwt_bearer(
+                &prt,
+                tpm,
+                storage_key,
+                &session_key,
+                AZURE_CLI_APP_ID,
+                &redirect_uri,
+                None,
+            )
+            .await?;
+        self.acquire_ssh_certificate_with_refresh_token(&bearer_token.refresh_token, &jwk)
+            .await
+    }
+
+    async fn acquire_ssh_certificate_with_refresh_token(
+        &self,
+        refresh_token: &str,
+        jwk: &SshRsaJwk,
+    ) -> Result<EntraSshCertificate, MsalError> {
+        let payload = build_ssh_certificate_request_form(refresh_token, jwk)?;
+        let url = format!("{}/oauth2/v2.0/token", self.authority()?);
+        debug!("POST SSH certificate request {} for key {}", url, jwk.kid);
+
+        let response = self
+            .client()
+            .post(&url)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::ACCEPT, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::request_failed(&e))?;
+        if response.status().is_success() {
+            let response: SshCertificateTokenResponse = response
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            parse_ssh_certificate_response(response, jwk)
+        } else {
+            let response: ErrorResponse = response
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            Err(MsalError::AcquireTokenFailed(response))
+        }
+    }
+
     /// Given the primary refresh token, this method requests an access token.
     ///
     /// # Arguments
@@ -7233,6 +7305,104 @@ impl BrokerClientApplication {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn exchange_prt_for_refresh_token_jwt_bearer(
+        &self,
+        prt: &PrimaryRefreshToken,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+        session_key: &SessionKey,
+        client_id: &str,
+        redirect_uri: &str,
+        request_resource: Option<&str>,
+    ) -> Result<UserToken, MsalError> {
+        let nonce = self.request_nonce().await?;
+        let jwt_payload = ExchangePRTForATPayload::new(
+            prt,
+            &nonce,
+            "openid profile offline_access",
+            client_id,
+            redirect_uri,
+            request_resource,
+        )?;
+        let jwt = JwsBuilder::from(serde_json::to_vec(&jwt_payload).map_err(|e| {
+            MsalError::InvalidJson(format!("Failed serializing ExchangePRTForAT JWT: {}", e))
+        })?)
+        .set_typ(Some("JWT"))
+        .build();
+
+        if let Ok(mut payload) = jwt.from_json::<Value>() {
+            payload["refresh_token"] = "**********".into();
+            if let Ok(pretty) = to_string_pretty(&payload) {
+                debug!("Exchange PRT for refresh token payload: {}", pretty);
+            }
+        }
+
+        let signed_jwt = self
+            .sign_session_key_jwt(&jwt, tpm, storage_key, session_key)
+            .await?;
+        let params = [
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("windows_api_version", "2.2"),
+            ("request", signed_jwt.as_str()),
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("client_info", "1"),
+        ];
+        let payload = params
+            .iter()
+            .map(|(key, value)| format!("{}={}", key, value))
+            .collect::<Vec<String>>()
+            .join("&");
+        let url = format!("{}/oauth2/token", self.authority()?);
+        let mut debug_params = params;
+        debug_params[2] = ("request", "**********");
+        if let Ok(pretty) = to_string_pretty(&debug_params) {
+            debug!("POST PRT refresh-token exchange {}: {}", url, pretty);
+        }
+
+        let response = self
+            .client()
+            .post(&url)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| MsalError::request_failed(&e))?;
+        let token: UserToken = if response.status().is_success() {
+            let response_text = response
+                .text()
+                .await
+                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
+            let transport_key = self.transport_key(tpm, storage_key)?;
+            let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+            let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
+            if let Ok(jwe) = JweCompact::from_str(&response_text) {
+                let decrypted =
+                    session_key.decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
+                json_from_str(
+                    std::str::from_utf8(decrypted.payload())
+                        .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
+                )
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+            } else {
+                json_from_str(&response_text)
+                    .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
+            }
+        } else {
+            let response: ErrorResponse = response
+                .json()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+            return Err(MsalError::AcquireTokenFailed(response));
+        };
+        debug!(
+            "PRT refresh-token exchange succeeded, refresh_token present={}",
+            !token.refresh_token.is_empty()
+        );
+        Ok(token)
+    }
+
     /// Exchange a PRT for an access token using a two-step PoP flow:
     /// 1. Use JWT bearer grant with PRT to get a bearer token + refresh_token
     ///    for basic scopes (openid profile offline_access)
@@ -7306,108 +7476,17 @@ impl BrokerClientApplication {
             )
         };
 
-        // Step 1: Use JWT bearer with PRT to get a bearer token with basic
-        // scopes. This gets us a standard refresh_token.
-        let base_scopes = "openid profile offline_access";
-
-        let nonce = self.request_nonce().await?;
-        let jwt_payload = ExchangePRTForATPayload::new(
-            prt,
-            &nonce,
-            base_scopes,
-            &client_id,
-            &redirect_uri,
-            request_resource.as_deref(),
-        )?;
-        let jwt = JwsBuilder::from(serde_json::to_vec(&jwt_payload).map_err(|e| {
-            MsalError::InvalidJson(format!("Failed serializing ExchangePRTForAT JWT: {}", e))
-        })?)
-        .set_typ(Some("JWT"))
-        .build();
-
-        if let Ok(mut payload) = jwt.from_json::<Value>() {
-            payload["refresh_token"] = "**********".into();
-            if let Ok(pretty) = to_string_pretty(&payload) {
-                debug!(
-                    "Step 1: Exchange PRT for bearer token (JWT bearer) Payload: {}",
-                    pretty
-                );
-            }
-        }
-
-        let signed_jwt = self
-            .sign_session_key_jwt(&jwt, tpm, storage_key, session_key)
+        let bearer_token = self
+            .exchange_prt_for_refresh_token_jwt_bearer(
+                prt,
+                tpm,
+                storage_key,
+                session_key,
+                &client_id,
+                &redirect_uri,
+                request_resource.as_deref(),
+            )
             .await?;
-
-        let step1_params = vec![
-            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("windows_api_version", "2.2"),
-            ("request", &signed_jwt),
-            ("client_id", &client_id),
-            ("redirect_uri", &redirect_uri),
-            ("client_info", "1"),
-        ];
-        let step1_payload = step1_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
-
-        // Step 1 always uses the v1 token endpoint. The v2 endpoint with
-        // only openid/profile/offline_access scopes defaults to Azure AD
-        // Graph which requires preauthorization for first-party apps.
-        let url = format!("{}/oauth2/token", self.authority()?);
-
-        let mut debug_params = step1_params.clone();
-        debug_params[2] = ("request", "**********");
-        if let Ok(pretty) = to_string_pretty(&debug_params) {
-            debug!("Step 1 POST {}: {}", url, pretty);
-        }
-
-        let resp = self
-            .client()
-            .post(&url)
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(step1_payload)
-            .send()
-            .await
-            .map_err(|e| MsalError::request_failed(&e))?;
-
-        let bearer_token: UserToken = if resp.status().is_success() {
-            let resp_text = resp
-                .text()
-                .await
-                .map_err(|e| MsalError::GeneralFailure(format!("{}", e)))?;
-
-            // The response may be a JWE encrypted with the session key, or
-            // plain JSON. Try JWE decryption first.
-            let transport_key = self.transport_key(tpm, storage_key)?;
-            let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
-            let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
-
-            if let Ok(jwe) = JweCompact::from_str(&resp_text) {
-                let decrypted =
-                    session_key.decipher_prt_v2(tpm, &transport_key, prt_storage_key, &jwe)?;
-                json_from_str(
-                    std::str::from_utf8(decrypted.payload())
-                        .map_err(|e| MsalError::InvalidParse(format!("{}", e)))?,
-                )
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
-            } else {
-                json_from_str(&resp_text).map_err(|e| MsalError::InvalidJson(format!("{}", e)))?
-            }
-        } else {
-            let json_resp: ErrorResponse = resp
-                .json()
-                .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
-            return Err(MsalError::AcquireTokenFailed(json_resp));
-        };
-
-        debug!(
-            "Step 1 succeeded, got bearer token with refresh_token present={}",
-            !bearer_token.refresh_token.is_empty()
-        );
 
         // Step 2: Use the refresh_token from step 1 with
         // grant_type=refresh_token + target scope + token_type=pop + req_cnf

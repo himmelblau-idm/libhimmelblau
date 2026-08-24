@@ -8,8 +8,8 @@ use crate::error::MsalError;
 use crate::serializer::{deserialize_obj, serialize_obj};
 use crate::{
     AuthInit, AuthOption, AuthorizationCodePkceFlow, BrokerClientApplication,
-    DeviceAuthorizationResponse, EnrollAttrs, MFAAuthContinue, MfaMethodInfo, P2PCertificate,
-    P2PPrivateKey, PublicClientApplication, UserToken,
+    DeviceAuthorizationResponse, EnrollAttrs, EntraSshCertificate, MFAAuthContinue, MfaMethodInfo,
+    P2PCertificate, P2PPrivateKey, PublicClientApplication, UserToken,
 };
 
 use kanidm_hsm_crypto::provider::{BoxedDynTpm, SoftTpm};
@@ -362,6 +362,97 @@ pub struct PySealedData {
     data: SealedData,
 }
 serialize_impl!(SealedData, data);
+
+#[pyclass(name = "EntraSshCertificate", module = "himmelblau", subclass)]
+pub struct PyEntraSshCertificate {
+    certificate: EntraSshCertificate,
+}
+
+#[pymethods]
+impl PyEntraSshCertificate {
+    #[getter]
+    fn certificate_body_base64(&self) -> String {
+        self.certificate.certificate_body_base64.clone()
+    }
+
+    fn openssh_certificate(&self) -> String {
+        self.certificate.openssh_certificate()
+    }
+
+    #[getter]
+    fn signing_ca_openssh_public_key(&self) -> String {
+        self.certificate.signing_ca_openssh_public_key().to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        "EntraSshCertificate(certificate_body_base64='<redacted>')".to_string()
+    }
+
+    #[getter]
+    fn request_key_id(&self) -> String {
+        self.certificate.request_key_id.clone()
+    }
+
+    #[getter]
+    fn certificate_key_id(&self) -> String {
+        self.certificate.certificate_key_id.clone()
+    }
+
+    #[getter]
+    fn serial(&self) -> u64 {
+        self.certificate.serial
+    }
+
+    #[getter]
+    fn principals(&self) -> Vec<String> {
+        self.certificate.principals.clone()
+    }
+
+    #[getter]
+    fn tenant_id(&self) -> String {
+        self.certificate.tenant_id.to_string()
+    }
+
+    #[getter]
+    fn object_id(&self) -> String {
+        self.certificate.object_id.to_string()
+    }
+
+    #[getter]
+    fn display_name(&self) -> Option<String> {
+        self.certificate.display_name.clone()
+    }
+
+    #[getter]
+    fn valid_after(&self) -> u64 {
+        self.certificate.valid_after
+    }
+
+    #[getter]
+    fn valid_before(&self) -> u64 {
+        self.certificate.valid_before
+    }
+
+    #[getter]
+    fn expires_in(&self) -> u32 {
+        self.certificate.expires_in
+    }
+
+    #[getter]
+    fn ext_expires_in(&self) -> u32 {
+        self.certificate.ext_expires_in
+    }
+
+    #[getter]
+    fn scope(&self) -> Option<String> {
+        self.certificate.scope.clone()
+    }
+
+    #[getter]
+    fn signing_ca_fingerprint_sha256(&self) -> String {
+        self.certificate.signing_ca_fingerprint_sha256.clone()
+    }
+}
 
 #[pyclass(name = "P2PCertificate", module = "himmelblau", subclass)]
 pub struct PyP2PCertificate {
@@ -1041,11 +1132,25 @@ impl PyBrokerClientApplication {
         })
     }
 
-    /// Request a device P2P certificate using the enrolled device
-    /// certificate. `tenant_id` is only a fallback, used when the device
-    /// certificate carries no tenant OID. `dns_names` defaults to
-    /// `device_name`.
-    #[allow(clippy::needless_pass_by_value)]
+    pub fn exchange_prt_for_ssh_certificate(
+        &self,
+        sealed_prt: &PySealedData,
+        openssh_public_key: &str,
+        tpm: &mut PyBoxedDynTpm,
+        machine_key: &PyStorageKey,
+    ) -> PyResult<PyEntraSshCertificate> {
+        Ok(PyEntraSshCertificate {
+            certificate: run_async!(
+                self.client,
+                exchange_prt_for_ssh_certificate,
+                &sealed_prt.data,
+                openssh_public_key,
+                &mut tpm.tpm,
+                &machine_key.key,
+            ),
+        })
+    }
+
     pub fn acquire_device_p2p_certificate(
         &self,
         tenant_id: &str,
@@ -1502,6 +1607,7 @@ fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLoadableMsOapxbcRsaKey>()?;
     m.add_class::<PyLoadableMsHelloKey>()?;
     m.add_class::<PyLoadableMsDeviceEnrolmentKey>()?;
+    m.add_class::<PyEntraSshCertificate>()?;
     m.add_class::<PyP2PCertificate>()?;
     m.add_class::<PyEnrollAttrs>()?;
     m.add_class::<PyDeviceAuthorizationResponse>()?;
@@ -1530,4 +1636,34 @@ fn himmelblau(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(auth_value_generate, m)?)?;
     m.add_function(wrap_pyfunction!(set_global_tracing_level, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod ssh_certificate_repr_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_certificate_repr_redacts_the_certificate_body() {
+        let certificate = PyEntraSshCertificate {
+            certificate: EntraSshCertificate {
+                certificate_body_base64: "live-certificate-body".to_string(),
+                request_key_id: "request-key".to_string(),
+                certificate_key_id: "object@tenant".to_string(),
+                serial: 1,
+                principals: vec!["user@example.com".to_string()],
+                tenant_id: uuid::Uuid::nil(),
+                object_id: uuid::Uuid::nil(),
+                display_name: None,
+                valid_after: 1,
+                valid_before: 2,
+                expires_in: 1,
+                ext_expires_in: 1,
+                scope: None,
+                signing_ca_openssh_public_key: "ssh-rsa AAAA".to_string(),
+                signing_ca_fingerprint_sha256: "SHA256:test".to_string(),
+            },
+        };
+
+        assert!(!certificate.__repr__().contains("live-certificate-body"));
+    }
 }
