@@ -61,7 +61,7 @@ use crate::confidential_client::{
 };
 use crate::serializer::{deserialize_obj, serialize_obj};
 #[cfg(feature = "broker")]
-use crate::EnrollAttrs;
+use crate::{EnrollAttrs, EntraSshCertificate};
 
 #[cfg(feature = "broker")]
 pub struct BoxedDynTpm(BoxedDynTpmIn);
@@ -2744,6 +2744,398 @@ pub unsafe extern "C" fn broker_unseal_prt_kerberos_top_level_names(
     )
 }
 
+/// Request an Entra OpenSSH user certificate using a sealed PRT.
+///
+/// # Safety
+/// All input object/string pointers must be valid for the duration of the call;
+/// `out` must be writable and the returned certificate must be released with
+/// `ssh_certificate_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn broker_exchange_prt_for_ssh_certificate(
+    client: *mut BrokerClientApplication,
+    sealed_prt: *mut SealedData,
+    openssh_public_key: *const c_char,
+    tpm: *mut BoxedDynTpm,
+    machine_key: *mut MachineKey,
+    out: *mut *mut EntraSshCertificate,
+) -> *mut MSAL_ERROR {
+    if client.is_null()
+        || sealed_prt.is_null()
+        || tpm.is_null()
+        || machine_key.is_null()
+        || out.is_null()
+    {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid input parameters!".to_string(),
+        );
+    }
+    let openssh_public_key = match wrap_c_char(openssh_public_key) {
+        Some(value) => value,
+        None => {
+            return make_error(
+                MSAL_ERROR_CODE::INVALID_POINTER,
+                "Invalid openssh_public_key!".to_string(),
+            )
+        }
+    };
+    let client = unsafe { &mut *client };
+    let sealed_prt = unsafe { &mut *sealed_prt };
+    let tpm = unsafe { &mut *tpm };
+    let machine_key = unsafe { &mut *machine_key };
+    let certificate = match run_async!(
+        client,
+        exchange_prt_for_ssh_certificate,
+        &sealed_prt.0,
+        &openssh_public_key,
+        &mut tpm.0,
+        &machine_key.0,
+    ) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { *out = Box::into_raw(Box::new(certificate)) };
+    no_error()
+}
+
+/// Return the complete OpenSSH certificate line.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_openssh(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    let value = unsafe { &*certificate }.openssh_certificate();
+    unsafe { *out = wrap_string(&value) };
+    if unsafe { *out }.is_null() {
+        make_error(
+            MSAL_ERROR_CODE::NO_MEMORY,
+            "Failed allocating string".to_string(),
+        )
+    } else {
+        no_error()
+    }
+}
+
+/// Return the request public-key identifier.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_request_key_id(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(certificate, request_key_id, out)
+}
+
+/// Return the base64 certificate body from the token response.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_body_base64(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(certificate, certificate_body_base64, out)
+}
+
+/// Return the OpenSSH certificate key identifier.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_key_id(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(certificate, certificate_key_id, out)
+}
+
+/// Return the certificate tenant identifier.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_tenant_id(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    let value = unsafe { &*certificate }.tenant_id.to_string();
+    unsafe { *out = wrap_string(&value) };
+    no_error()
+}
+
+/// Return the certificate object identifier.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_object_id(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    let value = unsafe { &*certificate }.object_id.to_string();
+    unsafe { *out = wrap_string(&value) };
+    no_error()
+}
+
+/// Return the optional display name carried by the certificate.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. A non-NULL returned string
+/// must be freed with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_display_name(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_option_string!(certificate, display_name, out)
+}
+
+/// Return the SHA-256 fingerprint of the certificate signing key.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_ca_fingerprint_sha256(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(certificate, signing_ca_fingerprint_sha256, out)
+}
+
+/// Return the complete OpenSSH public key for the certificate signing CA.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. Free the returned string
+/// with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_ca_openssh_public_key(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_string!(certificate, signing_ca_openssh_public_key, out)
+}
+
+/// Return the optional scope from the certificate token response.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable. A non-NULL returned string
+/// must be freed with `string_free`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_scope(
+    certificate: *mut EntraSshCertificate,
+    out: *mut *mut c_char,
+) -> *mut MSAL_ERROR {
+    c_str_from_object_option_string!(certificate, scope, out)
+}
+
+/// Return the certificate principals as an allocated string array.
+///
+/// # Safety
+/// `certificate` must be valid and both output pointers writable. Release the
+/// returned array with `ssh_certificate_free_principals` using the exact count.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_principals(
+    certificate: *mut EntraSshCertificate,
+    out_list: *mut *mut *mut c_char,
+    out_count: *mut c_int,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out_list.is_null() || out_count.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    let principals = &unsafe { &*certificate }.principals;
+    let mut strings: Vec<*mut c_char> = Vec::with_capacity(principals.len());
+    for principal in principals {
+        let value = wrap_string(principal);
+        if value.is_null() {
+            for prior in strings {
+                if !prior.is_null() {
+                    unsafe { drop(CString::from_raw(prior)) };
+                }
+            }
+            return make_error(
+                MSAL_ERROR_CODE::NO_MEMORY,
+                "Failed allocating string".to_string(),
+            );
+        }
+        strings.push(value);
+    }
+    let count = strings.len();
+    let raw = Box::into_raw(strings.into_boxed_slice());
+    unsafe {
+        *out_list = raw as *mut *mut c_char;
+        *out_count = count as c_int;
+    }
+    no_error()
+}
+
+/// Free a principal array returned by `ssh_certificate_principals`.
+///
+/// # Safety
+/// `list` and `count` must be the unchanged values returned together by
+/// `ssh_certificate_principals`.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_free_principals(list: *mut *mut c_char, count: c_int) {
+    p2p_certificate_free_dns_names(list, count)
+}
+
+/// Return the certificate's valid-after Unix timestamp.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_valid_after(
+    certificate: *mut EntraSshCertificate,
+    out: *mut u64,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    unsafe { *out = (*certificate).valid_after };
+    no_error()
+}
+
+/// Return the certificate's valid-before Unix timestamp.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_valid_before(
+    certificate: *mut EntraSshCertificate,
+    out: *mut u64,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    unsafe { *out = (*certificate).valid_before };
+    no_error()
+}
+
+/// Return the OpenSSH certificate serial number.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_serial(
+    certificate: *mut EntraSshCertificate,
+    out: *mut u64,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    unsafe { *out = (*certificate).serial };
+    no_error()
+}
+
+/// Return the token response's expiry interval.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_expires_in(
+    certificate: *mut EntraSshCertificate,
+    out: *mut u32,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    unsafe { *out = (*certificate).expires_in };
+    no_error()
+}
+
+/// Return the token response's extended expiry interval.
+///
+/// # Safety
+/// `certificate` must be valid and `out` writable.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_ext_expires_in(
+    certificate: *mut EntraSshCertificate,
+    out: *mut u32,
+) -> *mut MSAL_ERROR {
+    if certificate.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    unsafe { *out = (*certificate).ext_expires_in };
+    no_error()
+}
+
+/// Free an Entra SSH certificate returned through the C API.
+///
+/// # Safety
+/// `certificate` must be NULL or a pointer returned by one of the SSH
+/// certificate acquisition functions, and it must not be freed twice.
+#[cfg(feature = "broker")]
+#[no_mangle]
+pub unsafe extern "C" fn ssh_certificate_free(certificate: *mut EntraSshCertificate) {
+    free_object!(certificate);
+}
+
 /// Request a device P2P certificate using the enrolled device certificate.
 ///
 /// # Arguments
@@ -4585,5 +4977,44 @@ mod mfa_fido_accessor_tests {
         assert!(out.is_null());
         // Freeing the empty result must be a no-op.
         unsafe { mfa_auth_continue_free_fido_allow_list(out, count) };
+    }
+}
+
+#[cfg(all(test, feature = "broker"))]
+#[allow(clippy::unwrap_used)]
+mod ssh_certificate_accessor_tests {
+    use super::*;
+    use std::ffi::CStr;
+    use uuid::Uuid;
+
+    #[test]
+    fn signing_ca_public_key_is_returned_as_an_owned_c_string() {
+        let mut certificate = EntraSshCertificate {
+            certificate_body_base64: "certificate".to_string(),
+            request_key_id: "request-key".to_string(),
+            certificate_key_id: "object@tenant".to_string(),
+            serial: 1,
+            principals: vec!["user@example.com".to_string()],
+            tenant_id: Uuid::nil(),
+            object_id: Uuid::nil(),
+            display_name: None,
+            valid_after: 1,
+            valid_before: 2,
+            expires_in: 1,
+            ext_expires_in: 1,
+            scope: None,
+            signing_ca_openssh_public_key: "ssh-rsa AAAA".to_string(),
+            signing_ca_fingerprint_sha256: "SHA256:test".to_string(),
+        };
+        let mut out = std::ptr::null_mut();
+
+        let error = unsafe { ssh_certificate_ca_openssh_public_key(&mut certificate, &mut out) };
+
+        assert!(error.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(out) }.to_str().unwrap(),
+            "ssh-rsa AAAA"
+        );
+        unsafe { string_free(out) };
     }
 }

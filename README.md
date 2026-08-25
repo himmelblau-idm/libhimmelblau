@@ -104,6 +104,30 @@ let machine_key = tpm
 let app = BrokerClientApplication::new(Some(&authority), Some(&transport_key), Some(&cert_key)).expect("Failed creating app");
 ```
 
+Entra OpenSSH certificates
+--------------------------
+
+`BrokerClientApplication` can request the same Microsoft-issued OpenSSH user
+certificate used by Azure SSH login. The caller generates and retains an
+ephemeral RSA private key, then passes its `ssh-rsa` public-key line to
+`exchange_prt_for_ssh_certificate`. The returned `access_token` is treated as a
+base64-encoded OpenSSH certificate, not as a JWT. Use
+`EntraSshCertificate::openssh_certificate()` to obtain the complete
+`ssh-rsa-cert-v01@openssh.com` line suitable for an OpenSSH certificate file.
+
+`exchange_prt_for_ssh_certificate` deliberately uses the sealed PRT flow; it
+does not expose a refresh-token or interactive fallback. The result also
+provides the complete signing CA OpenSSH public key and its SHA-256 fingerprint
+for target-side trust decisions.
+
+C callers own the returned certificate until `ssh_certificate_free`, and must
+release strings returned by its accessors with `string_free`. Principal arrays
+must be released with `ssh_certificate_free_principals` and their exact count.
+Python values are managed by Python.
+
+The library does not write key files, invoke `ssh`, or validate target-side CA
+trust. Callers remain responsible for secure private-key storage and cleanup.
+
 Using the On-Behalf-Of (OBO) flow
 ---------------------------------
 

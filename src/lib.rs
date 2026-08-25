@@ -42,8 +42,10 @@ pub use confidential_client::*;
 pub mod discovery;
 
 pub mod graph;
+pub mod ssh;
 #[cfg(feature = "broker")]
 pub use discovery::EnrollAttrs;
+pub use ssh::EntraSshCertificate;
 
 #[cfg(feature = "capi")]
 #[macro_use]
