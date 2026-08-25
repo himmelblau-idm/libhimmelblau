@@ -50,6 +50,8 @@ use std::error::Error;
 use std::fs;
 use std::str::FromStr;
 use std::{fmt, time::Duration};
+use tokio::time::sleep;
+use tracing::debug;
 use uuid::Uuid;
 use x509_cert::attr::Attribute;
 use x509_cert::certificate::Certificate;
@@ -436,6 +438,11 @@ static APP_VERSION: &str = "1.2511.7";
 const UNKNOWN_OS_VERSION: &str = "0";
 const UNKNOWN_OS_DISTRIBUTION: &str = "Linux";
 const MAX_HTTP_ERROR_BODY_LEN: usize = 4096;
+const INTUNE_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(5),
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IntunePlatformInfo {
@@ -698,6 +705,55 @@ fn sanitize_http_error_body(body: &str) -> String {
         .flat_map(char::escape_default)
         .take(MAX_HTTP_ERROR_BODY_LEN)
         .collect()
+}
+
+fn is_retryable_intune_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    )
+}
+
+fn intune_retry_delay(status: reqwest::StatusCode, retry_count: usize) -> Option<Duration> {
+    if is_retryable_intune_status(status) {
+        INTUNE_RETRY_DELAYS.get(retry_count).copied()
+    } else {
+        None
+    }
+}
+
+async fn send_intune_request_with_retry<F>(
+    operation: &str,
+    mut build_request: F,
+) -> Result<reqwest::Response, MsalError>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    let mut retry_count = 0;
+
+    loop {
+        let resp = build_request()
+            .send()
+            .await
+            .map_err(|e| MsalError::request_failed(&e))?;
+
+        let status = resp.status();
+        let Some(delay) = intune_retry_delay(status, retry_count) else {
+            return Ok(resp);
+        };
+
+        debug!(
+            "Retrying Intune {} request after {} response; retry {} of {} in {:?}",
+            operation,
+            status,
+            retry_count + 1,
+            INTUNE_RETRY_DELAYS.len(),
+            delay
+        );
+
+        retry_count += 1;
+        sleep(delay).await;
+    }
 }
 
 async fn http_status_error(operation: &str, resp: reqwest::Response) -> MsalError {
@@ -964,17 +1020,16 @@ impl IntuneForLinux {
             "Linux Company Portal/{}/{}",
             attrs.os_distribution, self.app_vers
         );
-        let resp = self
-            .client
-            .post(enrollment_url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::USER_AGENT, user_agent)
-            .header(header::ACCEPT, "*/*")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| MsalError::request_failed(&e))?;
+        let resp = send_intune_request_with_retry("enroll", || {
+            self.client
+                .post(enrollment_url.clone())
+                .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::USER_AGENT, user_agent.as_str())
+                .header(header::ACCEPT, "*/*")
+                .json(&payload)
+        })
+        .await?;
         if resp.status().is_success() {
             let json_resp: EnrollmentResponse = resp
                 .json()
@@ -1055,18 +1110,18 @@ impl IntuneForLinux {
 
         let payload = details_payload(attrs, intune_device_id, &platform);
 
-        let resp = details_request(
-            &self.client,
-            checkin_url,
-            access_token,
-            &platform,
-            &self.app_vers,
-            Uuid::new_v4(),
-            &payload,
-        )
-        .send()
-        .await
-        .map_err(|e| MsalError::request_failed(&e))?;
+        let resp = send_intune_request_with_retry("details", || {
+            details_request(
+                &self.client,
+                checkin_url.clone(),
+                access_token,
+                &platform,
+                &self.app_vers,
+                Uuid::new_v4(),
+                &payload,
+            )
+        })
+        .await?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -1093,18 +1148,18 @@ impl IntuneForLinux {
             )
         })?;
 
-        let resp = status_request(
-            &self.client,
-            status_url,
-            access_token,
-            &platform,
-            &self.app_vers,
-            Uuid::new_v4(),
-            &payload,
-        )
-        .send()
-        .await
-        .map_err(|e| MsalError::request_failed(&e))?;
+        let resp = send_intune_request_with_retry("status", || {
+            status_request(
+                &self.client,
+                status_url.clone(),
+                access_token,
+                &platform,
+                &self.app_vers,
+                Uuid::new_v4(),
+                &payload,
+            )
+        })
+        .await?;
 
         if resp.status().is_success() {
             let status_resp: IntuneStatus = resp
@@ -1136,17 +1191,17 @@ impl IntuneForLinux {
             )
         })?;
 
-        let resp = policies_request(
-            &self.client,
-            url,
-            access_token,
-            &platform,
-            &self.app_vers,
-            Uuid::new_v4(),
-        )
-        .send()
-        .await
-        .map_err(|e| MsalError::request_failed(&e))?;
+        let resp = send_intune_request_with_retry("policies", || {
+            policies_request(
+                &self.client,
+                url.clone(),
+                access_token,
+                &platform,
+                &self.app_vers,
+                Uuid::new_v4(),
+            )
+        })
+        .await?;
 
         if resp.status().is_success() {
             let json_resp: IntunePolicyResponse = resp
@@ -1180,17 +1235,17 @@ impl IntuneForLinux {
             )
         })?;
 
-        let resp = device_state_request(
-            &self.client,
-            url,
-            access_token,
-            &platform,
-            &self.app_vers,
-            Uuid::new_v4(),
-        )
-        .send()
-        .await
-        .map_err(|e| MsalError::request_failed(&e))?;
+        let resp = send_intune_request_with_retry("device-state", || {
+            device_state_request(
+                &self.client,
+                url.clone(),
+                access_token,
+                &platform,
+                &self.app_vers,
+                Uuid::new_v4(),
+            )
+        })
+        .await?;
 
         if resp.status().is_success() {
             let json_resp: DeviceInfo = resp
@@ -1208,13 +1263,15 @@ impl IntuneForLinux {
 mod tests {
     use super::{
         checkin_url, details_payload, details_request, device_state_query_parameters,
-        device_state_request, device_state_url, intune_architecture, policies_request,
-        policies_url, sanitize_http_error_body, select_device_state_os_version, status_request,
-        IntunePlatformInfo, IntunePolicy, IntuneStatus, PolicySetting, MAX_HTTP_ERROR_BODY_LEN,
+        device_state_request, device_state_url, intune_architecture, intune_retry_delay,
+        is_retryable_intune_status, policies_request, policies_url, sanitize_http_error_body,
+        select_device_state_os_version, status_request, IntunePlatformInfo, IntunePolicy,
+        IntuneStatus, PolicySetting, MAX_HTTP_ERROR_BODY_LEN,
     };
     use crate::EnrollAttrs;
-    use reqwest::header;
+    use reqwest::{header, StatusCode};
     use serde_json::json;
+    use std::time::Duration;
     use uuid::{Uuid, Version};
 
     fn test_platform() -> IntunePlatformInfo {
@@ -1276,6 +1333,46 @@ mod tests {
         assert_eq!(intune_architecture("x86"), "X86");
         assert_eq!(intune_architecture("i686"), "X86");
         assert_eq!(intune_architecture("riscv64"), "riscv64");
+    }
+
+    #[test]
+    fn intune_retry_status_is_limited_to_reported_protocol_failures() {
+        assert!(is_retryable_intune_status(StatusCode::NOT_FOUND));
+        assert!(is_retryable_intune_status(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
+
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(!is_retryable_intune_status(status));
+        }
+    }
+
+    #[test]
+    fn intune_retry_delay_uses_fixed_three_retry_budget() {
+        assert_eq!(
+            intune_retry_delay(StatusCode::INTERNAL_SERVER_ERROR, 0),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            intune_retry_delay(StatusCode::INTERNAL_SERVER_ERROR, 1),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            intune_retry_delay(StatusCode::INTERNAL_SERVER_ERROR, 2),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            intune_retry_delay(StatusCode::INTERNAL_SERVER_ERROR, 3),
+            None
+        );
+        assert_eq!(intune_retry_delay(StatusCode::FORBIDDEN, 0), None);
     }
 
     #[test]
