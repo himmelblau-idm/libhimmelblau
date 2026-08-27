@@ -65,198 +65,239 @@ use std::cmp::min;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAction {
-    #[serde(rename = "target")]
+    #[serde(rename = "target", alias = "Target")]
     pub target: String,
-    #[serde(rename = "title")]
+    #[serde(rename = "title", alias = "Title")]
     pub title: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NoncompliantRule {
-    #[serde(rename = "ComplianceSource")]
+    #[serde(rename = "ComplianceSource", alias = "complianceSource")]
     pub compliance_source: Option<String>,
-    #[serde(rename = "ExpectedValue")]
+    #[serde(rename = "ExpectedValue", alias = "expectedValue")]
     pub expected_value: Option<String>,
-    #[serde(rename = "RemediationOwner")]
+    #[serde(rename = "RemediationOwner", alias = "remediationOwner")]
     pub remediation_owner: Option<u8>,
-    #[serde(rename = "SettingID")]
+    #[serde(rename = "SettingID", alias = "settingID", alias = "settingId")]
     pub setting_id: String,
 
-    #[serde(rename = "Description")]
+    #[serde(rename = "Description", alias = "description")]
     pub description: Option<String>,
-    #[serde(rename = "MoreInfoUri")]
+    #[serde(rename = "MoreInfoUri", alias = "moreInfoUri")]
     pub more_info_uri: Option<String>,
-    #[serde(rename = "Title")]
+    #[serde(rename = "Title", alias = "title")]
     pub title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceInfo {
-    #[serde(rename = "#CommonContainer.CheckCompliance")]
+    #[serde(
+        rename = "#CommonContainer.CheckCompliance",
+        alias = "#commonContainer.CheckCompliance"
+    )]
     pub check_compliance: DeviceAction,
-    #[serde(rename = "#CommonContainer.GetManagementState")]
+    #[serde(
+        rename = "#CommonContainer.GetManagementState",
+        alias = "#commonContainer.GetManagementState"
+    )]
     pub get_management_state: DeviceAction,
-    #[serde(rename = "#CommonContainer.RegisterForAppPushNotifications")]
+    #[serde(
+        rename = "#CommonContainer.RegisterForAppPushNotifications",
+        alias = "#commonContainer.RegisterForAppPushNotifications"
+    )]
     pub register_for_app_push_notifications: DeviceAction,
-    #[serde(rename = "#CommonContainer.RemoveSignedDeviceIdPolicyAssignment")]
+    #[serde(
+        rename = "#CommonContainer.RemoveSignedDeviceIdPolicyAssignment",
+        alias = "#commonContainer.RemoveSignedDeviceIdPolicyAssignment"
+    )]
     pub remove_signed_device_id_policy_assignment: DeviceAction,
-    #[serde(rename = "#CommonContainer.Retire")]
+    #[serde(rename = "#CommonContainer.Retire", alias = "#commonContainer.Retire")]
     pub retire: Option<DeviceAction>,
-    #[serde(rename = "#CommonContainer.SetHeartBeat")]
+    #[serde(
+        rename = "#CommonContainer.SetHeartBeat",
+        alias = "#commonContainer.SetHeartBeat"
+    )]
     pub set_heartbeat: DeviceAction,
-    #[serde(rename = "#CommonContainer.SetOptIn")]
+    #[serde(
+        rename = "#CommonContainer.SetOptIn",
+        alias = "#commonContainer.SetOptIn"
+    )]
     pub set_opt_in: DeviceAction,
-    #[serde(rename = "#CommonContainer.SetRD")]
+    #[serde(rename = "#CommonContainer.SetRD", alias = "#commonContainer.SetRD")]
     pub set_rd: DeviceAction,
-    #[serde(rename = "#CommonContainer.UpdateAadId")]
+    #[serde(
+        rename = "#CommonContainer.UpdateAadId",
+        alias = "#commonContainer.UpdateAadId"
+    )]
     pub update_aad_id: DeviceAction,
 
-    #[serde(rename = "AadId")]
+    #[serde(rename = "AadId", alias = "aadId")]
     pub aad_id: String,
-    #[serde(rename = "AppWrapperCertSN")]
+    #[serde(
+        rename = "AppWrapperCertSN",
+        alias = "appWrapperCertSN",
+        alias = "appWrapperCertSn"
+    )]
     pub app_wrapper_cert_sn: Option<String>,
-    #[serde(rename = "Architecture")]
+    #[serde(rename = "Architecture", alias = "architecture")]
     pub architecture: Option<String>,
-    #[serde(rename = "CategoryId")]
+    #[serde(rename = "CategoryId", alias = "categoryId")]
     pub category_id: Option<String>,
-    #[serde(rename = "CategorySetByEndUser")]
+    #[serde(rename = "CategorySetByEndUser", alias = "categorySetByEndUser")]
     pub category_set_by_end_user: bool,
-    #[serde(rename = "ChassisType")]
+    #[serde(rename = "ChassisType", alias = "chassisType")]
     pub chassis_type: String,
-    #[serde(rename = "CoManagementFeatures")]
+    #[serde(rename = "CoManagementFeatures", alias = "coManagementFeatures")]
     pub co_management_features: u32,
-    #[serde(rename = "ComplianceState")]
+    #[serde(rename = "ComplianceState", alias = "complianceState")]
     pub compliance_state: ComplianceState,
-    #[serde(rename = "CreatedDate")]
+    #[serde(rename = "CreatedDate", alias = "createdDate")]
     pub created_date: String,
-    #[serde(rename = "DeviceActions")]
+    #[serde(rename = "DeviceActions", alias = "deviceActions")]
     pub device_actions: Vec<serde_json::Value>,
-    #[serde(rename = "DeviceHWId")]
+    #[serde(rename = "DeviceHWId", alias = "deviceHWId", alias = "deviceHwId")]
     pub device_hw_id: Option<String>,
-    #[serde(rename = "EasId")]
+    #[serde(rename = "EasId", alias = "easId")]
     pub eas_id: String,
-    #[serde(rename = "EnrollmentType")]
+    #[serde(rename = "EnrollmentType", alias = "enrollmentType")]
     pub enrollment_type: u8,
-    #[serde(rename = "ExchangeActivationItemEasId")]
+    #[serde(
+        rename = "ExchangeActivationItemEasId",
+        alias = "exchangeActivationItemEasId"
+    )]
     pub exchange_activation_item_eas_id: String,
-    #[serde(rename = "ExchangeActivationItems")]
+    #[serde(rename = "ExchangeActivationItems", alias = "exchangeActivationItems")]
     pub exchange_activation_items: Vec<serde_json::Value>,
-    #[serde(rename = "InGracePeriodUntilDateTimeUtc")]
+    #[serde(
+        rename = "InGracePeriodUntilDateTimeUtc",
+        alias = "inGracePeriodUntilDateTimeUtc"
+    )]
     pub in_grace_period_until: String,
-    #[serde(rename = "IsCompliantInGraph")]
+    #[serde(rename = "IsCompliantInGraph", alias = "isCompliantInGraph")]
     pub is_compliant_in_graph: bool,
-    #[serde(rename = "IsExchangeActivated")]
+    #[serde(rename = "IsExchangeActivated", alias = "isExchangeActivated")]
     pub is_exchange_activated: bool,
-    #[serde(rename = "IsManagedInGraph")]
+    #[serde(rename = "IsManagedInGraph", alias = "isManagedInGraph")]
     pub is_managed_in_graph: bool,
-    #[serde(rename = "IsPartnerManaged")]
+    #[serde(rename = "IsPartnerManaged", alias = "isPartnerManaged")]
     pub is_partner_managed: bool,
-    #[serde(rename = "IsReadOnly")]
+    #[serde(rename = "IsReadOnly", alias = "isReadOnly")]
     pub is_read_only: bool,
-    #[serde(rename = "IsSharedDevice")]
+    #[serde(rename = "IsSharedDevice", alias = "isSharedDevice")]
     pub is_shared_device: bool,
-    #[serde(rename = "IsSspConfirmed")]
+    #[serde(rename = "IsSspConfirmed", alias = "isSspConfirmed")]
     pub is_ssp_confirmed: Option<bool>,
-    #[serde(rename = "Key")]
+    #[serde(rename = "Key", alias = "key")]
     pub key: String,
-    #[serde(rename = "LastContact")]
+    #[serde(rename = "LastContact", alias = "lastContact")]
     pub last_contact: String,
-    #[serde(rename = "LastContactNotification")]
+    #[serde(rename = "LastContactNotification", alias = "lastContactNotification")]
     pub last_contact_notification: String,
-    #[serde(rename = "ManagementAgent")]
+    #[serde(rename = "ManagementAgent", alias = "managementAgent")]
     pub management_agent: String,
-    #[serde(rename = "ManagementType")]
+    #[serde(rename = "ManagementType", alias = "managementType")]
     pub management_type: String,
-    #[serde(rename = "Manufacturer")]
+    #[serde(rename = "Manufacturer", alias = "manufacturer")]
     pub manufacturer: String,
-    #[serde(rename = "Model")]
+    #[serde(rename = "Model", alias = "model")]
     pub model: Option<String>,
-    #[serde(rename = "Nickname")]
+    #[serde(rename = "Nickname", alias = "nickname")]
     pub nickname: Option<String>,
-    #[serde(rename = "NoncompliantRules")]
+    #[serde(rename = "NoncompliantRules", alias = "noncompliantRules")]
     pub noncompliant_rules: Vec<NoncompliantRule>,
-    #[serde(rename = "OSSubtype")]
+    #[serde(rename = "OSSubtype", alias = "osSubtype")]
     pub os_subtype: String,
-    #[serde(rename = "OSVersion")]
+    #[serde(rename = "OSVersion", alias = "osVersion")]
     pub os_version: String,
-    #[serde(rename = "OfficialName")]
+    #[serde(rename = "OfficialName", alias = "officialName")]
     pub official_name: String,
-    #[serde(rename = "OperatingSystem")]
+    #[serde(rename = "OperatingSystem", alias = "operatingSystem")]
     pub operating_system: String,
-    #[serde(rename = "OperatingSystemId")]
+    #[serde(rename = "OperatingSystemId", alias = "operatingSystemId")]
     pub operating_system_id: String,
-    #[serde(rename = "OwnerType")]
+    #[serde(rename = "OwnerType", alias = "ownerType")]
     pub owner_type: u8,
-    #[serde(rename = "PartnerLocalizedSelfServicePortalName")]
+    #[serde(
+        rename = "PartnerLocalizedSelfServicePortalName",
+        alias = "partnerLocalizedSelfServicePortalName"
+    )]
     pub partner_localized_ssp_name: Option<String>,
-    #[serde(rename = "PartnerName")]
+    #[serde(rename = "PartnerName", alias = "partnerName")]
     pub partner_name: Option<String>,
-    #[serde(rename = "PartnerRemediationUrl")]
+    #[serde(rename = "PartnerRemediationUrl", alias = "partnerRemediationUrl")]
     pub partner_remediation_url: Option<String>,
-    #[serde(rename = "PartnerSelfServicePortalUrl")]
+    #[serde(
+        rename = "PartnerSelfServicePortalUrl",
+        alias = "partnerSelfServicePortalUrl"
+    )]
     pub partner_ssp_url: Option<String>,
-    #[serde(rename = "RemotableProperties")]
+    #[serde(rename = "RemotableProperties", alias = "remotableProperties")]
     pub remotable_properties: Option<serde_json::Value>,
-    #[serde(rename = "RemoteSessionUri")]
+    #[serde(rename = "RemoteSessionUri", alias = "remoteSessionUri")]
     pub remote_session_uri: Option<String>,
-    #[serde(rename = "SupervisedStatus")]
+    #[serde(rename = "SupervisedStatus", alias = "supervisedStatus")]
     pub supervised_status: u8,
-    #[serde(rename = "UdaStatus")]
+    #[serde(rename = "UdaStatus", alias = "udaStatus")]
     pub uda_status: u8,
-    #[serde(rename = "UserApprovedEnrollment")]
+    #[serde(rename = "UserApprovedEnrollment", alias = "userApprovedEnrollment")]
     pub user_approved_enrollment: u8,
-    #[serde(rename = "odata.id")]
+    #[serde(rename = "odata.id", alias = "Odata.id")]
     pub odata_id: String,
-    #[serde(rename = "odata.metadata")]
+    #[serde(rename = "odata.metadata", alias = "Odata.metadata")]
     pub odata_metadata: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct EnrollmentResponse {
-    #[serde(rename = "deviceId")]
+    #[serde(rename = "deviceId", alias = "DeviceId")]
     device_id: String,
+    #[serde(alias = "Certificate")]
     certificate: CertificateInfo,
 }
 
 #[derive(Deserialize, Debug)]
 struct CertificateInfo {
-    #[serde(rename = "certBlob")]
+    #[serde(rename = "certBlob", alias = "CertBlob")]
     #[serde(with = "serde_bytes")]
     cert_blob: Vec<u8>,
 }
 
 #[derive(Deserialize, Debug)]
 struct IntunePolicyResponse {
+    #[serde(alias = "Policies")]
     policies: Vec<IntunePolicy>,
 }
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 pub struct IntunePolicy {
-    #[serde(rename = "accountId")]
+    #[serde(rename = "accountId", alias = "AccountId")]
     account_id: String,
+    #[serde(alias = "Description")]
     description: String,
-    #[serde(rename = "policyId")]
+    #[serde(rename = "policyId", alias = "PolicyId")]
     policy_id: String,
-    #[serde(rename = "policySettings")]
+    #[serde(rename = "policySettings", alias = "PolicySettings")]
     policy_settings: Vec<PolicySetting>,
-    #[serde(rename = "policyType")]
+    #[serde(rename = "policyType", alias = "PolicyType")]
     policy_type: String,
+    #[serde(alias = "Version")]
     version: u32,
 }
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 pub struct PolicySetting {
-    #[serde(rename = "cspPath")]
+    #[serde(rename = "cspPath", alias = "CspPath")]
     csp_path: String,
-    #[serde(rename = "cspPathId")]
+    #[serde(rename = "cspPathId", alias = "CspPathId")]
     csp_path_id: String,
-    #[serde(rename = "ruleId")]
+    #[serde(rename = "ruleId", alias = "RuleId")]
     rule_id: String,
-    #[serde(rename = "settingDefinitionItemId")]
+    #[serde(rename = "settingDefinitionItemId", alias = "SettingDefinitionItemId")]
     setting_definition_item_id: String,
-    #[serde(rename = "value")]
+    #[serde(rename = "value", alias = "Value")]
     value: String,
 }
 
@@ -296,7 +337,7 @@ impl From<Vec<IntunePolicy>> for IntuneStatus {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct IntuneStatus {
-    #[serde(rename = "DeviceId")]
+    #[serde(rename = "DeviceId", alias = "deviceId")]
     pub device_id: Option<String>,
     #[serde(rename = "PolicyStatuses", alias = "policyStatuses", default)]
     pub policy_statuses: Vec<PolicyStatus>,
@@ -311,9 +352,11 @@ impl IntuneStatus {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct PolicyStatus {
-    #[serde(rename = "PolicyId")]
+    #[serde(rename = "PolicyId", alias = "policyId")]
     pub policy_id: String,
+    #[serde(alias = "lastStatusDateTime")]
     pub last_status_date_time: String,
+    #[serde(alias = "details")]
     pub details: Vec<PolicyDetails>,
 }
 
@@ -342,15 +385,21 @@ impl fmt::Display for ComplianceState {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 pub struct PolicyDetails {
+    #[serde(alias = "ruleId")]
     pub rule_id: String,
+    #[serde(alias = "settingDefinitionItemId")]
     pub setting_definition_item_id: String,
+    #[serde(alias = "expectedValue")]
     pub expected_value: String,
+    #[serde(alias = "actualValue")]
     pub actual_value: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "errorType", skip_serializing_if = "Option::is_none")]
     pub error_type: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "errorCode", skip_serializing_if = "Option::is_none")]
     pub error_code: Option<i32>,
+    #[serde(alias = "newComplianceState")]
     pub new_compliance_state: String,
+    #[serde(alias = "oldComplianceState")]
     pub old_compliance_state: String,
     #[serde(skip)]
     pub csp_path: String,
@@ -1266,7 +1315,7 @@ mod tests {
         device_state_request, device_state_url, intune_architecture, intune_retry_delay,
         is_retryable_intune_status, policies_request, policies_url, sanitize_http_error_body,
         select_device_state_os_version, status_request, IntunePlatformInfo, IntunePolicy,
-        IntuneStatus, PolicySetting, MAX_HTTP_ERROR_BODY_LEN,
+        IntunePolicyResponse, IntuneStatus, PolicySetting, MAX_HTTP_ERROR_BODY_LEN,
     };
     use crate::EnrollAttrs;
     use reqwest::{header, StatusCode};
@@ -1607,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn status_response_accepts_captured_camel_case() -> Result<(), String> {
+    fn status_response_accepts_pascal_case_and_camel_case() -> Result<(), String> {
         let status: IntuneStatus =
             serde_json::from_str(r#"{"policyStatuses":[]}"#).map_err(|e| e.to_string())?;
         assert!(status.device_id.is_none());
@@ -1616,6 +1665,35 @@ mod tests {
         let status: IntuneStatus =
             serde_json::from_str(r#"{"PolicyStatuses":[]}"#).map_err(|e| e.to_string())?;
         assert!(status.policy_statuses.is_empty());
+
+        let status: IntuneStatus = serde_json::from_str(
+            r#"{"policyStatuses":[{"policyId":"policy","lastStatusDateTime":"2026-08-27T12:44:19+00:00","details":[{"ruleId":"rule","settingDefinitionItemId":"setting","expectedValue":"expected","actualValue":"actual","errorType":0,"errorCode":0,"newComplianceState":"Compliant","oldComplianceState":"Unknown"}]}]}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(status.policy_statuses[0].policy_id, "policy");
+        assert_eq!(status.policy_statuses[0].details[0].rule_id, "rule");
+
+        let status: IntuneStatus = serde_json::from_str(
+            r#"{"PolicyStatuses":[{"PolicyId":"policy","LastStatusDateTime":"2026-08-27T12:44:19+00:00","Details":[{"RuleId":"rule","SettingDefinitionItemId":"setting","ExpectedValue":"expected","ActualValue":"actual","ErrorType":0,"ErrorCode":0,"NewComplianceState":"Compliant","OldComplianceState":"Unknown"}]}]}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        assert_eq!(status.policy_statuses[0].policy_id, "policy");
+        assert_eq!(status.policy_statuses[0].details[0].rule_id, "rule");
+
+        Ok(())
+    }
+
+    #[test]
+    fn policy_response_accepts_pascal_case_and_camel_case() -> Result<(), String> {
+        for response in [
+            r#"{"policies":[{"accountId":"account","description":"description","policyId":"policy","policySettings":[{"cspPath":"path","cspPathId":"path-id","ruleId":"rule","settingDefinitionItemId":"setting","value":"value"}],"policyType":"Configuration","version":1}]}"#,
+            r#"{"Policies":[{"AccountId":"account","Description":"description","PolicyId":"policy","PolicySettings":[{"CspPath":"path","CspPathId":"path-id","RuleId":"rule","SettingDefinitionItemId":"setting","Value":"value"}],"PolicyType":"Configuration","Version":1}]}"#,
+        ] {
+            let policies: IntunePolicyResponse =
+                serde_json::from_str(response).map_err(|e| e.to_string())?;
+            assert_eq!(policies.policies[0].policy_id, "policy");
+            assert_eq!(policies.policies[0].policy_settings[0].rule_id, "rule");
+        }
 
         Ok(())
     }
