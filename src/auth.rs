@@ -1749,7 +1749,17 @@ impl<'de> Deserialize<'de> for OnPremTgt {
                         "tgt_message_buffer" => tgt_message_buffer = Some(map.next_value()?),
                         "tgt_client_key" => tgt_client_key = Some(map.next_value()?),
                         "tgt_key_type" => tgt_key_type = Some(map.next_value()?),
-                        "tgt_ad" => tgt_ad = Some(map.next_value()?),
+                        "tgt_ad" => {
+                            let value: Value = map.next_value()?;
+                            tgt_ad = Some(match value {
+                                Value::String(value) => {
+                                    StructuredTgt::from_str(&value).map_err(de::Error::custom)?
+                                }
+                                value => {
+                                    serde_json::from_value(value).map_err(de::Error::custom)?
+                                }
+                            });
+                        }
                         // critical: other flattened/sibling fields land here
                         _ => {
                             map.next_value::<IgnoredAny>()?;
@@ -10296,6 +10306,39 @@ mod tests {
 
         let de: PrimaryRefreshToken = serde_json::from_str(&se).expect("Falied to deserialize");
         assert_eq!(prt, de);
+
+        let mut object_encoded: Value = serde_json::from_str(&prt_json).unwrap();
+        object_encoded["tgt_cloud"] = object_encoded["tgt_ad"].clone();
+        let object_de: PrimaryRefreshToken = serde_json::from_value(object_encoded.clone())
+            .expect("Failed to deserialize object-encoded TGTs");
+
+        let mut string_encoded = object_encoded;
+        for field in ["tgt_ad", "tgt_cloud"] {
+            string_encoded[field] = Value::String(string_encoded[field].to_string());
+        }
+        let string_de: PrimaryRefreshToken = serde_json::from_value(string_encoded)
+            .expect("Failed to deserialize string-encoded TGTs");
+        assert_eq!(object_de, string_de);
+        let canonical = serde_json::to_value(string_de).unwrap();
+        assert!(canonical["tgt_ad"].is_object());
+        assert!(canonical["tgt_cloud"].is_object());
+
+        let mut object_encoded: Value = serde_json::from_str(&prt_json).unwrap();
+        let missing_on_prem = json!({
+            "keyType": 0,
+            "error": "On-prem configuration is missing",
+            "sessionKeyType": 0,
+            "accountType": 1
+        });
+        object_encoded["tgt_ad"] = missing_on_prem.clone();
+        let object_de: PrimaryRefreshToken = serde_json::from_value(object_encoded.clone())
+            .expect("Failed to deserialize object tgt_ad");
+
+        object_encoded["tgt_ad"] = Value::String(missing_on_prem.to_string());
+        let string_de: PrimaryRefreshToken =
+            serde_json::from_value(object_encoded).expect("Failed to deserialize string tgt_ad");
+        assert_eq!(object_de, string_de);
+        assert!(serde_json::to_value(string_de).unwrap()["tgt_ad"].is_object());
     }
 
     #[test]
