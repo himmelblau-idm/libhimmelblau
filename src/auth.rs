@@ -3938,9 +3938,8 @@ impl PublicClientApplication {
         passwordless_remote_ngc!();
 
         if !cred_type.account_exists()? {
-            return Err(MsalError::GeneralFailure(
-                "An account with that name does not exist.".to_string(),
-            ));
+            // IfExistsResult=1: account not in tenant; return AADSTS50034 so callers can route.
+            return Err(MsalError::AADSTSError(AADSTSError::new(50034, None)));
         }
         if cred_type.is_personal_account() {
             dag_personal_fallback!();
