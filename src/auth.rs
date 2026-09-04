@@ -147,6 +147,10 @@ pub const LINUX_BROKER_APP_ID: &str = "b743a22d-6705-4147-8670-d92fa515ee2b";
 const DRS_APP_ID: &str = "01cb2876-7ebd-4aa4-9cc9-d28bd4d359a9";
 #[cfg(feature = "broker")]
 const AZURE_PORTAL_APP_ID: &str = "c44b4083-3bb0-49c1-b47d-974e53cbdf3c";
+#[cfg(feature = "broker")]
+const DRS_RESOURCE: &str = "https://enrollment.manage.microsoft.com/";
+#[cfg(feature = "broker")]
+const INTUNE_RESOURCE: &str = "0000000a-0000-0000-c000-000000000000";
 const HIMMELBLAU_REDIRECT_URI: &str = "himmelblau://Himmelblau.EntraId.BrokerPlugin";
 
 #[derive(Debug, Deserialize)]
@@ -2035,6 +2039,28 @@ pub enum AuthOption {
     /// authentication is permitted.
     #[cfg(feature = "optional_mfa")]
     RemoteSession,
+    /// Use the Microsoft Intune service principal for enrollment authentication.
+    ///
+    /// This allows Conditional Access exclusions for Microsoft Intune to apply.
+    /// Without this option, enrollment authentication uses the Device
+    /// Registration Service resource.
+    IntuneEnable,
+}
+
+#[cfg(feature = "broker")]
+fn device_enrollment_resource(options: &[AuthOption]) -> &'static str {
+    if options.contains(&AuthOption::IntuneEnable) {
+        // Use the Intune service principal as the resource for the initial
+        // auth config request. This avoids Conditional Access policies that
+        // block access to enrollment.manage.microsoft.com from non-compliant
+        // devices, since CA exclusions for "Microsoft Intune" and "Microsoft
+        // Intune Company Portal for Linux" will match this resource+client
+        // combination. This app id is documented at:
+        // https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership
+        INTUNE_RESOURCE
+    } else {
+        DRS_RESOURCE
+    }
 }
 
 #[cfg(feature = "ipvers")]
@@ -6220,7 +6246,8 @@ impl BrokerClientApplication {
     /// * `username` - Typically a UPN in the form of an email address.
     ///
     /// * `options` - Authentication options to enable, such as Fido and
-    ///   Passwordless auth.
+    ///   Passwordless auth. Pass `IntuneEnable` to use the Microsoft Intune
+    ///   service principal instead of the Device Registration Service resource.
     ///
     /// # Returns
     /// * Success: An AuthInit object. Call `exists` to get the result.
@@ -6230,16 +6257,9 @@ impl BrokerClientApplication {
         username: &str,
         options: &[AuthOption],
     ) -> Result<AuthInit, MsalError> {
-        // Use the Intune service principal as the resource for the initial
-        // auth config request. This avoids Conditional Access policies that
-        // block access to enrollment.manage.microsoft.com from non-compliant
-        // devices, since CA exclusions for "Microsoft Intune" and "Microsoft
-        // Intune Company Portal for Linux" will match this resource+client
-        // combination. This app id is documented at:
-        // https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership
-        let intune_resource = "0000000a-0000-0000-c000-000000000000";
+        let resource = device_enrollment_resource(options);
         self.app
-            .check_user_exists(username, Some(intune_resource), options)
+            .check_user_exists(username, Some(resource), options)
             .await
     }
 
@@ -6251,7 +6271,9 @@ impl BrokerClientApplication {
     ///
     /// * `password` - The password.
     ///
-    /// * `options` - Authentication options to enable, such as Fido.
+    /// * `options` - Authentication options to enable, such as Fido. Pass
+    ///   `IntuneEnable` to use the Microsoft Intune service principal instead
+    ///   of the Device Registration Service resource.
     ///
     /// * `auth_init` - The result of `check_user_exists`, required if called
     ///   prior to `initiate_acquire_token_by_mfa_flow_for_device_enrollment`.
@@ -6271,19 +6293,13 @@ impl BrokerClientApplication {
         auth_init: Option<AuthInit>,
         #[cfg(feature = "mfa_method_selection")] selected_method: Option<&str>,
     ) -> Result<MFAAuthContinue, MsalError> {
-        // Use the Intune service principal as the resource, as per documentation
-        // https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership
-        // This avoids Conditional Access policies that block non-compliant
-        // devices from accessing enrollment.manage.microsoft.com during
-        // the initial authentication. The enrollment-specific token is
-        // obtained later via refresh_token exchange in enroll_device().
-        let intune_resource = "0000000a-0000-0000-c000-000000000000";
+        let resource = device_enrollment_resource(options);
         self.app
             .initiate_acquire_token_by_mfa_flow(
                 username,
                 password,
                 vec![],
-                Some(intune_resource),
+                Some(resource),
                 options,
                 auth_init,
                 #[cfg(feature = "mfa_method_selection")]
@@ -9231,6 +9247,25 @@ mod tests {
             "IfExistsResult": if_exists_result
         }))
         .expect("test credential type should deserialize")
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn device_enrollment_resource_defaults_to_drs() {
+        assert_eq!(device_enrollment_resource(&[]), DRS_RESOURCE);
+        assert_eq!(
+            device_enrollment_resource(&[AuthOption::NoDAGFallback]),
+            DRS_RESOURCE
+        );
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn device_enrollment_resource_uses_intune_when_enabled() {
+        assert_eq!(
+            device_enrollment_resource(&[AuthOption::IntuneEnable]),
+            INTUNE_RESOURCE
+        );
     }
 
     #[test]
