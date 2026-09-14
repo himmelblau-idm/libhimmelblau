@@ -216,7 +216,7 @@ This script uses a public client created via an [Azure App Registration](https:/
 The script needs the tenant ID and client ID for the App Registration, and allows logging in with a username and password.
 It also demonstrates explicitly choosing an MFA method for the login, rather than using the default MFA method.
 
-To build `libhimmelblau` and test it with this script using (uv)[https://docs.astral.sh/uv/]:
+To build `libhimmelblau` and test it with this script using [uv](https://docs.astral.sh/uv/):
 
 ```sh
 uv tool install maturin
