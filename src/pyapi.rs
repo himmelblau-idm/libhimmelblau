@@ -240,12 +240,7 @@ impl PyMFAAuthContinue {
 
     #[getter]
     fn mfa_method(&self) -> PyResult<String> {
-        Ok(self
-            .flow
-            .mfa_methods
-            .first()
-            .cloned()
-            .unwrap_or_else(String::new))
+        Ok(self.flow.mfa_method())
     }
 
     #[getter]
@@ -284,6 +279,7 @@ impl PyMFAAuthContinue {
         Ok(self.flow.mfa_method_count())
     }
 
+    /// Get the active MFA method using the historically named default-method API.
     fn get_default_mfa_method(&self) -> PyResult<String> {
         self.flow
             .get_default_mfa_method_details()
@@ -291,7 +287,8 @@ impl PyMFAAuthContinue {
             .ok_or_else(|| general_py_err!("No default MFA method found"))
     }
 
-    /// Get detailed information about the default MFA method
+    /// Get details for the active MFA method. Raw account-default flags are
+    /// available from `get_mfa_method_details()`.
     fn get_default_mfa_method_details(&self) -> PyResult<Option<PyMfaMethodInfo>> {
         Ok(self
             .flow
@@ -1665,5 +1662,84 @@ mod ssh_certificate_repr_tests {
         };
 
         assert!(!certificate.__repr__().contains("live-certificate-body"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod mfa_method_tests {
+    use super::*;
+
+    #[test]
+    fn selected_method_wins_and_default_getters_preserve_raw_metadata() {
+        for default in ["Certificate", "Unknown"] {
+            let flow = PyMFAAuthContinue {
+                flow: crate::auth::mfa_tests::flow(
+                    &[(default, true), ("PhoneAppOTP", false)],
+                    Some("PhoneAppOTP"),
+                ),
+            };
+            assert_eq!(flow.mfa_method().unwrap(), "PhoneAppOTP");
+            assert_eq!(flow.get_default_mfa_method().unwrap(), "PhoneAppOTP");
+            assert_eq!(
+                flow.get_default_mfa_method_details()
+                    .unwrap()
+                    .unwrap()
+                    .info
+                    .auth_method_id,
+                "PhoneAppOTP"
+            );
+            let details = flow.get_mfa_method_details().unwrap();
+            assert_eq!(details[0].info.auth_method_id, default);
+            assert!(details[0].info.is_default);
+            assert!(!details[1].info.is_default);
+        }
+    }
+
+    #[test]
+    fn python_accessor_always_uses_native_selection_policy() {
+        for (selected, expected) in [(None, "PhoneAppOTP"), (Some("Missing"), "")] {
+            let flow = PyMFAAuthContinue {
+                flow: crate::auth::mfa_tests::flow(
+                    &[("OneWaySMS", false), ("PhoneAppOTP", true)],
+                    selected,
+                ),
+            };
+            assert_eq!(flow.mfa_method().unwrap(), expected);
+        }
+        let unsupported = PyMFAAuthContinue {
+            flow: crate::auth::mfa_tests::flow(
+                &[("Certificate", true), ("PhoneAppOTP", false)],
+                Some("Certificate"),
+            ),
+        };
+        assert_eq!(unsupported.mfa_method().unwrap(), "");
+        assert!(unsupported.get_default_mfa_method().is_err());
+        assert!(unsupported
+            .get_default_mfa_method_details()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            PyMFAAuthContinue {
+                flow: MFAAuthContinue::default()
+            }
+            .mfa_method()
+            .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn unresolved_selection_preserves_default_getter_empty_conventions() {
+        let mut inner = crate::auth::mfa_tests::flow(&[("Certificate", true)], Some("PhoneAppOTP"));
+        inner.mfa_methods.push("PhoneAppOTP".into());
+        let flow = PyMFAAuthContinue { flow: inner };
+
+        assert_eq!(flow.mfa_method().unwrap(), "");
+        assert!(flow.get_default_mfa_method().is_err());
+        assert!(flow.get_default_mfa_method_details().unwrap().is_none());
+        let details = flow.get_mfa_method_details().unwrap();
+        assert_eq!(details[0].info.auth_method_id, "Certificate");
+        assert!(details[0].info.is_default);
     }
 }
