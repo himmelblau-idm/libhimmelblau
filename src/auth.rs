@@ -193,6 +193,75 @@ struct ArrUserProofs {
     display: String,
 }
 
+trait NativeMfaMethod {
+    fn auth_method_id(&self) -> &str;
+    fn is_default(&self) -> bool;
+}
+
+impl NativeMfaMethod for ArrUserProofs {
+    fn auth_method_id(&self) -> &str {
+        &self.auth_method_id
+    }
+
+    fn is_default(&self) -> bool {
+        self.is_default
+    }
+}
+
+// Keep this allowlist in sync with the native handlers in MFA initiation.
+fn native_mfa_method_is_eligible(method: &str, skip_fido_for_mfa: bool) -> bool {
+    match method {
+        "PhoneAppOTP"
+        | "OneWaySMS"
+        | "ConsolidatedTelephony"
+        | "PhoneAppNotification"
+        | "CompanionAppsNotification"
+        | "TwoWayVoiceMobile"
+        | "TwoWayVoiceAlternateMobile"
+        | "TwoWayVoiceOffice"
+        | "AccessPass" => true,
+        "FidoKey" => !skip_fido_for_mfa,
+        _ => false,
+    }
+}
+
+fn select_native_mfa_method<'a, T: NativeMfaMethod>(
+    methods: &'a [T],
+    requested: Option<&str>,
+    skip_fido_for_mfa: bool,
+) -> Result<Option<&'a T>, MsalError> {
+    let eligible =
+        |method: &&T| native_mfa_method_is_eligible(method.auth_method_id(), skip_fido_for_mfa);
+    if let Some(requested) = requested {
+        return methods
+            .iter()
+            .filter(eligible)
+            .find(|method| method.auth_method_id() == requested)
+            .map(Some)
+            .ok_or_else(|| {
+                let available = methods
+                    .iter()
+                    .map(NativeMfaMethod::auth_method_id)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                MsalError::GeneralFailure(format!(
+                    "Requested MFA method '{}' not available. Available methods: {}",
+                    requested, available
+                ))
+            });
+    }
+    Ok(methods
+        .iter()
+        .filter(eligible)
+        .find(|method| method.is_default())
+        .or_else(|| {
+            methods.iter().filter(eligible).find(|method| {
+                skip_fido_for_mfa && method.auth_method_id() == "PhoneAppNotification"
+            })
+        })
+        .or_else(|| methods.iter().find(eligible)))
+}
+
 /// Detailed information about an MFA method
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MfaMethodInfo {
@@ -211,6 +280,16 @@ impl From<&ArrUserProofs> for MfaMethodInfo {
             display: proof.display.clone(),
             is_default: proof.is_default,
         }
+    }
+}
+
+impl NativeMfaMethod for MfaMethodInfo {
+    fn auth_method_id(&self) -> &str {
+        &self.auth_method_id
+    }
+
+    fn is_default(&self) -> bool {
+        self.is_default
     }
 }
 
@@ -336,21 +415,11 @@ impl From<DeviceAuthorizationResponse> for MFAAuthContinue {
 }
 
 impl MFAAuthContinue {
-    /// Get the default MFA method (for backwards compatibility)
+    /// Get the active MFA method selected for this flow.
     pub fn mfa_method(&self) -> String {
-        if let Some(method) = self.get_default_mfa_method_details() {
-            method.auth_method_id
-        } else if !self.mfa_methods.is_empty() {
-            for method in self.get_mfa_method_details() {
-                if !self.should_skip_fido_method(&method) {
-                    return method.auth_method_id.clone();
-                }
-            }
-            "".to_string()
-        } else {
-            // This happens with a DAG fallback
-            "".to_string()
-        }
+        self.get_selected_mfa_method_details()
+            .map(|method| method.auth_method_id)
+            .unwrap_or_default()
     }
 
     /// Get all available MFA methods. Returns a vector containing all method IDs.
@@ -375,32 +444,29 @@ impl MFAAuthContinue {
         self.get_available_mfa_methods().len()
     }
 
-    fn should_skip_fido_method(&self, method: &MfaMethodInfo) -> bool {
-        if method.auth_method_id == "FidoKey" {
-            self.skip_fido_for_mfa
-        } else {
-            false
-        }
+    /// Get the active MFA method for this flow.
+    ///
+    /// A stored selection must resolve to an eligible method. When no selection
+    /// is stored, the same native selection policy used during initiation is
+    /// applied to the advertised method details.
+    pub fn get_selected_mfa_method_details(&self) -> Option<MfaMethodInfo> {
+        select_native_mfa_method(
+            &self.mfa_method_details,
+            self.selected_mfa_method_id.as_deref(),
+            self.skip_fido_for_mfa,
+        )
+        .ok()
+        .flatten()
+        .cloned()
     }
 
-    /// Get details of the first default MFA method - if no default is specified, return the first MFA method, or None
+    /// Get the active MFA method using the historically named default-method accessor.
+    ///
+    /// When a selection is stored, this returns the selected method without
+    /// changing its original `is_default` value. Use `get_mfa_method_details()`
+    /// to inspect the account's advertised default flags.
     pub fn get_default_mfa_method_details(&self) -> Option<MfaMethodInfo> {
-        if let Some(details) = self
-            .get_mfa_method_details()
-            .into_iter()
-            .find(|method| method.is_default && !self.should_skip_fido_method(method))
-        {
-            Some(details)
-        } else if !self.mfa_methods.is_empty() {
-            for method in self.get_mfa_method_details() {
-                if !self.should_skip_fido_method(&method) {
-                    return Some(method);
-                }
-            }
-            None
-        } else {
-            None
-        }
+        self.get_selected_mfa_method_details()
     }
 
     /// Get detailed information about a specific MFA method by ID
@@ -4116,51 +4182,24 @@ impl PublicClientApplication {
                     let skip_fido_for_mfa = user_has_any_cross_device_fido
                         || auth_config.is_passkey_support_enabled.unwrap_or(false);
 
-                    // Try to use provided MFA method if available
-                    let selected_auth_method = if let Some(requested_method) = mfa_method {
-                        arr_user_proofs
-                            .iter()
-                            .find(|proof| {
-                                proof.auth_method_id == requested_method
-                                    && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
-                            })
-                            .ok_or_else(|| {
-                                let available = arr_user_proofs
-                                    .iter()
-                                    .map(|p| p.auth_method_id.as_str())
-                                    .collect::<Vec<_>>();
-                                MsalError::GeneralFailure(format!(
-                                "Requested MFA method '{}' not available. Available methods: {}",
-                                requested_method, available.join(", ")
-                            ))
-                            })?
-                    } else if let Some(method) = arr_user_proofs.iter().find(|proof| {
-                        proof.is_default
-                            && (!skip_fido_for_mfa || proof.auth_method_id != "FidoKey")
-                    }) {
-                        method
-                    } else if skip_fido_for_mfa {
-                        // Skip FidoKey methods entirely if we can't use them
-                        match arr_user_proofs
-                            .iter()
-                            .find(|proof| proof.auth_method_id == "PhoneAppNotification")
-                            .or_else(|| {
-                                arr_user_proofs
-                                    .iter()
-                                    .find(|proof| proof.auth_method_id != "FidoKey")
-                            }) {
-                            Some(method) => method,
-                            None => {
-                                info!("No usable MFA methods found (FIDO was cross-device)");
-                                dag_fallback!();
-                            }
+                    if let Some(requested) = mfa_method {
+                        if !native_mfa_method_is_eligible(requested, skip_fido_for_mfa) {
+                            info!(
+                                "Requested MFA method {} has no usable native handler",
+                                requested
+                            );
                         }
-                    } else if arr_user_proofs.is_empty() {
-                        info!("No MFA methods found");
-                        dag_fallback!();
-                    } else {
-                        // MS sometimes doesn't set is_default; fallback to the first
-                        &arr_user_proofs[0]
+                    }
+                    let selected_auth_method = match select_native_mfa_method(
+                        arr_user_proofs,
+                        mfa_method,
+                        skip_fido_for_mfa,
+                    )? {
+                        Some(method) => method,
+                        None => {
+                            info!("No usable native MFA methods found");
+                            dag_fallback!();
+                        }
                     };
 
                     let sctx = match &auth_config.sctx {
@@ -5245,10 +5284,7 @@ impl PublicClientApplication {
             }
         }
 
-        let selected_mfa_method = match mfa_method {
-            Some(method) => flow.get_mfa_method_by_id(method),
-            None => flow.get_default_mfa_method_details(),
-        };
+        let selected_mfa_method = flow.get_selected_mfa_method_details();
 
         let selected_mfa_method = match selected_mfa_method {
             Some(value) => value,
@@ -10107,7 +10143,10 @@ mod tests {
         let fido = mfa.get_mfa_method_by_id("FidoKey");
         assert!(fido.is_some(), "FidoKey method should exist");
         if let Some(fido) = fido {
-            assert!(mfa.should_skip_fido_method(&fido));
+            assert!(!native_mfa_method_is_eligible(
+                &fido.auth_method_id,
+                mfa.skip_fido_for_mfa
+            ));
         }
 
         assert_eq!(mfa.mfa_method_count(), 3);
@@ -10505,3 +10544,7 @@ mod tests {
         //Error("on-prem TGT is a mix of raw and structured, or is incomplete", line: 1, column: 729)
     }
 }
+
+#[cfg(test)]
+#[path = "mfa_tests.rs"]
+pub(crate) mod mfa_tests;

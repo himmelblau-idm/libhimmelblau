@@ -1482,17 +1482,7 @@ pub unsafe extern "C" fn mfa_auth_continue_mfa_method(
         );
     }
     let flow = unsafe { &mut *flow };
-    // Return the default MFA method ID if available
-    let method_id = flow
-        .get_default_mfa_method_details()
-        .map(|info| info.auth_method_id)
-        .unwrap_or_else(|| {
-            // If no default, return the first available method
-            flow.get_available_mfa_methods()
-                .first()
-                .cloned()
-                .unwrap_or_else(String::new)
-        });
+    let method_id = flow.mfa_method();
     let c_str = wrap_string(&method_id);
     if c_str.is_null() {
         return make_error(
@@ -5015,6 +5005,85 @@ mod ssh_certificate_accessor_tests {
             unsafe { CStr::from_ptr(out) }.to_str().unwrap(),
             "ssh-rsa AAAA"
         );
+        unsafe { string_free(out) };
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod mfa_method_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn c_accessor_always_uses_native_selection_policy() {
+        for default in ["Certificate", "Unknown"] {
+            let mut flow = crate::auth::mfa_tests::flow(
+                &[(default, true), ("PhoneAppOTP", false)],
+                Some("PhoneAppOTP"),
+            );
+            let mut out = std::ptr::null_mut();
+            let error = unsafe { mfa_auth_continue_mfa_method(&mut flow, &mut out) };
+            assert!(error.is_null());
+            assert!(!out.is_null());
+            assert_eq!(
+                unsafe { CStr::from_ptr(out) }.to_str().unwrap(),
+                "PhoneAppOTP"
+            );
+            assert_eq!(
+                flow.get_default_mfa_method_details()
+                    .unwrap()
+                    .auth_method_id,
+                "PhoneAppOTP"
+            );
+            assert_eq!(flow.mfa_method_details[0].auth_method_id, default);
+            assert!(flow.mfa_method_details[0].is_default);
+            assert!(!flow.mfa_method_details[1].is_default);
+            unsafe { string_free(out) };
+        }
+
+        for (selected, expected) in [
+            (Some("Missing"), ""),
+            (Some("Certificate"), ""),
+            (None, "PhoneAppOTP"),
+        ] {
+            let mut flow = crate::auth::mfa_tests::flow(
+                &[("PhoneAppOTP", false), ("Certificate", true)],
+                selected,
+            );
+            let mut out = std::ptr::null_mut();
+            let error = unsafe { mfa_auth_continue_mfa_method(&mut flow, &mut out) };
+            assert!(error.is_null());
+            assert!(!out.is_null());
+            assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), expected);
+            unsafe { string_free(out) };
+        }
+    }
+
+    #[test]
+    fn selected_method_without_details_returns_empty() {
+        let mut flow = crate::auth::mfa_tests::flow(&[("Certificate", true)], Some("PhoneAppOTP"));
+        flow.mfa_methods.push("PhoneAppOTP".into());
+        let mut out = std::ptr::null_mut();
+        let error = unsafe { mfa_auth_continue_mfa_method(&mut flow, &mut out) };
+        assert!(error.is_null());
+        assert!(!out.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "");
+        assert!(flow.get_default_mfa_method_details().is_none());
+        unsafe { string_free(out) };
+    }
+
+    #[test]
+    fn method_list_without_details_returns_empty() {
+        let mut flow = MFAAuthContinue {
+            mfa_methods: vec!["OneWaySMS".into()],
+            ..Default::default()
+        };
+        let mut out = std::ptr::null_mut();
+        let error = unsafe { mfa_auth_continue_mfa_method(&mut flow, &mut out) };
+        assert!(error.is_null());
+        assert!(!out.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "");
         unsafe { string_free(out) };
     }
 }
