@@ -541,7 +541,7 @@ struct Credentials {
     #[serde(rename = "FidoParams")]
     fido_params: Option<FidoParams>,
     #[serde(rename = "PrefCredential")]
-    pref_credential: u8,
+    pref_credential: Option<u8>,
     #[serde(rename = "HasAccessPass")]
     has_access_pass: Option<bool>,
     #[serde(rename = "HasFido")]
@@ -3916,7 +3916,7 @@ impl PublicClientApplication {
             };
         }
 
-        debug!("Credential type: pref_credential={}, has_password={}, has_fido={:?}, has_remote_ngc={:?}, has_access_pass={:?}, is_passkey_support_enabled={:?}",
+        debug!("Credential type: pref_credential={:?}, has_password={}, has_fido={:?}, has_remote_ngc={:?}, has_access_pass={:?}, is_passkey_support_enabled={:?}",
             cred_type.credentials.pref_credential,
             cred_type.credentials.has_password,
             cred_type.credentials.has_fido,
@@ -4008,10 +4008,10 @@ impl PublicClientApplication {
         // pref_credential value returned by Microsoft. This ensures users
         // under a phishing-resistant CAP are offered a compliant method.
         match cred_type.credentials.pref_credential {
-            13 => passwordless_tap!(),
-            2 | 7 => {
+            Some(13) => passwordless_tap!(),
+            Some(2) | Some(7) => {
                 debug!(
-                    "passwordless_fido triggered via pref_credential={}",
+                    "passwordless_fido triggered via pref_credential={:?}",
                     cred_type.credentials.pref_credential
                 );
                 passwordless_fido!();
