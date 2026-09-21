@@ -384,6 +384,9 @@ pub struct MFAAuthContinue {
     pub fido_is_passkey: bool,
     /// Whether to skip FidoKey in MFA method selection.
     pub skip_fido_for_mfa: bool,
+    /// Whether the account supports Entra password authentication.
+    #[serde(skip)]
+    pub has_password: bool,
     /// Whether the user has a physical USB security key.
     pub has_physical_security_key: bool,
     /// Whether the user has a cross-device capable passkey (e.g. MS Authenticator).
@@ -3776,6 +3779,7 @@ impl PublicClientApplication {
             };
             (auth_config, cred_type)
         };
+        let has_password = cred_type.credentials.has_password;
         let sctx = match &auth_config.sctx {
             Some(sctx) => sctx.clone(),
             None => {
@@ -3834,6 +3838,7 @@ impl PublicClientApplication {
                         skip_fido_for_mfa: false,
                         has_physical_security_key: false,
                         has_cross_device_passkey: false,
+                        has_password,
                     });
                 } else {
                     debug!("passwordless_tap: skipped (has_access_pass=false)");
@@ -3905,6 +3910,7 @@ impl PublicClientApplication {
                                 skip_fido_for_mfa: false,
                                 has_physical_security_key: false,
                                 has_cross_device_passkey: false,
+                                has_password,
                             });
                         }
                     } else {
@@ -3998,6 +4004,7 @@ impl PublicClientApplication {
                         skip_fido_for_mfa: false,
                         has_physical_security_key: attempt_security_key,
                         has_cross_device_passkey: attempt_qr_bluetooth,
+                        has_password,
                     });
                 }
             };
@@ -4331,6 +4338,7 @@ impl PublicClientApplication {
                         skip_fido_for_mfa,
                         has_physical_security_key: false,
                         has_cross_device_passkey: false,
+                        has_password,
                     })
                 } else {
                     info!("No MFA methods found");
@@ -4367,6 +4375,7 @@ impl PublicClientApplication {
                     skip_fido_for_mfa: false,
                     has_physical_security_key: false,
                     has_cross_device_passkey: false,
+                    has_password,
                 })
             }
             Err(e) => {

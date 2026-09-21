@@ -1529,6 +1529,30 @@ pub unsafe extern "C" fn mfa_auth_continue_max_poll_attempts(flow: *mut MFAAuthC
         None => -1,
     }
 }
+/// Get whether an MFA continuation's account supports Entra password auth.
+///
+/// This accessor is additive; the continuation remains opaque to C callers.
+///
+/// # Safety
+///
+/// The caller must provide a valid continuation pointer and writable output
+/// pointer.
+#[no_mangle]
+pub unsafe extern "C" fn mfa_auth_continue_has_password(
+    flow: *mut MFAAuthContinue,
+    out: *mut bool,
+) -> *mut MSAL_ERROR {
+    if flow.is_null() || out.is_null() {
+        return make_error(
+            MSAL_ERROR_CODE::INVALID_POINTER,
+            "Invalid parameters".to_string(),
+        );
+    }
+    unsafe {
+        *out = (*flow).has_password;
+    }
+    no_error()
+}
 
 /// Get the FIDO challenge from a MFAAuthContinue flow
 ///
@@ -4899,6 +4923,28 @@ mod mfa_fido_accessor_tests {
             fido_allow_list: Some(vec!["credA".to_string(), "credB".to_string()]),
             ..Default::default()
         }
+    }
+    #[test]
+    fn has_password_returns_continuation_capability() {
+        let mut flow = MFAAuthContinue {
+            has_password: true,
+            ..Default::default()
+        };
+        let mut out = false;
+        let err = unsafe { mfa_auth_continue_has_password(&mut flow, &mut out) };
+        assert!(err.is_null());
+        assert!(out);
+    }
+
+    #[test]
+    fn has_password_rejects_invalid_pointers() {
+        let mut out = false;
+        let err = unsafe { mfa_auth_continue_has_password(std::ptr::null_mut(), &mut out) };
+        assert!(matches!(
+            unsafe { (*err).code },
+            MSAL_ERROR_CODE::INVALID_POINTER
+        ));
+        unsafe { error_free(err) };
     }
 
     #[test]
