@@ -9046,12 +9046,34 @@ impl BrokerClientApplication {
         let (_key, win_hello_storage_key) = tpm
             .ms_hello_key_load(storage_key, hello_key, &pin)
             .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
-        let prt_data = tpm
-            .unseal_data(&win_hello_storage_key, sealed_data)
-            .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
-        let prt = json_from_slice(&prt_data)
-            .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))?;
+        self.unseal_user_prt_with_loaded_hello_key(
+            sealed_data,
+            &win_hello_storage_key,
+            tpm,
+            storage_key,
+        )
+        .map(|(sealed_prt, _)| sealed_prt)
+    }
 
+    /// Unseal a user PRT with an already loaded Hello storage key.
+    ///
+    /// The caller must keep the returned storage key within the same
+    /// authentication transaction that unlocked it with the Hello PIN.
+    /// The returned boolean reports the expiry state of the PRT read during
+    /// this operation, avoiding a second PRT unseal.
+    pub fn unseal_user_prt_with_loaded_hello_key(
+        &self,
+        sealed_data: &SealedData,
+        hello_storage_key: &StorageKey,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<(SealedData, bool), MsalError> {
+        let prt_data = tpm
+            .unseal_data(hello_storage_key, sealed_data)
+            .map_err(|e| MsalError::TPMFail(format!("Failed unsealing PRT {:?}", e)))?;
+        let prt: PrimaryRefreshToken = json_from_slice(&prt_data)
+            .map_err(|e| MsalError::InvalidJson(format!("Failed deserializing PRT {:?}", e)))?;
+        let expired = prt.is_expired();
         let transport_key = self.transport_key(tpm, storage_key)?;
 
         // This allows a transition, where existing msoapxbc keys will provide
@@ -9061,6 +9083,7 @@ impl BrokerClientApplication {
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
         self.seal_user_prt(&prt, tpm, prt_storage_key)
+            .map(|sealed_prt| (sealed_prt, expired))
     }
 
     pub async fn resolve_nametosid(
@@ -9444,6 +9467,46 @@ mod tests {
             &[],
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn unseal_user_prt_with_loaded_hello_key_reports_expiry() {
+        let (mut tpm, machine_key) = test_tpm();
+        let transport_key = tpm.msoapxbc_rsa_key_create(&machine_key).unwrap();
+        let mut app = test_broker_app("https://login.microsoftonline.com/common");
+        app.set_transport_key(Some(transport_key));
+
+        let prt = test_prt("prt-refresh-token");
+        let host_sealed_prt = app.seal_user_prt(&prt, &mut tpm, &machine_key).unwrap();
+        let pin = PinValue::new("123456").unwrap();
+        let hello_key = tpm.ms_hello_key_create(&machine_key, &pin).unwrap();
+        let hello_sealed_prt = app
+            .seal_user_prt_with_hello_key(
+                &host_sealed_prt,
+                &hello_key,
+                "123456",
+                &mut tpm,
+                &machine_key,
+            )
+            .unwrap();
+        let (_, hello_storage_key) = tpm
+            .ms_hello_key_load(&machine_key, &hello_key, &pin)
+            .unwrap();
+
+        let (resealed_prt, expired) = app
+            .unseal_user_prt_with_loaded_hello_key(
+                &hello_sealed_prt,
+                &hello_storage_key,
+                &mut tpm,
+                &machine_key,
+            )
+            .unwrap();
+
+        assert!(!expired);
+        assert!(!app
+            .is_prt_expired(&resealed_prt, &mut tpm, &machine_key)
+            .unwrap());
     }
 
     #[cfg(feature = "broker")]
