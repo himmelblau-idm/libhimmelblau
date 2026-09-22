@@ -55,7 +55,6 @@ use std::sync::RwLock;
 use std::thread::sleep;
 use std::time::Duration;
 use tracing::{error, info, warn};
-use urlencoding::encode as url_encode;
 use uuid::Uuid;
 #[cfg(feature = "broker")]
 use x509_cert::attr::Attribute;
@@ -2261,18 +2260,13 @@ impl ClientApplication {
             ("grant_type", "password"),
             ("client_info", "1"),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let resp = self
             .client
             .post(format!("{}/oauth2/v2.0/token", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -2308,18 +2302,13 @@ impl ClientApplication {
             ("refresh_token", refresh_token),
             ("client_info", "1"),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let resp = self
             .client
             .post(format!("{}/oauth2/v2.0/token", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -2756,18 +2745,13 @@ impl PublicClientApplication {
         let scopes_str = all_scopes.join(" ");
 
         let params = [("client_id", self.client_id()), ("scope", &scopes_str)];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let resp = self
             .client()
             .post(format!("{}/oauth2/v2.0/devicecode", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -2795,18 +2779,13 @@ impl PublicClientApplication {
         let scopes_str = all_scopes.join(" ");
 
         let params = [("client_id", self.client_id()), ("scope", &scopes_str)];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let resp = self
             .client()
             .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -2845,18 +2824,13 @@ impl PublicClientApplication {
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", &flow.device_code),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let resp = self
             .client()
             .post(format!("{}/oauth2/v2.0/token", self.authority()?))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -2885,18 +2859,13 @@ impl PublicClientApplication {
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", &flow.device_code),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let resp = self
             .client()
             .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -3277,11 +3246,6 @@ impl PublicClientApplication {
             ("username", username),
             ("loginCanary", &auth_config.canary),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let url_fido_login = match &auth_config.url_fido_login {
             Some(url_fido_login) => url_fido_login.clone(),
@@ -3297,7 +3261,7 @@ impl PublicClientApplication {
             .post(url_fido_login)
             .header(header::USER_AGENT, FIDO_USER_AGENT)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -3319,12 +3283,6 @@ impl PublicClientApplication {
         options: &[AuthOption],
         password_change: bool,
     ) -> Result<AuthConfig, MsalError> {
-        let payload = req_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
-
         let url_post = match &auth_config.url_post {
             Some(url_post) => url_post.clone(),
             None => {
@@ -3354,7 +3312,7 @@ impl PublicClientApplication {
             .post(url)
             .header(header::USER_AGENT, user_agent)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(req_params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -4681,14 +4639,14 @@ impl PublicClientApplication {
     async fn auth_code_intercept_internal(
         &self,
         url: &str,
-        payload: String,
+        params: &[(&str, &str)],
     ) -> Result<String, MsalError> {
         let mut resp = self
             .client()
             .post(url)
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -4783,11 +4741,6 @@ impl PublicClientApplication {
             ("canary", &flow.canary),
             ("ctx", &flow.ctx),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let url = match &flow.url_post.starts_with('/') {
             true => {
@@ -4805,7 +4758,7 @@ impl PublicClientApplication {
             .post(url)
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -4855,26 +4808,21 @@ impl PublicClientApplication {
             "ConsolidatedTelephony" => "OneWaySMS".to_string(),
             other => other.to_string(),
         };
-        let params = [
+        let params: &[(&str, &str)] = &[
             ("request", &flow.ctx),
             ("mfaAuthMethod", &mfa_method),
-            ("login", &username.to_string()),
+            ("login", username),
             ("flowToken", &flow.flow_token),
             ("canary", &flow.canary),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         match self
-            .auth_code_intercept_internal(&flow.url_post, payload)
+            .auth_code_intercept_internal(&flow.url_post, params)
             .await
         {
             Ok(code) => Ok(code),
             Err(MsalError::SkipMfaRegistration(url_skip_mfa_registration, sft, canary)) => {
-                let params = [
+                let params: &[(&str, &str)] = &[
                     (
                         "flowtoken",
                         &sft.ok_or(MsalError::GeneralFailure("Missing flow token".to_string()))?,
@@ -4882,12 +4830,7 @@ impl PublicClientApplication {
                     ("ctx", &flow.ctx),
                     ("canary", &canary),
                 ];
-                let payload = params
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-                    .collect::<Vec<String>>()
-                    .join("&");
-                self.auth_code_intercept_internal(&url_skip_mfa_registration, payload)
+                self.auth_code_intercept_internal(&url_skip_mfa_registration, params)
                     .await
             }
             Err(e) => Err(e),
@@ -4911,18 +4854,13 @@ impl PublicClientApplication {
             ("code", &authorization_code),
             ("redirect_uri", &redirect_uri),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let resp = self
             .client()
             .post(format!("{}/oauth2/token", self.authority()?))
             .header(header::USER_AGENT, env!("CARGO_PKG_NAME"))
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -4971,13 +4909,7 @@ impl PublicClientApplication {
         } else {
             params.push(("ctx", &flow.ctx));
         }
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
-
-        self.auth_code_intercept_internal(&flow.url_post, payload)
+        self.auth_code_intercept_internal(&flow.url_post, &params)
             .await
     }
 
@@ -6825,11 +6757,6 @@ impl BrokerClientApplication {
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("request", signed_jwt),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let mut debug_payload = params;
         debug_payload[2] = ("request", "**********");
@@ -6841,7 +6768,7 @@ impl BrokerClientApplication {
             .client()
             .post(token_endpoint)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -7086,11 +7013,6 @@ impl BrokerClientApplication {
             ("client_info", "1"),
             ("tgt", "true"),
         ];
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
 
         // TODO: add condition here to support v2 endpoints?
         let url = format!("{}/oauth2/token", self.authority()?);
@@ -7105,7 +7027,7 @@ impl BrokerClientApplication {
             .client()
             .post(url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -7410,11 +7332,6 @@ impl BrokerClientApplication {
             ("redirect_uri", redirect_uri),
             ("client_info", "1"),
         ];
-        let payload = params
-            .iter()
-            .map(|(key, value)| format!("{}={}", key, value))
-            .collect::<Vec<String>>()
-            .join("&");
         let url = format!("{}/oauth2/token", self.authority()?);
         let mut debug_params = params;
         debug_params[2] = ("request", "**********");
@@ -7426,7 +7343,7 @@ impl BrokerClientApplication {
             .client()
             .post(&url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -7571,11 +7488,6 @@ impl BrokerClientApplication {
                 step2_params.push(("resource", resource));
             }
         }
-        let step2_payload = step2_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
         // Step 2 uses the v2 endpoint when v2 scopes are present, so the
         // target scope (e.g. ms-device-service://) is correctly resolved.
@@ -7596,7 +7508,7 @@ impl BrokerClientApplication {
             .post(&step2_url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
-            .body(step2_payload)
+            .form(&step2_params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -7682,11 +7594,6 @@ impl BrokerClientApplication {
         if request_tgt {
             params.push(("tgt", "true"));
         }
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
 
         // TODO: add condition here to support v2 endpoints?
         let url = format!("{}/oauth2/token", self.authority()?);
@@ -7701,7 +7608,7 @@ impl BrokerClientApplication {
             .client()
             .post(url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
@@ -8174,17 +8081,16 @@ impl BrokerClientApplication {
         if !v2_endpoint && demand_mfa {
             params.push(("amr_values", "ngcmfa"));
         }
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, url_encode(v)))
-            .collect::<Vec<String>>()
-            .join("&");
 
-        let url = if v2_endpoint {
-            format!("{}/oAuth2/v2.0/authorize?{}", self.authority()?, payload)
+        let base_url = if v2_endpoint {
+            format!("{}/oAuth2/v2.0/authorize", self.authority()?)
         } else {
-            format!("{}/oauth2/authorize?{}", self.authority()?, payload)
+            format!("{}/oauth2/authorize", self.authority()?)
         };
+        let url: String = Url::parse_with_params(&base_url, &params)
+            .map_err(|e| MsalError::URLFormatFailed(format!("Failed encoding URL: {:?}", e)))?
+            .into();
+
         debug!("GET {}", url);
 
         let mut req = self.client().get(url).header(header::USER_AGENT, "");
@@ -8555,18 +8461,13 @@ impl BrokerClientApplication {
         if let Some(req_cnf) = req_cnf {
             params.push(("req_cnf", req_cnf));
         }
-        let payload = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
 
         let url = if v2_endpoint {
             format!("{}/oAuth2/v2.0/token", self.authority()?)
         } else {
             format!("{}/oauth2/token", self.authority()?)
         };
-        let mut debug_payload = params;
+        let mut debug_payload = params.clone();
         debug_payload[2] = ("code", "**********");
         if let Ok(pretty) = to_string_pretty(&debug_payload) {
             debug!("POST {}: {}", url, pretty);
@@ -8576,7 +8477,7 @@ impl BrokerClientApplication {
             .client()
             .post(url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(payload)
+            .form(&params)
             .send()
             .await
             .map_err(|e| MsalError::request_failed(&e))?;
