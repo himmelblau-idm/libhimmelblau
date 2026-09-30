@@ -7851,21 +7851,13 @@ impl BrokerClientApplication {
         Ok(token)
     }
 
-    async fn build_jwt_by_hello_for_business_key(
-        &self,
+    fn build_hello_for_business_assertion(
         username: &str,
-        loadable_key: &LoadableMsHelloKey,
+        request_nonce: &str,
         tpm: &mut BoxedDynTpm,
-        storage_key: &StorageKey,
-        pin: &PinValue,
-    ) -> Result<Jws, MsalError> {
-        debug!("Building a Hello for Business JWT");
-
-        let mut nonce = self.request_nonce().await?;
-        let (key, _win_hello_storage_key) = tpm
-            .ms_hello_key_load(storage_key, loadable_key, pin)
-            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
-        let win_hello_pub_der = tpm.ms_hello_rsa_public_as_der(&key).map_err(|e| {
+        signing_key: &RS256Key,
+    ) -> Result<String, MsalError> {
+        let win_hello_pub_der = tpm.ms_hello_rsa_public_as_der(signing_key).map_err(|e| {
             MsalError::TPMFail(format!("Failed getting Windows Hello Key as der: {:?}", e))
         })?;
         let win_hello_rsa = Rsa::public_key_from_der(&win_hello_pub_der)
@@ -7882,7 +7874,7 @@ impl BrokerClientApplication {
         );
         let assertion_jwt = JwsBuilder::from(
             serde_json::to_vec(
-                &HelloForBusinessAssertion::new(username, &nonce)
+                &HelloForBusinessAssertion::new(username, request_nonce)
                     .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?,
             )
             .map_err(|e| {
@@ -7903,7 +7895,7 @@ impl BrokerClientApplication {
             }
         }
 
-        let mut jws_tpm_signer = match JwsTpmRs256Signer::new(tpm, &key) {
+        let mut jws_tpm_signer = match JwsTpmRs256Signer::new(tpm, signing_key) {
             Ok(jws_tpm_signer) => jws_tpm_signer,
             Err(e) => {
                 return Err(MsalError::TPMFail(format!(
@@ -7916,7 +7908,24 @@ impl BrokerClientApplication {
             Ok(signed_jwt) => signed_jwt,
             Err(e) => return Err(MsalError::TPMFail(format!("Failed signing jwk: {}", e))),
         };
-        let assertion = format!("{}", signed_assertion);
+        Ok(format!("{}", signed_assertion))
+    }
+
+    async fn build_jwt_by_hello_for_business_key(
+        &self,
+        username: &str,
+        loadable_key: &LoadableMsHelloKey,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+        pin: &PinValue,
+    ) -> Result<Jws, MsalError> {
+        debug!("Building a Hello for Business JWT");
+
+        let mut nonce = self.request_nonce().await?;
+        let (key, _win_hello_storage_key) = tpm
+            .ms_hello_key_load(storage_key, loadable_key, pin)
+            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
+        let assertion = Self::build_hello_for_business_assertion(username, &nonce, tpm, &key)?;
 
         nonce = self.request_nonce().await?;
 
@@ -9523,6 +9532,58 @@ mod tests {
         let header = jwt.split('.').next().unwrap();
         let header = URL_SAFE_NO_PAD.decode(header).unwrap();
         json_from_slice(&header).unwrap()
+    }
+
+    #[cfg(feature = "broker")]
+    fn decode_jwt_payload(jwt: &str) -> Value {
+        let payload = jwt.split('.').nth(1).unwrap();
+        let payload = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        json_from_slice(&payload).unwrap()
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn hello_for_business_assertion_is_signed_by_the_hello_key() {
+        let (mut tpm, machine_key) = test_tpm();
+        let pin = PinValue::new("123456").unwrap();
+        let hello_key = tpm.ms_hello_key_create(&machine_key, &pin).unwrap();
+        let (signing_key, _) = tpm
+            .ms_hello_key_load(&machine_key, &hello_key, &pin)
+            .unwrap();
+        let other_hello_key = tpm.ms_hello_key_create(&machine_key, &pin).unwrap();
+        let (other_signing_key, _) = tpm
+            .ms_hello_key_load(&machine_key, &other_hello_key, &pin)
+            .unwrap();
+
+        let assertion = BrokerClientApplication::build_hello_for_business_assertion(
+            "user@example.test",
+            "synthetic-nonce",
+            &mut tpm,
+            &signing_key,
+        )
+        .unwrap();
+
+        let header = decode_jwt_header(&assertion);
+        assert_eq!(header["alg"], "RS256");
+        assert_eq!(header["typ"], "JWT");
+        assert_eq!(header["use"], "ngc");
+        assert!(header["kid"].is_string());
+        let payload = decode_jwt_payload(&assertion);
+        assert_eq!(payload["iss"], "user@example.test");
+        assert_eq!(payload["request_nonce"], "synthetic-nonce");
+        assert_eq!(payload["scope"], "openid aza ugs");
+
+        let (signing_input, signature) = assertion.rsplit_once('.').unwrap();
+        let signature = URL_SAFE_NO_PAD.decode(signature).unwrap();
+        let mut verifies = |key: &RS256Key| {
+            let public_key =
+                PKey::public_key_from_der(&tpm.ms_hello_rsa_public_as_der(key).unwrap()).unwrap();
+            let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key).unwrap();
+            verifier.update(signing_input.as_bytes()).unwrap();
+            verifier.verify(&signature).unwrap()
+        };
+        assert!(verifies(&signing_key));
+        assert!(!verifies(&other_signing_key));
     }
 
     fn build_user_token(access_token: String) -> UserToken {
