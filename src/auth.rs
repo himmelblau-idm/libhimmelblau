@@ -10521,3 +10521,7 @@ mod tests {
 #[cfg(test)]
 #[path = "mfa_tests.rs"]
 pub(crate) mod mfa_tests;
+
+#[cfg(test)]
+#[path = "test_server.rs"]
+pub(crate) mod test_server;
