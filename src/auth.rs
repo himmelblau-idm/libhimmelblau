@@ -4435,14 +4435,14 @@ impl PublicClientApplication {
             let json_resp: CredType = resp
                 .json()
                 .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             json_resp.log_throttle_status();
             Ok(json_resp)
         } else {
             let json_resp: ErrorResponse = resp
                 .json()
                 .await
-                .map_err(|e| MsalError::InvalidJson(format!("{}", e)))?;
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
             Err(MsalError::AcquireTokenFailed(json_resp))
         }
     }
