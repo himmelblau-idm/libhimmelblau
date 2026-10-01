@@ -398,6 +398,30 @@ impl Services {
         #[cfg(feature = "set_timeout")] timeout: Duration,
         #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
     ) -> Result<Self, MsalError> {
+        let discovery_url = if cfg!(feature = "custom_oidc_discovery_url") {
+            std::env::var("HIMMELBLAU_DISCOVERY_URL").unwrap_or_else(|_| DISCOVERY_URL.to_string())
+        } else {
+            DISCOVERY_URL.to_string()
+        };
+        Self::new_with_discovery_url(
+            access_token,
+            domain_name,
+            &discovery_url,
+            #[cfg(feature = "set_timeout")]
+            timeout,
+            #[cfg(feature = "ipvers")]
+            ip_version,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_discovery_url(
+        access_token: &str,
+        domain_name: &str,
+        discovery_url: &str,
+        #[cfg(feature = "set_timeout")] timeout: Duration,
+        #[cfg(feature = "ipvers")] ip_version: &[IpVersion],
+    ) -> Result<Self, MsalError> {
         #[cfg(feature = "set_timeout")]
         let (timeout, connect_timeout) = { (timeout, min(timeout / 2, Duration::from_secs(3))) };
         #[cfg(not(feature = "set_timeout"))]
@@ -436,12 +460,6 @@ impl Services {
         let client = builder
             .build()
             .map_err(|e| MsalError::RequestFailed(format!("{}", e)))?;
-
-        let discovery_url = if cfg!(feature = "custom_oidc_discovery_url") {
-            std::env::var("HIMMELBLAU_DISCOVERY_URL").unwrap_or_else(|_| DISCOVERY_URL.to_string())
-        } else {
-            DISCOVERY_URL.to_string()
-        };
 
         let url = Url::parse_with_params(
             &format!("{}/{}/Discover", discovery_url, domain_name),

@@ -5545,6 +5545,65 @@ pub struct BrokerClientApplication {
     transport_key: Option<LoadableMsOapxbcRsaKey>,
     cert_key: Option<LoadableMsDeviceEnrolmentKey>,
     on_behalf_of_client_id: Option<String>,
+    // Replaces the device registration discovery URL in tests.
+    discovery_url: Option<String>,
+}
+
+/// A Hello key loaded with its PIN.
+///
+/// It holds the signing key and the storage key from one PIN-authorized load
+/// of a LoadableMsHelloKey. Functions that accept it use these keys without
+/// loading the Hello key again. Drop it when the authentication operation
+/// that unlocked it ends.
+#[cfg(feature = "broker")]
+pub struct LoadedMsHelloKey {
+    signing_key: RS256Key,
+    storage_key: StorageKey,
+}
+
+#[cfg(feature = "broker")]
+impl LoadedMsHelloKey {
+    /// Load a Hello key with its PIN.
+    ///
+    /// # Arguments
+    ///
+    /// * `hello_key` - A LoadableMsHelloKey provisioned using
+    ///   provision_hello_for_business_key.
+    ///
+    /// * `pin` - The PIN code required to unlock the key.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: The loaded Hello key.
+    /// * Failure: An MsalError, indicating the failure. An incorrect PIN
+    ///   results in MsalError::TPMFail.
+    pub fn load(
+        hello_key: &LoadableMsHelloKey,
+        pin: &str,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<Self, MsalError> {
+        let pin = PinValue::new(pin)
+            .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
+        let (signing_key, hello_storage_key) = tpm
+            .ms_hello_key_load(storage_key, hello_key, &pin)
+            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
+        Ok(LoadedMsHelloKey {
+            signing_key,
+            storage_key: hello_storage_key,
+        })
+    }
+
+    /// The storage key unlocked by the Hello PIN.
+    ///
+    /// Use it with the TPM to seal and unseal other data for the user, such
+    /// as refresh tokens.
+    pub fn storage_key(&self) -> &StorageKey {
+        &self.storage_key
+    }
 }
 
 #[cfg(feature = "broker")]
@@ -5590,11 +5649,44 @@ impl BrokerClientApplication {
             transport_key,
             cert_key,
             on_behalf_of_client_id: client_id.map(|s| s.to_string()),
+            discovery_url: None,
         })
     }
 
     fn client(&self) -> &Client {
         self.app.client()
+    }
+
+    async fn discover_services(
+        &self,
+        access_token: &str,
+        domain_name: &str,
+    ) -> Result<Services, MsalError> {
+        match &self.discovery_url {
+            Some(discovery_url) => {
+                Services::new_with_discovery_url(
+                    access_token,
+                    domain_name,
+                    discovery_url,
+                    #[cfg(feature = "set_timeout")]
+                    self.app.app.timeout,
+                    #[cfg(feature = "ipvers")]
+                    &self.app.app.ip_version,
+                )
+                .await
+            }
+            None => {
+                Services::new(
+                    access_token,
+                    domain_name,
+                    #[cfg(feature = "set_timeout")]
+                    self.app.app.timeout,
+                    #[cfg(feature = "ipvers")]
+                    &self.app.app.ip_version,
+                )
+                .await
+            }
+        }
     }
 
     /// Clears all cookies stored in the internal cookie jar
@@ -5930,15 +6022,9 @@ impl BrokerClientApplication {
         transport_key: &Rsa<Public>,
         csr_der: &Vec<u8>,
     ) -> Result<(X509, String), MsalError> {
-        let services = Services::new(
-            access_token,
-            &attrs.target_domain,
-            #[cfg(feature = "set_timeout")]
-            self.app.app.timeout,
-            #[cfg(feature = "ipvers")]
-            &self.app.app.ip_version,
-        )
-        .await?;
+        let services = self
+            .discover_services(access_token, &attrs.target_domain)
+            .await?;
         services
             .enroll_device(access_token, attrs, transport_key, csr_der)
             .await
@@ -7673,6 +7759,38 @@ impl BrokerClientApplication {
         storage_key: &StorageKey,
         pin: &str,
     ) -> Result<LoadableMsHelloKey, MsalError> {
+        self.provision_loaded_ms_hello_key(token, tpm, storage_key, pin)
+            .await
+            .map(|(hello_key, _)| hello_key)
+    }
+
+    /// Provision a new Hello for Business Key and keep it loaded
+    ///
+    /// Like provision_hello_for_business_key, but also returns the Hello key
+    /// loaded during provisioning, so it can be used without loading it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - Token obtained via either
+    ///   acquire_token_by_username_password_for_device_enrollment
+    ///   or acquire_token_by_device_flow.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// * `pin` - The PIN code which will be used to unlock the key.
+    ///
+    /// # Returns
+    /// * Success: The new LoadableMsHelloKey and the same key loaded.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn provision_loaded_ms_hello_key(
+        &self,
+        token: &UserToken,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+        pin: &str,
+    ) -> Result<(LoadableMsHelloKey, LoadedMsHelloKey), MsalError> {
         debug!("Provisioning a Hello for Business Key");
 
         // If we at least have the mfa amr already, we can request a token
@@ -7696,15 +7814,9 @@ impl BrokerClientApplication {
                 ))
             }
         };
-        let services = Services::new(
-            &access_token,
-            &token.tenant_id()?,
-            #[cfg(feature = "set_timeout")]
-            self.app.app.timeout,
-            #[cfg(feature = "ipvers")]
-            &self.app.app.ip_version,
-        )
-        .await?;
+        let services = self
+            .discover_services(&access_token, &token.tenant_id()?)
+            .await?;
         let resource_id = services.key_provisioning_resource_id();
 
         // Acquire an access token for the key provisioning service
@@ -7726,9 +7838,7 @@ impl BrokerClientApplication {
             MsalError::TPMFail(format!("Failed creating Windows Hello Key: {:?}", e))
         })?;
 
-        // TODO!!! This now has the unlocked storage key associated to the user that you can use
-        // to protect PRT's.
-        let (win_hello_key, _win_hello_storage_key) = tpm
+        let (win_hello_key, win_hello_storage_key) = tpm
             .ms_hello_key_load(storage_key, &loadable_win_hello_key, &pin)
             .map_err(|e| {
                 MsalError::TPMFail(format!("Failed loading Windows Hello Key: {:?}", e))
@@ -7753,7 +7863,13 @@ impl BrokerClientApplication {
         };
 
         match services.provision_key(&access_token, &win_hello_rsa).await {
-            Ok(()) => Ok(loadable_win_hello_key.clone()),
+            Ok(()) => Ok((
+                loadable_win_hello_key,
+                LoadedMsHelloKey {
+                    signing_key: win_hello_key,
+                    storage_key: win_hello_storage_key,
+                },
+            )),
             Err(_) => Err(MsalError::GeneralFailure(
                 "Failed registering Windows Hello Key".to_string(),
             )),
@@ -7799,6 +7915,59 @@ impl BrokerClientApplication {
         storage_key: &StorageKey,
         pin: &str,
     ) -> Result<UserToken, MsalError> {
+        let hello_key = LoadedMsHelloKey::load(key, pin, tpm, storage_key)?;
+        self.acquire_token_by_loaded_ms_hello_key(
+            username,
+            &hello_key,
+            scopes,
+            request_resource,
+            #[cfg(feature = "on_behalf_of")]
+            on_behalf_of_client_id,
+            tpm,
+            storage_key,
+        )
+        .await
+    }
+
+    /// Gets a token for a given resource via an already loaded Hello for
+    /// Business Key
+    ///
+    /// Like acquire_token_by_hello_for_business_key, but signs with a Hello
+    /// key loaded by LoadedMsHelloKey::load or provision_loaded_ms_hello_key,
+    /// without loading it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - Typically a UPN in the form of an email address.
+    ///
+    /// * `hello_key` - The loaded Hello key.
+    ///
+    /// * `scopes` - Scopes requested to access a protected API (a resource).
+    ///
+    /// * `request_resource` - A resource for obtaining an access token.
+    ///   Default is the MS Graph API (00000002-0000-0000-c000-000000000000).
+    ///
+    /// * `on_behalf_of_client_id`: Request a resource or scope on behalf of
+    ///   the specified client_id. Optional. This option requires libhimmelblau
+    ///   be built with the `on_behalf_of` feature.
+    ///
+    /// * `tpm` - The tpm object.
+    ///
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: A UserToken containing an access_token.
+    /// * Failure: An MsalError, indicating the failure.
+    pub async fn acquire_token_by_loaded_ms_hello_key(
+        &self,
+        username: &str,
+        hello_key: &LoadedMsHelloKey,
+        scopes: Vec<&str>,
+        request_resource: Option<String>,
+        #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<UserToken, MsalError> {
         let v2_endpoint = !scopes.is_empty();
         if !scopes.is_empty() && request_resource.is_some() {
             return Err(MsalError::GeneralFailure(
@@ -7806,16 +7975,12 @@ impl BrokerClientApplication {
             ));
         }
 
-        let pin = PinValue::new(pin)
-            .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
-
         let prt = self
             .acquire_user_prt_by_hello_for_business_key_internal(
                 username,
-                key,
+                &hello_key.signing_key,
                 tpm,
                 storage_key,
-                &pin,
             )
             .await?;
         let transport_key = self.transport_key(tpm, storage_key)?;
@@ -7914,18 +8079,15 @@ impl BrokerClientApplication {
     async fn build_jwt_by_hello_for_business_key(
         &self,
         username: &str,
-        loadable_key: &LoadableMsHelloKey,
+        signing_key: &RS256Key,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
-        pin: &PinValue,
     ) -> Result<Jws, MsalError> {
         debug!("Building a Hello for Business JWT");
 
         let mut nonce = self.request_nonce().await?;
-        let (key, _win_hello_storage_key) = tpm
-            .ms_hello_key_load(storage_key, loadable_key, pin)
-            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
-        let assertion = Self::build_hello_for_business_assertion(username, &nonce, tpm, &key)?;
+        let assertion =
+            Self::build_hello_for_business_assertion(username, &nonce, tpm, signing_key)?;
 
         nonce = self.request_nonce().await?;
 
@@ -7959,15 +8121,14 @@ impl BrokerClientApplication {
     async fn acquire_user_prt_by_hello_for_business_key_internal(
         &self,
         username: &str,
-        key: &LoadableMsHelloKey,
+        signing_key: &RS256Key,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
-        pin: &PinValue,
     ) -> Result<PrimaryRefreshToken, MsalError> {
         debug!("Acquiring a User PRT via a Hello for Business Key");
 
         let jwt = self
-            .build_jwt_by_hello_for_business_key(username, key, tpm, storage_key, pin)
+            .build_jwt_by_hello_for_business_key(username, signing_key, tpm, storage_key)
             .await?;
         let signed_jwt = self.sign_jwt(&jwt, tpm, storage_key).await?;
 
@@ -8000,16 +8161,14 @@ impl BrokerClientApplication {
         storage_key: &StorageKey,
         pin: &str,
     ) -> Result<SealedData, MsalError> {
-        let pin = PinValue::new(pin)
-            .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
+        let hello_key = LoadedMsHelloKey::load(key, pin, tpm, storage_key)?;
 
         let prt = self
             .acquire_user_prt_by_hello_for_business_key_internal(
                 username,
-                key,
+                &hello_key.signing_key,
                 tpm,
                 storage_key,
-                &pin,
             )
             .await?;
         let transport_key = self.transport_key(tpm, storage_key)?;
@@ -9007,6 +9166,33 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
     ) -> Result<SealedData, MsalError> {
+        let hello_key = LoadedMsHelloKey::load(hello_key, pin, tpm, storage_key)?;
+        self.seal_user_prt_with_loaded_ms_hello_key(prt, &hello_key, tpm, storage_key)
+    }
+
+    /// Seal a user Primary Refresh Token (PRT) with an already loaded Linux Hello key
+    ///
+    /// Like seal_user_prt_with_hello_key, but seals with the storage key of a
+    /// Hello key loaded by LoadedMsHelloKey::load or
+    /// provision_loaded_ms_hello_key, without loading it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `prt` - The existing sealed PRT, encrypted using the host credentials.
+    /// * `hello_key` - The loaded Hello key.
+    /// * `tpm` - The TPM object used for cryptographic operations.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: A new `SealedData` containing the PRT sealed with the Hello key.
+    /// * Failure: An `MsalError` indicating why the operation failed.
+    pub fn seal_user_prt_with_loaded_ms_hello_key(
+        &self,
+        prt: &SealedData,
+        hello_key: &LoadedMsHelloKey,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<SealedData, MsalError> {
         let transport_key = self.transport_key(tpm, storage_key)?;
 
         // This allows a transition, where existing msoapxbc keys will provide
@@ -9019,12 +9205,7 @@ impl BrokerClientApplication {
         let prt_data = json_to_vec(&prt)
             .map(Zeroizing::new)
             .map_err(|e| MsalError::InvalidJson(format!("Failed serializing PRT {:?}", e)))?;
-        let pin = PinValue::new(pin)
-            .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
-        let (_key, win_hello_storage_key) = tpm
-            .ms_hello_key_load(storage_key, hello_key, &pin)
-            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
-        tpm.seal_data(&win_hello_storage_key, prt_data)
+        tpm.seal_data(&hello_key.storage_key, prt_data)
             .map_err(|e| MsalError::TPMFail(format!("Failed sealing PRT {:?}", e)))
     }
 
@@ -9059,18 +9240,9 @@ impl BrokerClientApplication {
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
     ) -> Result<SealedData, MsalError> {
-        let pin = PinValue::new(pin)
-            .map_err(|e| MsalError::TPMFail(format!("Failed setting pin value: {:?}", e)))?;
-        let (_key, win_hello_storage_key) = tpm
-            .ms_hello_key_load(storage_key, hello_key, &pin)
-            .map_err(|e| MsalError::TPMFail(format!("{:?}", e)))?;
-        self.unseal_user_prt_with_loaded_hello_key(
-            sealed_data,
-            &win_hello_storage_key,
-            tpm,
-            storage_key,
-        )
-        .map(|(sealed_prt, _)| sealed_prt)
+        let hello_key = LoadedMsHelloKey::load(hello_key, pin, tpm, storage_key)?;
+        self.unseal_user_prt_with_loaded_ms_hello_key(sealed_data, &hello_key, tpm, storage_key)
+            .map(|(sealed_prt, _)| sealed_prt)
     }
 
     /// Unseal a user PRT with an already loaded Hello storage key.
@@ -9079,7 +9251,60 @@ impl BrokerClientApplication {
     /// authentication transaction that unlocked it with the Hello PIN.
     /// The returned boolean reports the expiry state of the PRT read during
     /// this operation, avoiding a second PRT unseal.
+    #[deprecated(
+        since = "0.8.44",
+        note = "use unseal_user_prt_with_loaded_ms_hello_key, which takes a LoadedMsHelloKey"
+    )]
     pub fn unseal_user_prt_with_loaded_hello_key(
+        &self,
+        sealed_data: &SealedData,
+        hello_storage_key: &StorageKey,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<(SealedData, bool), MsalError> {
+        self.unseal_user_prt_with_hello_storage_key(
+            sealed_data,
+            hello_storage_key,
+            tpm,
+            storage_key,
+        )
+    }
+
+    /// Unseal a user Primary Refresh Token (PRT) with an already loaded Linux Hello key
+    ///
+    /// Like unseal_user_prt_with_hello_key, but unseals with the storage key
+    /// of a Hello key loaded by LoadedMsHelloKey::load or
+    /// provision_loaded_ms_hello_key, without loading it again. It also
+    /// reports whether the PRT has expired, which avoids unsealing it again to
+    /// check.
+    ///
+    /// # Arguments
+    ///
+    /// * `sealed_data` - The PRT sealed (encrypted) using the user’s Hello PIN and TPM.
+    /// * `hello_key` - The loaded Hello key.
+    /// * `tpm` - The TPM object used for cryptographic operations.
+    /// * `storage_key` - The TPM MachineKey associated with this application.
+    ///
+    /// # Returns
+    /// * Success: The PRT re-sealed using host credentials for in-memory use,
+    ///   and whether it has expired.
+    /// * Failure: An `MsalError` indicating why the operation failed.
+    pub fn unseal_user_prt_with_loaded_ms_hello_key(
+        &self,
+        sealed_data: &SealedData,
+        hello_key: &LoadedMsHelloKey,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<(SealedData, bool), MsalError> {
+        self.unseal_user_prt_with_hello_storage_key(
+            sealed_data,
+            &hello_key.storage_key,
+            tpm,
+            storage_key,
+        )
+    }
+
+    fn unseal_user_prt_with_hello_storage_key(
         &self,
         sealed_data: &SealedData,
         hello_storage_key: &StorageKey,
@@ -9489,6 +9714,7 @@ mod tests {
 
     #[cfg(feature = "broker")]
     #[test]
+    #[allow(deprecated)]
     fn unseal_user_prt_with_loaded_hello_key_reports_expiry() {
         let (mut tpm, machine_key) = test_tpm();
         let transport_key = tpm.msoapxbc_rsa_key_create(&machine_key).unwrap();
@@ -9584,6 +9810,174 @@ mod tests {
         };
         assert!(verifies(&signing_key));
         assert!(!verifies(&other_signing_key));
+    }
+
+    #[cfg(feature = "broker")]
+    fn test_loaded_hello_key(
+        tpm: &mut BoxedDynTpm,
+        machine_key: &StorageKey,
+    ) -> (LoadableMsHelloKey, LoadedMsHelloKey) {
+        let pin = PinValue::new("123456").unwrap();
+        let hello_key = tpm.ms_hello_key_create(machine_key, &pin).unwrap();
+        let loaded = LoadedMsHelloKey::load(&hello_key, "123456", tpm, machine_key).unwrap();
+        (hello_key, loaded)
+    }
+
+    #[cfg(feature = "broker")]
+    fn test_prt_refresh_token(
+        app: &BrokerClientApplication,
+        sealed_prt: &SealedData,
+        tpm: &mut BoxedDynTpm,
+        machine_key: &StorageKey,
+    ) -> String {
+        let transport_key = app.transport_key(tpm, machine_key).unwrap();
+        let cek = tpm.rs256_yield_cek(&transport_key);
+        let prt_storage_key = cek.as_ref().unwrap_or(machine_key);
+        app.unseal_user_prt(sealed_prt, tpm, prt_storage_key)
+            .unwrap()
+            .refresh_token
+            .clone()
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn loaded_ms_hello_key_requires_the_hello_pin() {
+        let (mut tpm, machine_key) = test_tpm();
+        let (hello_key, loaded) = test_loaded_hello_key(&mut tpm, &machine_key);
+
+        // The exposed storage key is the one the Hello PIN unlocks.
+        let sealed = tpm
+            .seal_data(loaded.storage_key(), Zeroizing::new(b"synthetic".to_vec()))
+            .unwrap();
+        let pin = PinValue::new("123456").unwrap();
+        let (_, hello_storage_key) = tpm
+            .ms_hello_key_load(&machine_key, &hello_key, &pin)
+            .unwrap();
+        assert_eq!(
+            tpm.unseal_data(&hello_storage_key, &sealed)
+                .unwrap()
+                .to_vec(),
+            b"synthetic".to_vec()
+        );
+
+        for wrong_pin in ["654321", ""] {
+            assert!(matches!(
+                LoadedMsHelloKey::load(&hello_key, wrong_pin, &mut tpm, &machine_key),
+                Err(MsalError::TPMFail(_))
+            ));
+        }
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    #[allow(deprecated)]
+    fn prts_sealed_with_a_loaded_ms_hello_key_restore_through_every_unseal_api() {
+        let (mut tpm, machine_key) = test_tpm();
+        let transport_key = tpm.msoapxbc_rsa_key_create(&machine_key).unwrap();
+        let mut app = test_broker_app("https://login.microsoftonline.com/common");
+        app.set_transport_key(Some(transport_key));
+        let host_sealed_prt = app
+            .seal_user_prt(&test_prt("prt-refresh-token"), &mut tpm, &machine_key)
+            .unwrap();
+        let (hello_key, loaded) = test_loaded_hello_key(&mut tpm, &machine_key);
+
+        let sealed = app
+            .seal_user_prt_with_loaded_ms_hello_key(
+                &host_sealed_prt,
+                &loaded,
+                &mut tpm,
+                &machine_key,
+            )
+            .unwrap();
+
+        let (restored, expired) = app
+            .unseal_user_prt_with_loaded_ms_hello_key(&sealed, &loaded, &mut tpm, &machine_key)
+            .unwrap();
+        assert!(!expired);
+        assert_eq!(
+            test_prt_refresh_token(&app, &restored, &mut tpm, &machine_key),
+            "prt-refresh-token"
+        );
+        let restored = app
+            .unseal_user_prt_with_hello_key(&sealed, &hello_key, "123456", &mut tpm, &machine_key)
+            .unwrap();
+        assert_eq!(
+            test_prt_refresh_token(&app, &restored, &mut tpm, &machine_key),
+            "prt-refresh-token"
+        );
+        let (restored, _) = app
+            .unseal_user_prt_with_loaded_hello_key(
+                &sealed,
+                loaded.storage_key(),
+                &mut tpm,
+                &machine_key,
+            )
+            .unwrap();
+        assert_eq!(
+            test_prt_refresh_token(&app, &restored, &mut tpm, &machine_key),
+            "prt-refresh-token"
+        );
+
+        // PRTs sealed with the Hello PIN restore with the loaded key.
+        let sealed = app
+            .seal_user_prt_with_hello_key(
+                &host_sealed_prt,
+                &hello_key,
+                "123456",
+                &mut tpm,
+                &machine_key,
+            )
+            .unwrap();
+        let (restored, _) = app
+            .unseal_user_prt_with_loaded_ms_hello_key(&sealed, &loaded, &mut tpm, &machine_key)
+            .unwrap();
+        assert_eq!(
+            test_prt_refresh_token(&app, &restored, &mut tpm, &machine_key),
+            "prt-refresh-token"
+        );
+    }
+
+    #[cfg(feature = "broker")]
+    #[test]
+    fn loaded_ms_hello_key_rejects_foreign_and_malformed_prts() {
+        let (mut tpm, machine_key) = test_tpm();
+        let transport_key = tpm.msoapxbc_rsa_key_create(&machine_key).unwrap();
+        let mut app = test_broker_app("https://login.microsoftonline.com/common");
+        app.set_transport_key(Some(transport_key));
+        let host_sealed_prt = app
+            .seal_user_prt(&test_prt("prt-refresh-token"), &mut tpm, &machine_key)
+            .unwrap();
+        let (_, loaded) = test_loaded_hello_key(&mut tpm, &machine_key);
+        let (_, other) = test_loaded_hello_key(&mut tpm, &machine_key);
+        let sealed = app
+            .seal_user_prt_with_loaded_ms_hello_key(
+                &host_sealed_prt,
+                &loaded,
+                &mut tpm,
+                &machine_key,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            app.unseal_user_prt_with_loaded_ms_hello_key(&sealed, &other, &mut tpm, &machine_key),
+            Err(MsalError::TPMFail(_))
+        ));
+
+        let malformed = tpm
+            .seal_data(loaded.storage_key(), Zeroizing::new(b"not a prt".to_vec()))
+            .unwrap();
+        assert!(matches!(
+            app.unseal_user_prt_with_loaded_ms_hello_key(
+                &malformed,
+                &loaded,
+                &mut tpm,
+                &machine_key
+            ),
+            Err(MsalError::InvalidJson(_))
+        ));
+        assert!(app
+            .seal_user_prt_with_loaded_ms_hello_key(&malformed, &loaded, &mut tpm, &machine_key)
+            .is_err());
     }
 
     fn build_user_token(access_token: String) -> UserToken {
@@ -10586,3 +10980,7 @@ pub(crate) mod mfa_tests;
 #[cfg(test)]
 #[path = "test_server.rs"]
 pub(crate) mod test_server;
+
+#[cfg(all(test, feature = "broker"))]
+#[path = "hello_tests.rs"]
+mod hello_tests;

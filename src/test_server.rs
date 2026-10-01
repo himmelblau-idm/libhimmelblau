@@ -92,14 +92,7 @@ impl Server {
             &[],
         )
         .unwrap();
-        // Isolate fixtures from developer proxy settings without changing production behavior.
-        app.app.client = Client::builder()
-            .no_proxy()
-            .redirect(Policy::none())
-            .timeout(Duration::from_secs(3))
-            .cookie_provider(app.app.jar.clone())
-            .build()
-            .unwrap();
+        app.app.client = isolated_client(&app.app.jar);
         app
     }
 
@@ -116,4 +109,15 @@ impl Drop for Server {
 
 pub(crate) fn json_response(body: &Value) -> String {
     format!("200 OK\r\nContent-Type: application/json\r\n\r\n{body}")
+}
+
+// Isolate fixtures from developer proxy settings without changing production behavior.
+pub(crate) fn isolated_client(jar: &Arc<CookieStoreMutex>) -> Client {
+    Client::builder()
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(3))
+        .cookie_provider(jar.clone())
+        .build()
+        .unwrap()
 }
