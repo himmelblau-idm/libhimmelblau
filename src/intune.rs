@@ -643,7 +643,7 @@ fn details_payload(
         "DeviceName": &attrs.device_display_name,
         "Manufacturer": &attrs.manufacturer,
         "OSDistribution": &platform.os_distribution,
-        "OSVersion": &platform.os_version
+        "OSVersion": &attrs.os_version
     })
 }
 
@@ -1557,7 +1557,7 @@ mod tests {
             "dmulder-Standard-PC-i440FX-PIIX-1996"
         );
         assert_eq!(payload["OSDistribution"], "ubuntu");
-        assert_eq!(payload["OSVersion"], "24.04");
+        assert_eq!(payload["OSVersion"], "Ubuntu 24.04.3 LTS 24.04");
 
         Ok(())
     }
