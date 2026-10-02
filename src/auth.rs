@@ -25,6 +25,7 @@ use crate::ssh::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use crypto_glue::aes256;
 #[cfg(feature = "broker")]
 use crypto_glue::spki::der::asn1::{BitString, OctetString, SetOfVec};
 #[cfg(feature = "broker")]
@@ -54,6 +55,7 @@ use serde_json::{from_str as json_from_str, json, Value};
 #[cfg(feature = "set_timeout")]
 use std::cmp::min;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -116,7 +118,7 @@ use crate::discovery::Services;
 use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 
 #[cfg(feature = "broker")]
-use libkrimes::ccache::resolve as ccache_resolve;
+use libkrimes::ccache::{resolve as ccache_resolve, ResolvedCredentialCache};
 #[cfg(feature = "broker")]
 use libkrimes::proto::{AuthenticationReply, DerivedKey, KerberosCredentials, KerberosReply};
 #[cfg(feature = "broker")]
@@ -1651,9 +1653,11 @@ impl Tgt for StructuredTgt {
 
         match self.key_type {
             18 => {
-                let k: [u8; 32] = client_key.as_slice().try_into().map_err(|_| {
-                    MsalError::CryptoFail("Unexpected TGT session key length".to_string())
-                })?;
+                let Some(k) = aes256::key_from_slice(client_key.as_slice()) else {
+                    return Err(MsalError::CryptoFail(
+                        "Failed to build AES256 key from client key".to_string(),
+                    ));
+                };
                 let dk = DerivedKey::Aes256CtsHmacSha196 {
                     k,
                     i: 0,
@@ -1736,13 +1740,11 @@ impl Tgt for RawTgt {
 
         let dk = match self.tgt_key_type {
             18 => {
-                let k: [u8; 32] =
-                    long_term_krb_session_key
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| {
-                            MsalError::CryptoFail("Unexpected TGT session key length".to_string())
-                        })?;
+                let Some(k) = aes256::key_from_slice(long_term_krb_session_key.as_slice()) else {
+                    return Err(MsalError::CryptoFail(
+                        "Failed to build AES256 key from session key".to_string(),
+                    ));
+                };
                 DerivedKey::Aes256CtsHmacSha196 {
                     k,
                     i: 0,
@@ -9037,12 +9039,19 @@ impl BrokerClientApplication {
         // Generate a unique temp file path
         let temp_path = format!("/tmp/himmelblau_ccache_{}", Uuid::new_v4().as_hyphenated());
         let ccache_name = format!("FILE:{}", temp_path);
+        let ccache_name = OsString::from(ccache_name);
 
         // Create and initialize the ccache
-        let mut ccache = ccache_resolve(Some(&ccache_name)).map_err(|e| {
-            error!("Failed to resolve ccache: {:?}", e);
-            MsalError::CryptoFail("Failed to resolve ccache".to_string())
-        })?;
+        let ResolvedCredentialCache::Subsidiary(mut ccache) = ccache_resolve(Some(&ccache_name))
+            .map_err(|e| {
+                error!("Failed to resolve ccache: {:?}", e);
+                MsalError::CryptoFail("Failed to resolve ccache".to_string())
+            })?
+        else {
+            return Err(MsalError::CryptoFail(
+                "Expected a subsidiary credential cache".to_string(),
+            ));
+        };
 
         ccache.init(credentials.name(), None).map_err(|e| {
             error!("Failed to init ccache: {:?}", e);
