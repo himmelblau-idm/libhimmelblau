@@ -26,14 +26,20 @@ use crate::ssh::{
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 #[cfg(feature = "broker")]
+use crypto_glue::spki::der::asn1::{BitString, OctetString, SetOfVec};
+#[cfg(feature = "broker")]
+use crypto_glue::spki::der::{Decode, Encode, Sequence};
+#[cfg(feature = "broker")]
+use crypto_glue::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+#[cfg(feature = "broker")]
 use crypto_glue::traits::{SignatureEncoding, SpkiEncodePublicKey};
 #[cfg(feature = "broker")]
 use crypto_glue::x509::oiddb::rfc5912;
+#[cfg(feature = "broker")]
+use crypto_glue::x509::Attribute;
 use crypto_glue::x509::Certificate;
 #[cfg(feature = "broker")]
-use der::asn1::{BitString, OctetString, SetOfVec};
-#[cfg(feature = "broker")]
-use der::{Decode, Encode, Sequence};
+use crypto_glue::x509::Name;
 use kanidm_hsm_crypto::structures::RS256Key;
 use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
@@ -56,12 +62,6 @@ use std::thread::sleep;
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-#[cfg(feature = "broker")]
-use x509_cert::attr::Attribute;
-#[cfg(feature = "broker")]
-use x509_cert::name::Name;
-#[cfg(feature = "broker")]
-use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "broker")]
@@ -5585,7 +5585,7 @@ impl fmt::Debug for P2PCertificate {
 #[cfg(feature = "broker")]
 #[derive(Clone, Debug, PartialEq, Eq, Sequence)]
 struct P2PCertReqInfo {
-    pub version: x509_cert::request::Version,
+    pub version: crypto_glue::x509::Version,
     pub subject: Name,
     pub public_key: SubjectPublicKeyInfoOwned,
     #[asn1(context_specific = "0", tag_mode = "IMPLICIT")]
@@ -6571,10 +6571,10 @@ impl BrokerClientApplication {
     fn device_certificate_tenant_id(cert_der: &[u8]) -> Result<Option<String>, MsalError> {
         const TENANT_ID_OID: &str = "1.2.840.113556.1.5.284.5";
 
-        let cert = x509_cert::Certificate::from_der(cert_der).map_err(|e| {
+        let cert = crypto_glue::x509::Certificate::from_der(cert_der).map_err(|e| {
             MsalError::CryptoFail(format!("Failed parsing device certificate DER: {:?}", e))
         })?;
-        let extensions = match cert.tbs_certificate.extensions.as_ref() {
+        let extensions = match cert.tbs_certificate().extensions() {
             Some(extensions) => extensions,
             None => return Ok(None),
         };
@@ -6790,7 +6790,7 @@ impl BrokerClientApplication {
             .map_err(|e| MsalError::CryptoFail(format!("Failed parsing SPKI: {:?}", e)))?;
 
         let cert_req_info = P2PCertReqInfo {
-            version: x509_cert::request::Version::V1,
+            version: crypto_glue::x509::Version::V1,
             subject,
             public_key: spki,
             attributes: SetOfVec::new(),
@@ -6804,7 +6804,9 @@ impl BrokerClientApplication {
         let signature_bytes: Box<[u8]> = signature.into();
         let signature_algorithm = AlgorithmIdentifierOwned {
             oid: rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
-            parameters: Some(der::asn1::AnyRef::from(der::asn1::Null).into()),
+            parameters: Some(
+                crypto_glue::der::asn1::AnyRef::from(crypto_glue::der::asn1::Null).into(),
+            ),
         };
 
         #[derive(Sequence)]
