@@ -324,7 +324,20 @@ impl Graph {
         access_token: &str,
         upn: &str,
     ) -> Result<UserObject, MsalError> {
-        let url = &format!("{}/v1.0/users/{}", self.graph_url().await?, upn);
+        // onPremisesSamAccountName is not part of Graph's default user
+        // response. Select it along with every required UserObject property,
+        // so a successful response can distinguish an absent SAM name from a
+        // failed request.
+        let mut url = Url::parse(&format!(
+            "{}/v1.0/users/{}",
+            self.graph_url().await?.trim_end_matches('/'),
+            percent_encoding::utf8_percent_encode(upn, percent_encoding::NON_ALPHANUMERIC)
+        ))
+        .map_err(|e| MsalError::URLFormatFailed(e.to_string()))?;
+        url.query_pairs_mut().append_pair(
+            "$select",
+            "id,displayName,userPrincipalName,onPremisesSamAccountName",
+        );
         let resp = self
             .client
             .get(url)
@@ -787,5 +800,156 @@ impl Graph {
         }
 
         Ok(all)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    async fn mock_graph(status: StatusCode, body: String) -> (Graph, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buf = [0; 1024];
+                let count = socket.read(&mut buf).await.unwrap();
+                assert!(count > 0, "connection closed before the request headers");
+                request.extend_from_slice(&buf[..count]);
+                if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(request.len() < 16 * 1024, "request headers too large");
+            }
+            let response = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status,
+                body.len(),
+                body,
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let graph = Graph {
+            client: Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            odc_provider: String::new(),
+            domain: "example.com".to_string(),
+            federation_provider: RwLock::new(Some(FederationProvider {
+                authority_host: "https://login.microsoftonline.com".to_string(),
+                tenant_id: "test-tenant".to_string(),
+                // Exercise handling of a configured trailing slash, too.
+                graph: format!("http://{}/", address),
+            })),
+        };
+        (graph, server)
+    }
+
+    fn user_response() -> Value {
+        json!({
+            "id": "test-user-id",
+            "displayName": "Test User",
+            "userPrincipalName": "test@example.com",
+        })
+    }
+
+    #[tokio::test]
+    async fn request_user_selects_sam_and_encodes_the_upn() {
+        let mut body = user_response();
+        body["onPremisesSamAccountName"] = json!("test-user");
+        let (graph, server) = mock_graph(StatusCode::OK, body.to_string()).await;
+        let user = graph
+            .request_user("test-access-token", "test+guest#EXT#@example.com")
+            .await
+            .unwrap();
+        assert_eq!(user.id, "test-user-id");
+        assert_eq!(user.displayname, "Test User");
+        assert_eq!(user.upn, "test@example.com");
+        assert_eq!(
+            user.on_premises_sam_account_name.as_deref(),
+            Some("test-user")
+        );
+        let request = server.await.unwrap();
+        let target = request
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        let url = Url::parse(&format!("http://localhost{}", target)).unwrap();
+        assert_eq!(
+            url.path(),
+            "/v1.0/users/test%2Bguest%23EXT%23%40example%2Ecom"
+        );
+        assert_eq!(
+            url.query_pairs()
+                .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>(),
+            vec![(
+                "$select".to_string(),
+                "id,displayName,userPrincipalName,onPremisesSamAccountName".to_string()
+            )]
+        );
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-access-token\r\n"));
+    }
+
+    #[tokio::test]
+    async fn request_user_allows_missing_or_null_sam() {
+        for sam in [None, Some(Value::Null)] {
+            let mut body = user_response();
+            if let Some(sam) = sam {
+                body["onPremisesSamAccountName"] = sam;
+            }
+            let (graph, server) = mock_graph(StatusCode::OK, body.to_string()).await;
+            let user = graph
+                .request_user("test-access-token", "test@example.com")
+                .await
+                .unwrap();
+            assert!(user.on_premises_sam_account_name.is_none());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_does_not_treat_http_failure_as_missing_sam() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            // Even a valid user body must not hide an unsuccessful HTTP status.
+            let (graph, server) = mock_graph(status, user_response().to_string()).await;
+            let result = graph
+                .request_user("test-access-token", "test@example.com")
+                .await;
+            assert!(
+                matches!(result, Err(MsalError::GeneralFailure(message)) if message == status.to_string())
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_does_not_treat_invalid_response_as_missing_sam() {
+        let (graph, server) = mock_graph(StatusCode::OK, "{}".to_string()).await;
+        let result = graph
+            .request_user("test-access-token", "test@example.com")
+            .await;
+        assert!(matches!(result, Err(MsalError::InvalidJson(_))));
+        server.await.unwrap();
     }
 }
