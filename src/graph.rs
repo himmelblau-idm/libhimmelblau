@@ -127,6 +127,29 @@ pub struct UserObject {
     pub gid: Option<u32>,
 }
 
+/// Result of an exact Graph user lookup by UPN or object ID.
+///
+/// A lookup failure is never evidence that the requested identity is absent.
+#[derive(Debug)]
+pub enum ExactUserLookup {
+    Found(UserObject),
+    /// Graph returned HTTP 404 with its structured Request_ResourceNotFound error.
+    NotFound,
+}
+
+#[derive(Deserialize)]
+struct GraphErrorResponse {
+    error: GraphError,
+}
+
+#[derive(Deserialize)]
+struct GraphError {
+    code: String,
+    // Validate the Graph error envelope, but never match human-readable text.
+    #[serde(rename = "message")]
+    _message: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GroupObject {
     #[serde(rename = "displayName")]
@@ -159,6 +182,7 @@ impl IntuneServiceEndpoints {
 
 pub struct Graph {
     client: Client,
+    exact_client: Client,
     odc_provider: String,
     domain: String,
     federation_provider: RwLock<Option<FederationProvider>>,
@@ -246,40 +270,47 @@ impl Graph {
         #[cfg(not(feature = "set_timeout"))]
         let (timeout, connect_timeout) = (Duration::from_secs(3), Duration::from_secs(1));
 
-        #[allow(unused_mut)]
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(connect_timeout)
-            .timeout(timeout)
-            .cookie_store(true);
+        let build_client = |redirect_policy| {
+            #[allow(unused_mut)]
+            let mut builder = reqwest::Client::builder()
+                .connect_timeout(connect_timeout)
+                .timeout(timeout)
+                .cookie_store(true)
+                .redirect(redirect_policy);
 
-        #[cfg(feature = "proxyable")]
-        {
-            if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
-                .ok()
-                .or_else(|| std::env::var("ALL_PROXY").ok())
+            #[cfg(feature = "proxyable")]
             {
-                let proxy = Proxy::https(proxy_var)
-                    .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
-                builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+                if let Some(proxy_var) = std::env::var("HTTPS_PROXY")
+                    .ok()
+                    .or_else(|| std::env::var("ALL_PROXY").ok())
+                {
+                    let proxy = Proxy::https(proxy_var)
+                        .map_err(|e| MsalError::GeneralFailure(format!("{:?}", e)))?;
+                    builder = builder.proxy(proxy).danger_accept_invalid_certs(true);
+                }
             }
-        }
 
-        #[cfg(feature = "ipvers")]
-        {
-            let has_v4 = ip_version.contains(&IpVersion::V4);
-            let has_v6 = ip_version.contains(&IpVersion::V6);
-            if has_v4 && !has_v6 {
-                builder =
-                    builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
-            } else if !has_v4 && has_v6 {
-                builder =
-                    builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+            #[cfg(feature = "ipvers")]
+            {
+                let has_v4 = ip_version.contains(&IpVersion::V4);
+                let has_v6 = ip_version.contains(&IpVersion::V6);
+                if has_v4 && !has_v6 {
+                    builder =
+                        builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+                } else if !has_v4 && has_v6 {
+                    builder =
+                        builder.local_address(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))
+                }
             }
-        }
 
-        let client = builder
-            .build()
-            .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))?;
+            builder
+                .build()
+                .map_err(|e| MsalError::RequestFailed(format!("{:?}", e)))
+        };
+        let client = build_client(reqwest::redirect::Policy::default())?;
+        // Exact identity proofs must describe the requested endpoint, never a
+        // redirect target. Keep the other connection settings identical.
+        let exact_client = build_client(reqwest::redirect::Policy::none())?;
 
         let federation_provider = if let Some(authority_host) = authority_host {
             if let Some(tenant_id) = tenant_id {
@@ -301,6 +332,7 @@ impl Graph {
 
         Ok(Graph {
             client,
+            exact_client,
             odc_provider: odc_provider.to_string(),
             domain: domain.to_string(),
             federation_provider: RwLock::new(federation_provider),
@@ -353,6 +385,63 @@ impl Graph {
             Ok(json_resp)
         } else {
             Err(MsalError::GeneralFailure(format!("{}", resp.status())))
+        }
+    }
+
+    /// Look up one user by UPN or object ID without following redirects.
+    ///
+    /// The returned user's UPN is the value from Graph, not the lookup input.
+    /// Only HTTP 404 with a valid Graph `Request_ResourceNotFound` error is
+    /// `NotFound`; authentication, transport, throttling, malformed responses,
+    /// and other HTTP errors remain errors. Callers must not infer absence
+    /// from those errors.
+    pub async fn request_user_exact(
+        &self,
+        access_token: &str,
+        name_or_uuid: &str,
+    ) -> Result<ExactUserLookup, MsalError> {
+        // URL parsers normalize even percent-encoded dot path segments.
+        if name_or_uuid.is_empty() || matches!(name_or_uuid, "." | "..") {
+            return Err(MsalError::URLFormatFailed(
+                "an exact user lookup requires a UPN or object ID".to_string(),
+            ));
+        }
+        let mut url = Url::parse(&format!(
+            "{}/v1.0/users/{}",
+            self.graph_url().await?.trim_end_matches('/'),
+            percent_encoding::utf8_percent_encode(name_or_uuid, percent_encoding::NON_ALPHANUMERIC)
+        ))
+        .map_err(|e| MsalError::URLFormatFailed(e.to_string()))?;
+        url.query_pairs_mut().append_pair(
+            "$select",
+            "id,displayName,userPrincipalName,onPremisesSamAccountName",
+        );
+        let resp = self
+            .exact_client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| MsalError::request_failed(&e))?;
+        let status = resp.status();
+        if status == StatusCode::OK {
+            let user = resp
+                .json::<UserObject>()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+            Ok(ExactUserLookup::Found(user))
+        } else if status == StatusCode::NOT_FOUND {
+            let error = resp
+                .json::<GraphErrorResponse>()
+                .await
+                .map_err(|e| MsalError::InvalidJson(format!("{:?}", e)))?;
+            if error.error.code == "Request_ResourceNotFound" {
+                Ok(ExactUserLookup::NotFound)
+            } else {
+                Err(MsalError::GeneralFailure(status.to_string()))
+            }
+        } else {
+            Err(MsalError::GeneralFailure(status.to_string()))
         }
     }
 
@@ -812,6 +901,14 @@ mod tests {
     use tokio::task::JoinHandle;
 
     async fn mock_graph(status: StatusCode, body: String) -> (Graph, JoinHandle<String>) {
+        mock_graph_with_headers(status, body, String::new()).await
+    }
+
+    async fn mock_graph_with_headers(
+        status: StatusCode,
+        body: String,
+        headers: String,
+    ) -> (Graph, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -828,30 +925,33 @@ mod tests {
                 assert!(request.len() < 16 * 1024, "request headers too large");
             }
             let response = format!(
-                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
                 status,
                 body.len(),
+                headers,
                 body,
             );
             socket.write_all(response.as_bytes()).await.unwrap();
             String::from_utf8(request).unwrap()
         });
-        let graph = Graph {
-            client: Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_secs(2))
-                .build()
-                .unwrap(),
-            odc_provider: String::new(),
-            domain: "example.com".to_string(),
-            federation_provider: RwLock::new(Some(FederationProvider {
-                authority_host: "https://login.microsoftonline.com".to_string(),
-                tenant_id: "test-tenant".to_string(),
-                // Exercise handling of a configured trailing slash, too.
-                graph: format!("http://{}/", address),
-            })),
-        };
+        let graph = mock_graph_at(&format!("http://{}/", address)).await;
         (graph, server)
+    }
+
+    async fn mock_graph_at(url: &str) -> Graph {
+        Graph::new(
+            "unused.test",
+            "example.com",
+            Some("https://login.microsoftonline.com"),
+            Some("test-tenant"),
+            Some(url),
+            #[cfg(feature = "set_timeout")]
+            Duration::from_secs(2),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4],
+        )
+        .await
+        .unwrap()
     }
 
     fn user_response() -> Value {
@@ -951,5 +1051,307 @@ mod tests {
             .await;
         assert!(matches!(result, Err(MsalError::InvalidJson(_))));
         server.await.unwrap();
+    }
+
+    fn not_found_response() -> String {
+        json!({
+            "error": {
+                "code": "Request_ResourceNotFound",
+                "message": "Resource does not exist.",
+                "innerError": {"request-id": "test-request-id"},
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_selects_identity_and_preserves_returned_upn() {
+        let object_id = "11111111-2222-3333-4444-555555555555";
+        for query in [
+            "test+guest#EXT#@example.com",
+            "first'last/with?query%fragment@example.com",
+            "døe@example.com",
+            object_id,
+        ] {
+            let mut body = user_response();
+            body["id"] = json!(object_id);
+            body["userPrincipalName"] = json!("actual.identity@example.com");
+            body["onPremisesSamAccountName"] = json!("legacy-sam");
+            let (graph, server) = mock_graph(StatusCode::OK, body.to_string()).await;
+            let result = graph
+                .request_user_exact("test-access-token", query)
+                .await
+                .unwrap();
+            let ExactUserLookup::Found(user) = result else {
+                panic!("successful user response was not Found");
+            };
+            assert_eq!(user.id, object_id);
+            assert_eq!(user.upn, "actual.identity@example.com");
+            assert_eq!(user.displayname, "Test User");
+            assert_eq!(
+                user.on_premises_sam_account_name.as_deref(),
+                Some("legacy-sam")
+            );
+            let request = server.await.unwrap();
+            let target = request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap();
+            let url = Url::parse(&format!("http://localhost{}", target)).unwrap();
+            assert_eq!(
+                url.path(),
+                format!(
+                    "/v1.0/users/{}",
+                    percent_encoding::utf8_percent_encode(
+                        query,
+                        percent_encoding::NON_ALPHANUMERIC
+                    )
+                )
+            );
+            assert_eq!(
+                url.query_pairs().into_owned().collect::<Vec<_>>(),
+                vec![(
+                    "$select".to_string(),
+                    "id,displayName,userPrincipalName,onPremisesSamAccountName".to_string()
+                )]
+            );
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-access-token\r\n"));
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_allows_missing_or_null_sam_on_found_user() {
+        for sam in [None, Some(Value::Null)] {
+            let mut body = user_response();
+            if let Some(sam) = sam {
+                body["onPremisesSamAccountName"] = sam;
+            }
+            let (graph, server) = mock_graph(StatusCode::OK, body.to_string()).await;
+            let result = graph
+                .request_user_exact("test-token", "test@example.com")
+                .await
+                .unwrap();
+            assert!(
+                matches!(result, ExactUserLookup::Found(user) if user.on_premises_sam_account_name.is_none())
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_accepts_only_structured_graph_not_found() {
+        let (graph, server) = mock_graph(StatusCode::NOT_FOUND, not_found_response()).await;
+        let result = graph
+            .request_user_exact("test-token", "test@example.com")
+            .await
+            .unwrap();
+        assert!(matches!(result, ExactUserLookup::NotFound));
+        server.await.unwrap();
+
+        for body in [
+            "",
+            "not-json",
+            "{}",
+            r#"{"error":null}"#,
+            r#"{"error":"Request_ResourceNotFound"}"#,
+            r#"{"error":{"code":"Request_ResourceNotFound"}}"#,
+            r#"{"error":{"code":"Request_ResourceNotFound","message":null}}"#,
+            r#"{"error":{"code":404,"message":"Request_ResourceNotFound"}}"#,
+            r#"{"error":{"code":"Request_ResourceNotFound","code":"other","message":"missing"}}"#,
+            r#"{"error":{"code":"request_resourcenotfound","message":"missing"}}"#,
+            r#"{"error":{"code":"ResourceNotFound","message":"missing"}}"#,
+            r#"{"error":{"code":"Authorization_RequestDenied","message":"Request_ResourceNotFound"}}"#,
+            r#"{"error":{"code":"unknown","message":"missing","innerError":{"code":"Request_ResourceNotFound"}}}"#,
+        ] {
+            let (graph, server) = mock_graph(StatusCode::NOT_FOUND, body.to_string()).await;
+            let result = graph
+                .request_user_exact("test-token", "test@example.com")
+                .await;
+            assert!(result.is_err(), "untrusted 404 became absence: {body}");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_never_turns_other_http_statuses_into_absence() {
+        for status in [
+            StatusCode::NO_CONTENT,
+            StatusCode::PARTIAL_CONTENT,
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::NOT_MODIFIED,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            let (graph, server) = mock_graph(status, not_found_response()).await;
+            let result = graph
+                .request_user_exact("test-token", "test@example.com")
+                .await;
+            assert!(
+                matches!(result, Err(MsalError::GeneralFailure(message)) if message == status.to_string())
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_rejects_invalid_success_bodies() {
+        for body in [
+            "not-json",
+            "{}",
+            r#"{"id":"id","displayName":"name"}"#,
+            r#"{"id":"id","userPrincipalName":"test@example.com"}"#,
+            r#"{"displayName":"name","userPrincipalName":"test@example.com"}"#,
+            r#"{"id":"id","displayName":"name","userPrincipalName":"test@example.com","onPremisesSamAccountName":42}"#,
+            &not_found_response(),
+        ] {
+            let (graph, server) = mock_graph(StatusCode::OK, body.to_string()).await;
+            let result = graph
+                .request_user_exact("test-token", "test@example.com")
+                .await;
+            assert!(matches!(result, Err(MsalError::InvalidJson(_))));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_does_not_follow_redirects() {
+        for status in [
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::SEE_OTHER,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let location = format!(
+                "Location: http://{}/v1.0/users/other\r\n",
+                target.local_addr().unwrap()
+            );
+            let (graph, server) =
+                mock_graph_with_headers(status, not_found_response(), location).await;
+            let result = graph
+                .request_user_exact("test-token", "test@example.com")
+                .await;
+            assert!(
+                matches!(result, Err(MsalError::GeneralFailure(message)) if message == status.to_string())
+            );
+            server.await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), target.accept())
+                    .await
+                    .is_err(),
+                "redirect target received a request"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_user_preserves_existing_redirect_behavior() {
+        let (target, target_server) = mock_graph(StatusCode::OK, user_response().to_string()).await;
+        let location = format!(
+            "Location: {}v1.0/users/other\r\n",
+            target.graph_url().await.unwrap()
+        );
+        let (graph, server) =
+            mock_graph_with_headers(StatusCode::FOUND, String::new(), location).await;
+        let user = graph
+            .request_user("test-token", "test@example.com")
+            .await
+            .unwrap();
+        assert_eq!(user.upn, "test@example.com");
+        server.await.unwrap();
+        target_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_transport_failure_is_not_absence() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let graph = mock_graph_at(&format!("http://{}", listener.local_addr().unwrap())).await;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 1024];
+            socket.read(&mut buffer).await.unwrap();
+            // Close without providing any HTTP response.
+        });
+        let result = graph
+            .request_user_exact("test-token", "test@example.com")
+            .await;
+        assert!(matches!(result, Err(MsalError::RequestFailed(_))));
+        server.await.unwrap();
+    }
+
+    #[cfg(feature = "set_timeout")]
+    #[tokio::test]
+    async fn request_user_exact_honors_configured_timeout_without_absence() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let graph = Graph::new(
+            "unused.test",
+            "example.com",
+            Some("https://login.microsoftonline.com"),
+            Some("test-tenant"),
+            Some(&url),
+            Duration::from_millis(50),
+            #[cfg(feature = "ipvers")]
+            &[IpVersion::V4],
+        )
+        .await
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 1024];
+            socket.read(&mut buffer).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            graph.request_user_exact("test-token", "test@example.com"),
+        )
+        .await
+        .expect("configured request timeout was ignored");
+        assert!(matches!(result, Err(MsalError::RequestFailed(_))));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_truncated_not_found_body_is_not_absence() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let graph = mock_graph_at(&format!("http://{}", listener.local_addr().unwrap())).await;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 1024];
+            socket.read(&mut buffer).await.unwrap();
+            let body = not_found_response();
+            let response = format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len() + 10, body);
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let result = graph
+            .request_user_exact("test-token", "test@example.com")
+            .await;
+        assert!(matches!(result, Err(MsalError::InvalidJson(_))));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_user_exact_rejects_empty_or_dot_path_segments() {
+        let graph = mock_graph_at("http://127.0.0.1:1").await;
+        for query in ["", ".", ".."] {
+            let result = graph.request_user_exact("test-token", query).await;
+            assert!(matches!(result, Err(MsalError::URLFormatFailed(_))));
+        }
     }
 }
