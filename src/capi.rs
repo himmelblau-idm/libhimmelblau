@@ -98,7 +98,7 @@ macro_rules! serialize_and_deserialize_funcs {
                     },
                 };
 
-                let mut bytes = std::mem::ManuallyDrop::new(bytes);
+                let mut bytes = std::mem::ManuallyDrop::new(bytes.into_boxed_slice());
                 unsafe {
                     *out_buf = bytes.as_mut_ptr();
                     *out_len = bytes.len();
