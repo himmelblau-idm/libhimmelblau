@@ -74,5 +74,12 @@ libkrimes = { version = "0.1.0", features = ["keyring"] }
 [build-dependencies]
 cbindgen = "0.29.2"
 
+# SoftTpm RSA key generation dominates test time without optimization.
+[profile.dev.package.rsa]
+opt-level = 2
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 2
+
 [package.metadata.capi.library]
 version_suffix_components = 1
