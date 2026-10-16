@@ -542,8 +542,9 @@ struct Credentials {
     remote_ngc_params: Option<RemoteNgcParams>,
     #[serde(rename = "FidoParams")]
     fido_params: Option<FidoParams>,
+    // Entra may return values outside u8 (e.g. 1000).
     #[serde(rename = "PrefCredential")]
-    pref_credential: Option<u8>,
+    pref_credential: Option<i32>,
     #[serde(rename = "HasAccessPass")]
     has_access_pass: Option<bool>,
     #[serde(rename = "HasFido")]
@@ -9589,6 +9590,23 @@ mod tests {
             let cred_type = test_cred_type(0, throttle_status);
             assert!(cred_type.account_exists().unwrap());
         }
+    }
+
+    #[test]
+    fn pref_credential_accepts_values_beyond_u8() {
+        let cred_type: CredType = serde_json::from_value(json!({
+            "Credentials": {
+                "PrefCredential": 1000,
+                "HasPassword": true,
+                "HasRemoteNGC": true,
+                "RemoteNgcParams": null
+            },
+            "ThrottleStatus": 0,
+            "IfExistsResult": 0
+        }))
+        .expect("PrefCredential=1000 should deserialize");
+        assert_eq!(cred_type.credentials.pref_credential, Some(1000));
+        assert!(cred_type.account_exists().unwrap());
     }
 
     #[test]
