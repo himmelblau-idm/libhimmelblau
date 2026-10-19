@@ -2475,6 +2475,11 @@ struct SsprResponse {
 
 pub struct PublicClientApplication {
     app: ClientApplication,
+    /// The change-password page the last sign-in reached (and when), for
+    /// handle_password_change: it is reached after MFA too, and signing in
+    /// again with the password alone would end at MFA instead.
+    #[cfg(feature = "changepassword")]
+    pending_password_change: RwLock<Option<(std::time::Instant, AuthConfig)>>,
 }
 
 impl PublicClientApplication {
@@ -2503,6 +2508,8 @@ impl PublicClientApplication {
                 #[cfg(feature = "ipvers")]
                 ip_version,
             )?,
+            #[cfg(feature = "changepassword")]
+            pending_password_change: RwLock::new(None),
         })
     }
 
@@ -2957,6 +2964,10 @@ impl PublicClientApplication {
                     if !password_change {
                         if let Some(ref pgid) = auth_config.pgid {
                             if pgid == "ConvergedChangePassword" {
+                                if let Ok(mut pending) = self.pending_password_change.write() {
+                                    *pending =
+                                        Some((std::time::Instant::now(), auth_config.clone()));
+                                }
                                 return Err(MsalError::ChangePassword);
                             }
                         }
@@ -3005,31 +3016,47 @@ impl PublicClientApplication {
         password: &str,
         new_password: &str,
     ) -> Result<(), MsalError> {
-        let request_id = Uuid::new_v4().to_string();
-        let auth_config = self
-            .request_auth_config_internal(vec![], &request_id, None, false)
-            .await?;
-        let ctx = auth_config
-            .sctx
-            .clone()
-            .ok_or(MsalError::GeneralFailure("ctx is missing".to_string()))?;
-        let flow_token = auth_config
-            .sft
-            .clone()
-            .ok_or(MsalError::GeneralFailure("sft is missing".to_string()))?;
+        // The change page the sign-in just reached, if fresh (single use):
+        // after MFA, signing in again with the password alone would end at
+        // MFA, not at the change page. Entra checks the old password against
+        // the page's own account, so a page from someone else's sign-in can
+        // only fail the change.
+        let pending = self
+            .pending_password_change
+            .write()
+            .ok()
+            .and_then(|mut pending| pending.take())
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(600))
+            .map(|(_, auth_config)| auth_config);
+        let auth_config = match pending {
+            Some(auth_config) => auth_config,
+            None => {
+                let request_id = Uuid::new_v4().to_string();
+                let auth_config = self
+                    .request_auth_config_internal(vec![], &request_id, None, false)
+                    .await?;
+                let ctx = auth_config
+                    .sctx
+                    .clone()
+                    .ok_or(MsalError::GeneralFailure("ctx is missing".to_string()))?;
+                let flow_token = auth_config
+                    .sft
+                    .clone()
+                    .ok_or(MsalError::GeneralFailure("sft is missing".to_string()))?;
 
-        let params = vec![
-            ("login", username),
-            ("passwd", password),
-            ("ctx", &ctx),
-            ("flowToken", &flow_token),
-            ("canary", &auth_config.canary),
-            ("client_id", self.client_id()),
-            ("client-request-id", &request_id),
-        ];
-        let auth_config = self
-            .handle_auth_config_req_internal(&params, &auth_config, &[], true)
-            .await?;
+                let params = vec![
+                    ("login", username),
+                    ("passwd", password),
+                    ("ctx", &ctx),
+                    ("flowToken", &flow_token),
+                    ("canary", &auth_config.canary),
+                    ("client_id", self.client_id()),
+                    ("client-request-id", &request_id),
+                ];
+                self.handle_auth_config_req_internal(&params, &auth_config, &[], true)
+                    .await?
+            }
+        };
 
         let payload = json!({
             "Ctx": &auth_config
@@ -11002,3 +11029,7 @@ pub(crate) mod test_server;
 #[cfg(all(test, feature = "broker"))]
 #[path = "hello_tests.rs"]
 mod hello_tests;
+
+#[cfg(all(test, feature = "changepassword"))]
+#[path = "password_change_tests.rs"]
+mod password_change_tests;
