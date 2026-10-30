@@ -224,6 +224,7 @@ fn native_mfa_method_is_eligible(method: &str, skip_fido_for_mfa: bool) -> bool 
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn select_native_mfa_method<'a, T: NativeMfaMethod>(
     methods: &'a [T],
     requested: Option<&str>,
@@ -581,6 +582,7 @@ impl CredType {
     }
 
     /// Whether the user exists in the directory
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn account_exists(&self) -> Result<bool, MsalError> {
         /* `ifExistsResult` meanings:
            — 0: the account exists and uses that domain for authentication (i.e., “normal” cloud account)
@@ -622,6 +624,7 @@ struct WsFedForm {
     wctx: String,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn parse_adfs_federation_url(value: &str) -> Result<Option<Url>, MsalError> {
     let url = Url::parse(value)
         .map_err(|e| MsalError::URLFormatFailed(format!("Invalid federation URL: {e}")))?;
@@ -657,6 +660,7 @@ enum AdfsRequestMethod {
     PostCredentials,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn resolve_adfs_redirect(
     origin: &Url,
     current: &Url,
@@ -699,6 +703,7 @@ fn entra_login_srf_url(authority: &str) -> Result<Url, MsalError> {
     Ok(url)
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn parse_ws_fed_form(text: &str) -> Result<WsFedForm, MsalError> {
     let document = Html::parse_document(text);
     let form_selector = Selector::parse("form")
@@ -750,6 +755,7 @@ pub struct IdToken {
     pub raw: Option<String>,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn decode_string_or_struct<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
     T: Deserialize<'de> + FromStr<Err = MsalError>,
@@ -879,6 +885,7 @@ fn v2_scope_to_v1_resource(scope: &str) -> String {
     scope.trim_end_matches('/').to_string()
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn decode_number_from_string<'de, D>(d: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
@@ -950,6 +957,7 @@ impl AuthorizationCodePkceFlow {
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn generate_base64url_random(bytes_len: usize) -> Result<String, MsalError> {
     let mut bytes = vec![0u8; bytes_len];
     rand_bytes(&mut bytes)
@@ -1126,6 +1134,7 @@ struct UsernamePasswordAuthenticationPayload {
 
 #[cfg(feature = "broker")]
 impl UsernamePasswordAuthenticationPayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(username: &str, password: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
@@ -1159,6 +1168,7 @@ struct RefreshTokenAuthenticationPayload {
 
 #[cfg(feature = "broker")]
 impl RefreshTokenAuthenticationPayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(refresh_token: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
@@ -1191,6 +1201,7 @@ struct HelloForBusinessAssertion {
 
 #[cfg(feature = "broker")]
 impl HelloForBusinessAssertion {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(username: &str, request_nonce: &str) -> Result<Self, MsalError> {
         let iat: u64 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1221,6 +1232,7 @@ struct HelloForBusinessPayload {
 
 #[cfg(feature = "broker")]
 impl HelloForBusinessPayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(username: &str, assertion: &str, request_nonce: &str) -> Self {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
@@ -1257,6 +1269,7 @@ struct ExchangePRTPayload {
 
 #[cfg(feature = "broker")]
 impl ExchangePRTPayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(
         prt: &PrimaryRefreshToken,
         nonce: &str,
@@ -1309,6 +1322,7 @@ struct ExchangePRTForATPayload {
 
 #[cfg(feature = "broker")]
 impl ExchangePRTForATPayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(
         prt: &PrimaryRefreshToken,
         nonce: &str,
@@ -1356,6 +1370,7 @@ struct RefreshTokenCredentialPayload {
 
 #[cfg(feature = "broker")]
 impl RefreshTokenCredentialPayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(prt: &PrimaryRefreshToken, nonce: Option<&str>) -> Result<Self, MsalError> {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
@@ -1409,6 +1424,7 @@ struct DeviceCredentialPayload {
 
 #[cfg(feature = "broker")]
 impl DeviceCredentialPayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(nonce: &str) -> Result<Self, MsalError> {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
@@ -1446,6 +1462,7 @@ struct P2PDeviceCertificatePayload {
 
 #[cfg(feature = "broker")]
 impl P2PDeviceCertificatePayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(nonce: &str, csr: &str, device_name: &str, dns_names: &[String]) -> Self {
         let os_release = match OsRelease::new() {
             Ok(os_release) => Some(format!(
@@ -1506,6 +1523,7 @@ struct P2PUserCertificatePayload {
 
 #[cfg(feature = "broker")]
 impl P2PUserCertificatePayload {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(prt: &PrimaryRefreshToken, nonce: &str, csr: &str) -> Self {
         P2PUserCertificatePayload {
             iss: "aad:brokerplugin".to_string(),
@@ -1938,6 +1956,7 @@ struct SessionKey {
 
 #[cfg(feature = "broker")]
 impl SessionKey {
+    #[tracing::instrument(level = "debug", skip_all)]
     fn new(session_key_jwe: &str) -> Result<Self, MsalError> {
         Ok(SessionKey {
             session_key_jwe: JweCompact::from_str(session_key_jwe)
@@ -2007,6 +2026,7 @@ impl SessionKey {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn sign<V: JwsSignable>(
         &self,
         tpm: &mut BoxedDynTpm,
@@ -2151,6 +2171,7 @@ pub(crate) struct ClientApplication {
 }
 
 impl ClientApplication {
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn new(
         client_id: &str,
         authority: Option<&str>,
@@ -2246,6 +2267,7 @@ impl ClientApplication {
             .map(|mut auth| *auth = new_authority.to_string())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_token_by_username_password(
         &self,
         username: &str,
@@ -2290,6 +2312,7 @@ impl ClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_token_by_refresh_token(
         &self,
         refresh_token: &str,
@@ -2488,6 +2511,7 @@ impl PublicClientApplication {
     /// * `authority` - A URL that identifies a token authority. It should
     ///   be of the format <https://login.microsoftonline.com/your_tenant> By
     ///   default, we will use <https://login.microsoftonline.com/common>.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn new(
         client_id: &str,
         authority: Option<&str>,
@@ -2560,6 +2584,7 @@ impl PublicClientApplication {
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_username_password(
         &self,
         username: &str,
@@ -2583,6 +2608,7 @@ impl PublicClientApplication {
     ///
     /// * Success: A UserToken, which means migration was successful.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_refresh_token(
         &self,
         refresh_token: &str,
@@ -2608,6 +2634,7 @@ impl PublicClientApplication {
     ///
     /// * Success: An AuthorizationCodePkceFlow containing the authentication URL.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn initiate_authorization_code_pkce_flow(
         &self,
         scopes: Vec<&str>,
@@ -2656,6 +2683,7 @@ impl PublicClientApplication {
     /// caller after the user-agent redirects back to the registered redirect
     /// URI. This function parses the authorization code, validates `state`,
     /// and submits the PKCE verifier.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_authorization_code_pkce_flow(
         &self,
         flow: &AuthorizationCodePkceFlow,
@@ -2740,6 +2768,7 @@ impl PublicClientApplication {
     /// * Success: A DeviceAuthorizationResponse containing a user_code key,
     ///   among others
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn initiate_device_flow(
         &self,
         scopes: Vec<&str>,
@@ -2774,6 +2803,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn initiate_personal_device_flow(
         &self,
         scopes: Vec<&str>,
@@ -2819,6 +2849,7 @@ impl PublicClientApplication {
     ///
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_device_flow(
         &self,
         flow: DeviceAuthorizationResponse,
@@ -2854,6 +2885,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_token_by_personal_device_flow(
         &self,
         flow: DeviceAuthorizationResponse,
@@ -2890,6 +2922,7 @@ impl PublicClientApplication {
     }
 
     #[allow(unused_variables)]
+    #[tracing::instrument(level = "debug", skip_all)]
     fn parse_auth_config(
         &self,
         text: &str,
@@ -2999,6 +3032,7 @@ impl PublicClientApplication {
     /// * Failure: An MsalError, indicating problems such as authentication
     ///   failures or password complexity requirements not met.
     #[cfg(feature = "changepassword")]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn handle_password_change(
         &self,
         username: &str,
@@ -3175,6 +3209,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn handle_auth_config_fido_get(
         &self,
         username: &str,
@@ -3280,6 +3315,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn handle_auth_config_req_internal(
         &self,
         req_params: &[(&str, &str)],
@@ -3324,6 +3360,7 @@ impl PublicClientApplication {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn handle_auth_config_response_internal(
         &self,
         mut resp: Response,
@@ -3390,6 +3427,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn read_adfs_response_body(&self, mut resp: Response) -> Result<String, MsalError> {
         let mut body = Vec::new();
         while let Some(chunk) = resp
@@ -3408,6 +3446,7 @@ impl PublicClientApplication {
             .map_err(|e| MsalError::InvalidParse(format!("AD FS response was not UTF-8: {e}")))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn request_adfs_form_internal(
         &self,
         federation_url: Url,
@@ -3495,6 +3534,7 @@ impl PublicClientApplication {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn submit_ws_fed_form_internal(&self, form: &WsFedForm) -> Result<AuthConfig, MsalError> {
         let login_srf = entra_login_srf_url(&self.authority()?)?;
         let resp = self
@@ -3527,6 +3567,7 @@ impl PublicClientApplication {
     /// # Returns
     /// * Success: An AuthInit object. Call `exists` to get the result.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn check_user_exists(
         &self,
         username: &str,
@@ -3580,6 +3621,7 @@ impl PublicClientApplication {
     /// * Success: A MFAAuthContinue containing the information needed to continue the
     ///   authentication flow.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn initiate_acquire_token_by_mfa_flow(
         &self,
         username: &str,
@@ -4448,6 +4490,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn request_auth_config_internal(
         &self,
         scopes: Vec<&str>,
@@ -4521,6 +4564,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn mfa_begin_auth_internal(
         &self,
         mfa_method: &str,
@@ -4572,6 +4616,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn await_working(&self, mut resp: Response) -> Result<(String, Response), MsalError> {
         // We have to read the response in chunks, because Response.text()
         // consumes the Response object.
@@ -4646,6 +4691,7 @@ impl PublicClientApplication {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn auth_code_intercept_internal(
         &self,
         url: &str,
@@ -4731,6 +4777,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn request_authorization_passwordless_internal(
         &self,
         username: &str,
@@ -4804,6 +4851,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn request_authorization_internal(
         &self,
         username: &str,
@@ -4847,6 +4895,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_authorization_code_for_access_token_internal(
         &self,
         authorization_code: String,
@@ -4900,6 +4949,7 @@ impl PublicClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_accesspass_for_auth_code_internal(
         &self,
         username: &str,
@@ -4923,6 +4973,7 @@ impl PublicClientApplication {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_fido_assertion_for_auth_code_internal(
         &self,
         assertion: &str,
@@ -5116,6 +5167,7 @@ impl PublicClientApplication {
     ///
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_mfa_flow(
         &self,
         username: &str,
@@ -5630,6 +5682,7 @@ impl BrokerClientApplication {
     ///
     /// NOTE: If `transport_key` and `cert_key` are not provided from a previous
     /// device enrollment, then enrollment will be required.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn new(
         authority: Option<&str>,
         client_id: Option<&str>,
@@ -5658,6 +5711,7 @@ impl BrokerClientApplication {
         self.app.client()
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn discover_services(
         &self,
         access_token: &str,
@@ -5788,6 +5842,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: The issued P2P certificate material and metadata.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_device_p2p_certificate(
         &self,
         tenant_id: &str,
@@ -5861,6 +5916,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: The issued P2P certificate material and metadata.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_user_p2p_certificate(
         &self,
         sealed_prt: &SealedData,
@@ -5936,6 +5992,7 @@ impl BrokerClientApplication {
     /// * Success: A LoadableMsOapxbcRsaKey transport key, a LoadableMsDeviceEnrolmentKey certificate key,
     ///   and a `device_id`.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn enroll_device(
         &mut self,
         refresh_token: &str,
@@ -6016,6 +6073,7 @@ impl BrokerClientApplication {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn enroll_device_internal(
         &self,
         access_token: &str,
@@ -6055,6 +6113,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_username_password(
         &self,
         username: &str,
@@ -6129,6 +6188,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A UserToken, which means migration was successful.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_refresh_token(
         &self,
         refresh_token: &str,
@@ -6151,6 +6211,7 @@ impl BrokerClientApplication {
         .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_token_by_refresh_token_internal(
         &self,
         refresh_token: &str,
@@ -6207,6 +6268,7 @@ impl BrokerClientApplication {
     ///
     /// The caller is responsible for opening or presenting the returned URL
     /// and capturing the final redirect URI.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn initiate_authorization_code_pkce_flow(
         &self,
         scopes: Vec<&str>,
@@ -6217,6 +6279,7 @@ impl BrokerClientApplication {
     }
 
     /// Exchange a captured authorization-code redirect for a token.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_authorization_code_pkce_flow(
         &self,
         flow: &AuthorizationCodePkceFlow,
@@ -6238,6 +6301,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_username_password_for_device_enrollment(
         &self,
         username: &str,
@@ -6249,6 +6313,7 @@ impl BrokerClientApplication {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_token_by_refresh_token_for_device_enrollment(
         &self,
         refresh_token: &str,
@@ -6267,6 +6332,7 @@ impl BrokerClientApplication {
     /// * Success: A DeviceAuthorizationResponse containing a user_code key,
     ///   among others
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn initiate_device_flow_for_device_enrollment(
         &self,
         #[cfg(feature = "optional_mfa")] options: &[AuthOption],
@@ -6294,6 +6360,7 @@ impl BrokerClientApplication {
     ///
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_device_flow(
         &self,
         flow: DeviceAuthorizationResponse,
@@ -6318,6 +6385,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: An AuthInit object. Call `exists` to get the result.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn check_user_exists(
         &self,
         username: &str,
@@ -6351,6 +6419,7 @@ impl BrokerClientApplication {
     /// * Success: A MFAAuthContinue containing the information needed to continue the
     ///   authentication flow.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn initiate_acquire_token_by_mfa_flow_for_device_enrollment(
         &self,
         username: &str,
@@ -6399,6 +6468,7 @@ impl BrokerClientApplication {
     /// * Success: A MFAAuthContinue containing the information needed to continue the
     ///   authentication flow.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn initiate_acquire_token_by_mfa_flow(
         &self,
         username: &str,
@@ -6439,6 +6509,7 @@ impl BrokerClientApplication {
     ///
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_mfa_flow(
         &self,
         username: &str,
@@ -6452,6 +6523,7 @@ impl BrokerClientApplication {
     }
 
     // TODO: add condition here to support v2 endpoints?
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn request_nonce(&self) -> Result<String, MsalError> {
         let token_endpoint = format!("{}/oauth2/token", self.authority()?);
         self.request_nonce_from_endpoint(&token_endpoint).await
@@ -6472,6 +6544,7 @@ impl BrokerClientApplication {
         Ok(authority.to_string())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn request_nonce_from_endpoint(&self, token_endpoint: &str) -> Result<String, MsalError> {
         let resp = self
             .client()
@@ -6572,6 +6645,7 @@ impl BrokerClientApplication {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn sign_p2p_device_jwt(
         payload: &P2PDeviceCertificatePayload,
         cert_der: &[u8],
@@ -6605,6 +6679,7 @@ impl BrokerClientApplication {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn sign_p2p_user_jwt_with_key(
         payload: &P2PUserCertificatePayload,
         ctx: &[u8],
@@ -6656,6 +6731,7 @@ impl BrokerClientApplication {
     /// rejects the P2P request otherwise. The KDF label and the
     /// `derive_key_aes256(key, label, ctx)` argument order below match
     /// compact_jwt, so the server derives the same key from our `ctx`.
+    #[tracing::instrument(level = "debug", skip_all)]
     fn sign_p2p_user_jwt(
         &self,
         payload: &P2PUserCertificatePayload,
@@ -6698,6 +6774,7 @@ impl BrokerClientApplication {
         Self::sign_p2p_user_jwt_with_key(payload, &ctx, &derived_key)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn create_p2p_csr(
         tpm: &mut BoxedDynTpm,
         signing_key: &RS256Key,
@@ -6844,6 +6921,7 @@ impl BrokerClientApplication {
         Ok(i64::from(diff.days) * 86400 + i64::from(diff.secs))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn post_p2p_certificate_request(
         &self,
         token_endpoint: &str,
@@ -6883,6 +6961,7 @@ impl BrokerClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn build_jwt_by_username_password(
         &self,
         username: &str,
@@ -6934,6 +7013,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_user_prt_by_username_password(
         &self,
         username: &str,
@@ -6955,6 +7035,7 @@ impl BrokerClientApplication {
         self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_user_prt_by_username_password_internal(
         &self,
         username: &str,
@@ -6979,6 +7060,7 @@ impl BrokerClientApplication {
         self.acquire_user_prt_jwt(&signed_jwt).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn build_jwt_by_refresh_token(
         &self,
         refresh_token: &str,
@@ -7029,6 +7111,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_user_prt_by_refresh_token(
         &self,
         refresh_token: &str,
@@ -7049,6 +7132,7 @@ impl BrokerClientApplication {
         self.seal_user_prt(&prt, tpm, prt_storage_key)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_user_prt_by_refresh_token_internal(
         &self,
         refresh_token: &str,
@@ -7072,6 +7156,7 @@ impl BrokerClientApplication {
         self.acquire_user_prt_jwt(&signed_jwt).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn sign_jwt(
         &self,
         jwt: &Jws,
@@ -7097,6 +7182,7 @@ impl BrokerClientApplication {
         Ok(format!("{}", signed_jwt))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn sign_jwt_with_loaded_cert_key(
         &self,
         jwt: &Jws,
@@ -7143,6 +7229,7 @@ impl BrokerClientApplication {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_user_prt_jwt(
         &self,
         signed_jwt: &str,
@@ -7190,6 +7277,7 @@ impl BrokerClientApplication {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn sign_session_key_jwt(
         &self,
         jwt: &Jws,
@@ -7214,6 +7302,7 @@ impl BrokerClientApplication {
     /// This reuses the PRT JWT-bearer exchange to obtain a normal refresh token,
     /// then performs the Azure SSH certificate token exchange. The caller owns
     /// the matching RSA private key.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn exchange_prt_for_ssh_certificate(
         &self,
         sealed_prt: &SealedData,
@@ -7244,6 +7333,7 @@ impl BrokerClientApplication {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_ssh_certificate_with_refresh_token(
         &self,
         refresh_token: &str,
@@ -7301,6 +7391,7 @@ impl BrokerClientApplication {
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn exchange_prt_for_access_token(
         &self,
         sealed_prt: &SealedData,
@@ -7356,6 +7447,7 @@ impl BrokerClientApplication {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_prt_for_access_token_internal(
         &self,
         prt: &PrimaryRefreshToken,
@@ -7437,6 +7529,7 @@ impl BrokerClientApplication {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_prt_for_refresh_token_jwt_bearer(
         &self,
         prt: &PrimaryRefreshToken,
@@ -7542,6 +7635,7 @@ impl BrokerClientApplication {
     /// Using a standard refresh_token from a prior token acquisition bypasses
     /// this restriction.
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_prt_for_access_token_jwt_bearer(
         &self,
         prt: &PrimaryRefreshToken,
@@ -7697,6 +7791,7 @@ impl BrokerClientApplication {
     /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token
     ///   and optionally a tgt. The session key is copied from the old PRT.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn exchange_prt_for_prt(
         &self,
         sealed_prt: &SealedData,
@@ -7808,6 +7903,7 @@ impl BrokerClientApplication {
     /// * Success: Either the existing LoadableMsHelloKey, or a new created
     ///   key if none was provided.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn provision_hello_for_business_key(
         &self,
         token: &UserToken,
@@ -7840,6 +7936,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: The new LoadableMsHelloKey and the same key loaded.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn provision_loaded_ms_hello_key(
         &self,
         token: &UserToken,
@@ -7960,6 +8057,7 @@ impl BrokerClientApplication {
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_hello_for_business_key(
         &self,
         username: &str,
@@ -8014,6 +8112,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: A UserToken containing an access_token.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_by_loaded_ms_hello_key(
         &self,
         username: &str,
@@ -8073,6 +8172,7 @@ impl BrokerClientApplication {
         Ok(token)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn build_hello_for_business_assertion(
         username: &str,
         request_nonce: &str,
@@ -8133,6 +8233,7 @@ impl BrokerClientApplication {
         Ok(format!("{}", signed_assertion))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn build_jwt_by_hello_for_business_key(
         &self,
         username: &str,
@@ -8175,6 +8276,7 @@ impl BrokerClientApplication {
         Ok(jwt)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn acquire_user_prt_by_hello_for_business_key_internal(
         &self,
         username: &str,
@@ -8210,6 +8312,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: An encrypted PrimaryRefreshToken, containing a refresh_token and tgt.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_user_prt_by_hello_for_business_key(
         &self,
         username: &str,
@@ -8240,6 +8343,7 @@ impl BrokerClientApplication {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_prt_for_auth_code_internal(
         &self,
         scope: Vec<&str>,
@@ -8472,6 +8576,7 @@ impl BrokerClientApplication {
     /// * Success: A JWT (as a String) that can be used for single sign-on
     ///   (SSO) authentication.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_prt_sso_cookie(
         &self,
         prt: &SealedData,
@@ -8489,6 +8594,7 @@ impl BrokerClientApplication {
     /// claim, making it suitable for proactive SSO (e.g., the linux-entra-sso
     /// extension's static header injection). When `Some`, the provided
     /// nonce is included as `request_nonce`.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_prt_sso_cookie_with_nonce(
         &self,
         prt: &SealedData,
@@ -8522,6 +8628,7 @@ impl BrokerClientApplication {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_prt_for_auth_code(
         &self,
         prt: &PrimaryRefreshToken,
@@ -8622,6 +8729,7 @@ impl BrokerClientApplication {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn exchange_auth_code_for_access_token_internal(
         &self,
         scope: Vec<&str>,
@@ -8753,6 +8861,7 @@ impl BrokerClientApplication {
     /// * Failure: An MsalError, indicating problems such as authentication
     ///   failures or password complexity requirements not met.
     #[cfg(feature = "changepassword")]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn handle_password_change(
         &self,
         username: &str,
@@ -8975,6 +9084,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: Byte representation of a Kerberos CCache
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn fetch_cloud_ccache(
         &self,
         sealed_prt: &SealedData,
@@ -8999,6 +9109,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: Byte representation of a Kerberos CCache
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn fetch_ad_ccache(
         &self,
         sealed_prt: &SealedData,
@@ -9023,6 +9134,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: Boxed KerberosCredentials struct
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn fetch_cloud_tgt(
         &self,
         sealed_prt: &SealedData,
@@ -9074,6 +9186,7 @@ impl BrokerClientApplication {
     /// # Returns
     /// * Success: Boxed KerberosCredentials struct
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn fetch_ad_tgt(
         &self,
         sealed_prt: &SealedData,
@@ -9387,6 +9500,7 @@ impl BrokerClientApplication {
             .map(|sealed_prt| (sealed_prt, expired))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn resolve_nametosid(
         &self,
         username: &str,

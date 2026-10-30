@@ -69,6 +69,7 @@ pub(crate) struct BcryptRsaKeyBlob {
 
 #[cfg(feature = "broker")]
 impl BcryptRsaKeyBlob {
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn new(bit_length: u32, exponent: &[u8], modulus: &[u8]) -> Self {
         BcryptRsaKeyBlob {
             bit_length,
@@ -307,6 +308,7 @@ impl EnrollAttrs {
     ///
     /// * Success: A new EnrollAttrs for device enrollment.
     /// * Failure: An MsalError, indicating the failure.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn new(
         target_domain: String,
         device_display_name: Option<String>,
@@ -392,6 +394,7 @@ pub struct Services {
 }
 
 impl Services {
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn new(
         access_token: &str,
         domain_name: &str,
@@ -415,6 +418,7 @@ impl Services {
         .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) async fn new_with_discovery_url(
         access_token: &str,
         domain_name: &str,
@@ -496,6 +500,7 @@ impl Services {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_nonce(
         &self,
         tenant_id: &str,
@@ -538,6 +543,7 @@ impl Services {
     }
 
     #[cfg(feature = "broker")]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn enroll_device(
         &self,
         access_token: &str,
@@ -647,6 +653,7 @@ impl Services {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn provision_key(
         &self,
         access_token: &str,
