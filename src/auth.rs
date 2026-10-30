@@ -26,7 +26,7 @@ use crate::ssh::{
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 #[cfg(feature = "broker")]
-use crypto_glue::traits::SpkiEncodePublicKey;
+use crypto_glue::traits::{SignatureEncoding, SpkiEncodePublicKey};
 #[cfg(feature = "broker")]
 use crypto_glue::x509::oiddb::rfc5912;
 use crypto_glue::x509::Certificate;
@@ -66,7 +66,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "broker")]
 use compact_jwt::{
-    compact::JweCompact,
+    compact::{JwaAlg, JweCompact},
     crypto::{JwsTpmRs256Signer, MsOapxbcSessionKey},
     jwe::Jwe,
     jws::{Jws, JwsBuilder},
@@ -6090,6 +6090,7 @@ impl BrokerClientApplication {
                 v2_endpoint,
                 tpm,
                 storage_key,
+                &transport_key,
                 &session_key,
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
@@ -6185,6 +6186,7 @@ impl BrokerClientApplication {
                 v2_endpoint,
                 tpm,
                 storage_key,
+                &transport_key,
                 &session_key,
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
@@ -7095,6 +7097,52 @@ impl BrokerClientApplication {
         Ok(format!("{}", signed_jwt))
     }
 
+    fn sign_jwt_with_loaded_cert_key(
+        &self,
+        jwt: &Jws,
+        tpm: &mut BoxedDynTpm,
+        cert_key: &EnrollmentKeyWrapper,
+    ) -> Result<String, MsalError> {
+        let cert_der = cert_key.cert.to_der().map_err(|e| {
+            MsalError::CryptoFail(format!("Failed encoding device certificate: {e}"))
+        })?;
+        let cert = X509::from_der(&cert_der).map_err(|e| {
+            MsalError::CryptoFail(format!("Failed parsing device certificate: {e}"))
+        })?;
+        let public_key = cert
+            .public_key()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed reading certificate key: {e}")))?;
+        let public_key_der = public_key
+            .public_key_to_der()
+            .map_err(|e| MsalError::CryptoFail(format!("Failed encoding certificate key: {e}")))?;
+        let key_id = hash(MessageDigest::sha256(), &public_key_der).map_err(|e| {
+            MsalError::CryptoFail(format!("Failed fingerprinting certificate key: {e}"))
+        })?;
+        let key_id = key_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        let mut header = jwt.header().clone();
+        header.alg = JwaAlg::RS256;
+        if header.kid.is_none() {
+            header.kid = Some(key_id);
+        }
+        let header = serde_json::to_vec(&header)
+            .map_err(|e| MsalError::InvalidJson(format!("Failed serializing JWT header: {e}")))?;
+        let header = URL_SAFE_NO_PAD.encode(header);
+        let payload = URL_SAFE_NO_PAD.encode(jwt.payload());
+        let signing_input = format!("{header}.{payload}");
+        let signature = tpm
+            .rs256_sign(&cert_key.key, signing_input.as_bytes())
+            .map_err(|e| MsalError::TPMFail(format!("Failed signing JWT: {e:?}")))?;
+
+        Ok(format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_vec())
+        ))
+    }
+
     async fn acquire_user_prt_jwt(
         &self,
         signed_jwt: &str,
@@ -7147,17 +7195,16 @@ impl BrokerClientApplication {
         jwt: &Jws,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        transport_key: &MsOapxbcRsaKey,
         session_key: &SessionKey,
     ) -> Result<String, MsalError> {
-        let transport_key = self.transport_key(tpm, storage_key)?;
-
         // This allows a transition, where existing msoapxbc keys will provide
         // their sealing content encryption keys, but newer keys will not, falling back
         // to the provided key.
-        let maybe_transport_storage_key = tpm.rs256_yield_cek(&transport_key);
+        let maybe_transport_storage_key = tpm.rs256_yield_cek(transport_key);
         let prt_storage_key = maybe_transport_storage_key.as_ref().unwrap_or(storage_key);
 
-        let signed_jwt = session_key.sign(tpm, &transport_key, prt_storage_key, jwt)?;
+        let signed_jwt = session_key.sign(tpm, transport_key, prt_storage_key, jwt)?;
 
         Ok(format!("{}", signed_jwt))
     }
@@ -7186,6 +7233,7 @@ impl BrokerClientApplication {
                 &prt,
                 tpm,
                 storage_key,
+                &transport_key,
                 &session_key,
                 AZURE_CLI_APP_ID,
                 &redirect_uri,
@@ -7291,6 +7339,7 @@ impl BrokerClientApplication {
                 tpm,
                 // TODO: Is this the correct storage key to pass here? I think it may not be?
                 storage_key,
+                &transport_key,
                 &session_key,
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
@@ -7314,6 +7363,7 @@ impl BrokerClientApplication {
         v2_endpoint: bool,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        transport_key: &MsOapxbcRsaKey,
         session_key: &SessionKey,
         request_resource: Option<String>,
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
@@ -7338,6 +7388,7 @@ impl BrokerClientApplication {
                     v2_endpoint,
                     tpm,
                     storage_key,
+                    transport_key,
                     session_key,
                     request_resource,
                     req_cnf_val,
@@ -7362,6 +7413,7 @@ impl BrokerClientApplication {
                 on_behalf_of_client_id,
                 tpm,
                 storage_key,
+                transport_key,
                 #[cfg(feature = "redirect_uri")]
                 redirect_uri,
                 req_cnf,
@@ -7390,6 +7442,7 @@ impl BrokerClientApplication {
         prt: &PrimaryRefreshToken,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        transport_key: &MsOapxbcRsaKey,
         session_key: &SessionKey,
         client_id: &str,
         redirect_uri: &str,
@@ -7418,7 +7471,7 @@ impl BrokerClientApplication {
         }
 
         let signed_jwt = self
-            .sign_session_key_jwt(&jwt, tpm, storage_key, session_key)
+            .sign_session_key_jwt(&jwt, tpm, storage_key, transport_key, session_key)
             .await?;
         let params = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
@@ -7496,6 +7549,7 @@ impl BrokerClientApplication {
         v2_endpoint: bool,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        transport_key: &MsOapxbcRsaKey,
         session_key: &SessionKey,
         request_resource: Option<String>,
         req_cnf: &str,
@@ -7555,6 +7609,7 @@ impl BrokerClientApplication {
                 prt,
                 tpm,
                 storage_key,
+                transport_key,
                 session_key,
                 &client_id,
                 &redirect_uri,
@@ -7678,7 +7733,7 @@ impl BrokerClientApplication {
         }
 
         let signed_jwt = self
-            .sign_session_key_jwt(&jwt, tpm, storage_key, &session_key)
+            .sign_session_key_jwt(&jwt, tpm, storage_key, &transport_key, &session_key)
             .await?;
 
         let mut params = vec![
@@ -8000,6 +8055,7 @@ impl BrokerClientApplication {
                 v2_endpoint,
                 tpm,
                 storage_key,
+                &transport_key,
                 &session_key,
                 request_resource,
                 #[cfg(feature = "on_behalf_of")]
@@ -8461,7 +8517,7 @@ impl BrokerClientApplication {
         .set_typ(Some("JWT"))
         .build();
 
-        self.sign_session_key_jwt(&jwt, tpm, storage_key, &session_key)
+        self.sign_session_key_jwt(&jwt, tpm, storage_key, &transport_key, &session_key)
             .await
     }
 
@@ -8477,6 +8533,7 @@ impl BrokerClientApplication {
         #[cfg(feature = "on_behalf_of")] on_behalf_of_client_id: Option<&str>,
         tpm: &mut BoxedDynTpm,
         storage_key: &StorageKey,
+        transport_key: &MsOapxbcRsaKey,
         #[cfg(feature = "redirect_uri")] redirect_uri: Option<&str>,
         req_cnf: Option<&str>,
         demand_mfa: bool,
@@ -8493,7 +8550,7 @@ impl BrokerClientApplication {
         .set_typ(Some("JWT"))
         .build();
         let signed_prt_payload = self
-            .sign_session_key_jwt(&jwt, tpm, storage_key, session_key)
+            .sign_session_key_jwt(&jwt, tpm, storage_key, transport_key, session_key)
             .await?;
         if let Ok(mut payload) = jwt.from_json::<Value>() {
             payload["refresh_token"] = "**********".into();
@@ -8514,7 +8571,7 @@ impl BrokerClientApplication {
         .set_typ(Some("JWT"))
         .set_x5c(Some(vec![cert_der]))
         .build();
-        let signed_device_payload = self.sign_jwt(&jwt, tpm, storage_key).await?;
+        let signed_device_payload = self.sign_jwt_with_loaded_cert_key(&jwt, tpm, &cert_key)?;
         if let Ok(payload) = jwt.from_json::<Value>() {
             if let Ok(pretty) = to_string_pretty(&payload) {
                 debug!("Device Credential Payload: {}", pretty);

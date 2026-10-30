@@ -14,7 +14,10 @@ use openssl::{
     sign::Verifier,
     x509::{X509Builder, X509NameBuilder, X509Req},
 };
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use tracing::Subscriber;
+use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
 const PIN: &str = "123456";
 const USERNAME: &str = "user@example.test";
@@ -354,6 +357,141 @@ async fn acquisition_signs_the_assertion_with_the_loaded_key() {
     assert_eq!(payload["request_nonce"], "nonce-2");
     assert_eq!(jwt_payload(&assertion)["request_nonce"], "nonce-1");
     assert!(device.signed_by(&loaded, &assertion));
+}
+
+#[derive(Clone, Default)]
+struct TpmOperationSpans(Arc<Mutex<HashMap<&'static str, usize>>>);
+
+impl<S: Subscriber> Layer<S> for TpmOperationSpans {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::Id,
+        _ctx: Context<'_, S>,
+    ) {
+        let name = attrs.metadata().name();
+        if matches!(
+            name,
+            "rs256_load"
+                | "ms_device_enrolment_key_load"
+                | "rs256_fingerprint"
+                | "rs256_public"
+                | "rs256_sign"
+                | "rs256_oaep_dec_sha1"
+                | "unseal_data"
+                | "seal_data"
+        ) {
+            *self.0.lock().unwrap().entry(name).or_default() += 1;
+        }
+    }
+}
+
+#[tokio::test]
+async fn prt_access_token_exchange_loads_each_device_key_once() {
+    let mut device = Device::new();
+    let hello_key = device.hello_key();
+    let loaded = device.load(&hello_key);
+    let mut responses = acquisition(&device.session_key_jwe());
+    responses.extend([nonce("nonce-4"), authorization_code(), access_token()]);
+    let server = Server::start(responses).await;
+    let app = device.app(&server.url);
+    let token = app
+        .acquire_token_by_loaded_ms_hello_key(
+            USERNAME,
+            &loaded,
+            vec![],
+            None,
+            #[cfg(feature = "on_behalf_of")]
+            None,
+            &mut device.tpm,
+            &device.machine_key,
+        )
+        .await
+        .unwrap();
+    let sealed_prt = token.prt.as_ref().unwrap();
+
+    let spans = TpmOperationSpans::default();
+    let subscriber = tracing_subscriber::registry().with(spans.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    app.exchange_prt_for_access_token(
+        sealed_prt,
+        vec![],
+        None,
+        #[cfg(feature = "on_behalf_of")]
+        None,
+        &mut device.tpm,
+        &device.machine_key,
+        #[cfg(feature = "redirect_uri")]
+        None,
+        #[cfg(feature = "pop_support")]
+        None,
+    )
+    .await
+    .unwrap();
+    drop(_guard);
+
+    let counts = spans.0.lock().unwrap();
+    assert_eq!(counts.get("rs256_load").copied().unwrap_or_default(), 2);
+    assert_eq!(
+        counts
+            .get("ms_device_enrolment_key_load")
+            .copied()
+            .unwrap_or_default(),
+        1
+    );
+    assert_eq!(
+        counts.get("rs256_fingerprint").copied().unwrap_or_default(),
+        0
+    );
+    assert_eq!(counts.get("rs256_public").copied().unwrap_or_default(), 0);
+    assert_eq!(counts.get("unseal_data").copied().unwrap_or_default(), 2);
+    assert_eq!(
+        counts
+            .get("rs256_oaep_dec_sha1")
+            .copied()
+            .unwrap_or_default(),
+        1
+    );
+    assert_eq!(counts.get("seal_data").copied().unwrap_or_default(), 1);
+    assert_eq!(counts.get("rs256_sign").copied().unwrap_or_default(), 1);
+}
+
+#[test]
+fn loaded_device_key_signing_preserves_the_tpm_fingerprint_and_signature() {
+    let mut device = Device::new();
+    let app = device.app("https://example.test");
+    let cert_key = app.cert_key(&mut device.tpm, &device.machine_key).unwrap();
+    let fingerprint = device.tpm.rs256_fingerprint(&cert_key.key).unwrap();
+    let expected_kid = fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let certificate_der = cert_key.cert.to_der().unwrap();
+    let jwt = JwsBuilder::from(br#"{"test":true}"#.to_vec())
+        .set_typ(Some("JWT"))
+        .set_x5c(Some(vec![certificate_der.clone()]))
+        .build();
+
+    let signed = app
+        .sign_jwt_with_loaded_cert_key(&jwt, &mut device.tpm, &cert_key)
+        .unwrap();
+    let (signing_input, encoded_signature) = signed.rsplit_once('.').unwrap();
+    let header: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(signed.split('.').next().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(header["alg"], "RS256");
+    assert_eq!(header["kid"], expected_kid);
+
+    let certificate = X509::from_der(&certificate_der).unwrap();
+    let public_key = certificate.public_key().unwrap();
+    let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key).unwrap();
+    verifier.update(signing_input.as_bytes()).unwrap();
+    assert!(verifier
+        .verify(&URL_SAFE_NO_PAD.decode(encoded_signature).unwrap())
+        .unwrap());
 }
 
 #[tokio::test]
