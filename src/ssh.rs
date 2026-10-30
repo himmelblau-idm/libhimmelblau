@@ -105,6 +105,7 @@ struct SshCertificateRequestForm<'a> {
     claims: &'static str,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn build_ssh_certificate_request_form(
     refresh_token: &str,
     jwk: &SshRsaJwk,
@@ -299,6 +300,7 @@ fn positive_mpint<'a>(value: &'a [u8], name: &str) -> Result<&'a [u8], MsalError
     Ok(value)
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn parse_rsa_blob<'a>(
     blob: &'a [u8],
     expected_type: &str,
@@ -317,6 +319,7 @@ fn parse_rsa_blob<'a>(
     Ok((exponent, modulus))
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn ssh_rsa_public_key_to_jwk(public_key: &str) -> Result<SshRsaJwk, MsalError> {
     let mut fields = public_key.split_whitespace();
     let key_type = fields
@@ -352,6 +355,7 @@ pub(crate) fn ssh_rsa_public_key_to_jwk(public_key: &str) -> Result<SshRsaJwk, M
     })
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn parse_string_list(bytes: &[u8], field: &str) -> Result<Vec<String>, MsalError> {
     let mut reader = SshReader::new(bytes);
     let mut values = Vec::new();
@@ -362,6 +366,7 @@ fn parse_string_list(bytes: &[u8], field: &str) -> Result<Vec<String>, MsalError
     Ok(values)
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn parse_extension_text(value: &[u8], name: &str) -> Result<String, MsalError> {
     let mut reader = SshReader::new(value);
     let text = reader.text(name)?;
@@ -369,6 +374,7 @@ fn parse_extension_text(value: &[u8], name: &str) -> Result<String, MsalError> {
     Ok(text)
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn parse_ssh_certificate_response(
     response: SshCertificateTokenResponse,
     requested_jwk: &SshRsaJwk,

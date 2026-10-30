@@ -180,6 +180,7 @@ enum AssertionAudience {
 /// Only the base64url-decoded payload is examined; signature verification
 /// is left to Azure. Returns `None` if the token cannot be decoded.
 #[cfg(feature = "on_behalf_of")]
+#[tracing::instrument(level = "debug", skip_all)]
 fn decode_assertion_preflight_claims(assertion: &str) -> Option<AssertionPreflightClaims> {
     let mut parts = assertion.splitn(3, '.');
     parts.next(); // Skip header
@@ -207,6 +208,7 @@ impl ConfidentialClientApplication {
     ///
     /// * `credential` - Either a LoadableRS256Key (associated with a certificate
     ///   uploaded as a credential), or a client secret string.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn new(
         client_id: &str,
         authority: Option<&str>,
@@ -256,6 +258,7 @@ impl ConfidentialClientApplication {
     ///
     /// This is used by both `acquire_token_silent` (client_credentials) and
     /// `acquire_token_on_behalf_of` (OBO) when the credential is a certificate.
+    #[tracing::instrument(level = "debug", skip_all)]
     fn build_client_assertion(
         &self,
         audience: &str,
@@ -305,6 +308,7 @@ impl ConfidentialClientApplication {
     /// For `ClientSecret`, inserts the `client_secret` parameter.
     /// For `Certificate`, builds a signed JWT client assertion and inserts
     /// `client_assertion` and `client_assertion_type` parameters.
+    #[tracing::instrument(level = "debug", skip_all)]
     fn insert_credential_params<'a>(
         &'a self,
         params: &mut HashMap<&'a str, &'a str>,
@@ -335,6 +339,7 @@ impl ConfidentialClientApplication {
     ///
     /// If decoding fails, diagnostics are skipped and Azure provides definitive errors.
     #[cfg(feature = "on_behalf_of")]
+    #[tracing::instrument(level = "debug", skip_all)]
     fn validate_assertion_preflight(&self, assertion: &str) {
         let claims = match decode_assertion_preflight_claims(assertion) {
             Some(c) => c,
@@ -391,6 +396,7 @@ impl ConfidentialClientApplication {
     /// # Returns
     /// * Success: A `ClientToken` containing an access token.
     /// * Failure: An `MsalError`, indicating the reason the silent token acquisition failed.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_silent(
         &self,
         scopes: Vec<&str>,
@@ -461,6 +467,7 @@ impl ConfidentialClientApplication {
     ///   original client for re-authentication.
     /// * `Err(MsalError)` - Other errors (network, configuration, etc.)
     #[cfg(feature = "on_behalf_of")]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn acquire_token_on_behalf_of(
         &self,
         user_assertion: &str,

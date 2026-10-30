@@ -433,6 +433,7 @@ pub const DEFAULT_URL: &str =
 
 /// Fetch and parse available `intune-portal` versions, sorted with semver.
 #[cfg(feature = "intune_portal_vers_selection")]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn fetch_intune_portal_versions(
     url: Option<&str>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
@@ -545,6 +546,7 @@ impl IntunePlatformInfo {
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn select_trimmed_value(primary: Option<&str>, fallback: Option<&str>, default: &str) -> String {
     primary
         .map(str::trim)
@@ -587,6 +589,7 @@ fn device_state_query_parameters(
     ]
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 fn select_device_state_os_version(
     distro_version: Option<&str>,
     kernel_version: Option<&str>,
@@ -771,6 +774,7 @@ fn intune_retry_delay(status: reqwest::StatusCode, retry_count: usize) -> Option
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn send_intune_request_with_retry<F>(
     operation: &str,
     mut build_request: F,
@@ -805,6 +809,7 @@ where
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn http_status_error(operation: &str, resp: reqwest::Response) -> MsalError {
     let status = resp.status();
     let body = match resp.text().await {
@@ -838,6 +843,7 @@ struct CertReqInfoEmptyAttributes {
 }
 
 impl IntuneForLinux {
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn new(
         service_endpoints: IntuneServiceEndpoints,
         #[cfg(feature = "intune_portal_vers_selection")] app_vers: Option<&str>,
@@ -933,6 +939,7 @@ impl IntuneForLinux {
 
     /// Create a minimal PKCS#10 CSR with NO attributes for Intune enrollment.
     /// Microsoft rejects CSRs with Requested Extensions attributes.
+    #[tracing::instrument(level = "debug", skip_all)]
     fn create_intune_csr(
         tpm: &mut BoxedDynTpm,
         machine_key: &MachineKey,
@@ -1029,6 +1036,7 @@ impl IntuneForLinux {
         Ok((loadable_rs256_key, csr_pem))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn enroll(
         &self,
         token: &UserToken,
@@ -1137,6 +1145,7 @@ impl IntuneForLinux {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn details(
         &self,
         token: &UserToken,
@@ -1178,6 +1187,7 @@ impl IntuneForLinux {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn status(
         &self,
         token: &UserToken,
@@ -1221,6 +1231,7 @@ impl IntuneForLinux {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn policies(
         &self,
         token: &UserToken,

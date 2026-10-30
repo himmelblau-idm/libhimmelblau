@@ -188,6 +188,7 @@ pub struct Graph {
     federation_provider: RwLock<Option<FederationProvider>>,
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn request_federation_provider(
     client: &Client,
     odc_provider: &str,
@@ -256,6 +257,7 @@ macro_rules! federation_provider_fetch {
 }
 
 impl Graph {
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn new(
         odc_provider: &str,
         domain: &str,
@@ -351,6 +353,7 @@ impl Graph {
         federation_provider_fetch!(self, graph)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_user(
         &self,
         access_token: &str,
@@ -395,6 +398,7 @@ impl Graph {
     /// `NotFound`; authentication, transport, throttling, malformed responses,
     /// and other HTTP errors remain errors. Callers must not infer absence
     /// from those errors.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_user_exact(
         &self,
         access_token: &str,
@@ -445,6 +449,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_all_users_with_extension_attributes(
         &self,
         access_token: &str,
@@ -486,6 +491,7 @@ impl Graph {
         Ok(res)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_all_groups_with_extension_attributes(
         &self,
         access_token: &str,
@@ -521,6 +527,7 @@ impl Graph {
         Ok(res)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_user_groups(
         &self,
         access_token: &str,
@@ -531,6 +538,7 @@ impl Graph {
             .map(|objs: Vec<DirectoryObject>| objs)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_user_groups_by_user_id(
         &self,
         access_token: &str,
@@ -546,6 +554,7 @@ impl Graph {
             .map(|objs: Vec<DirectoryObject>| objs)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn assign_device_to_user(
         &self,
         access_token: &str,
@@ -580,6 +589,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn request_group(
         &self,
         access_token: &str,
@@ -608,6 +618,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn fetch_user_profile_photo(
         &self,
         access_token: &str,
@@ -635,6 +646,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn fetch_user_extension_attributes(
         &self,
         access_token: &str,
@@ -677,6 +689,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn fetch_user_extension_attributes_by_user_id(
         &self,
         access_token: &str,
@@ -720,6 +733,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn fetch_group_extension_attributes(
         &self,
         groupname: &str,
@@ -763,6 +777,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn intune_service_endpoints(
         &self,
         access_token: &str,
@@ -790,6 +805,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn fetch_with_retry(
         &self,
         url: &str,
@@ -844,6 +860,7 @@ impl Graph {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn fetch_all_pages<T: DeserializeOwned>(
         &self,
         first_url: &str,
