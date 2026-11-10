@@ -21,6 +21,7 @@ paste = { path = "overrides/paste" }
 [features]
 default = ["broker"]
 broker = ["dep:compact_jwt", "compact_jwt/msextensions", "dep:kanidm-hsm-crypto"]
+bulk_enrollment = ["broker"]
 tpm = ["broker", "kanidm-hsm-crypto/tpm"]
 capi = ["broker", "on_behalf_of"]
 pyapi = ["broker", "dep:pyo3"]

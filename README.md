@@ -12,6 +12,12 @@ In addition to the ClientApplication Class and [MS-DRS] implementations, this pr
 How do I use this library?
 --------------------------
 
+Installation-time Entra bulk enrollment is available with the opt-in
+`bulk_enrollment` feature. See [Bulk Entra enrollment](docs/BULK_ENROLLMENT.md)
+for administrator token creation, importing AADInternals tokens, and joining
+machines before the first user signs in. This does not implement bulk Intune
+enrollment.
+
 Import the module into your project, then include the PublicClientApplication:
 
 ```Rust

@@ -2500,6 +2500,12 @@ pub struct PublicClientApplication {
     app: ClientApplication,
 }
 
+#[cfg(feature = "bulk_enrollment")]
+#[path = "bulk_enrollment.rs"]
+mod bulk_enrollment;
+#[cfg(feature = "bulk_enrollment")]
+pub use bulk_enrollment::{BulkEnrollmentMetadata, BulkEnrollmentPackage, BulkEnrollmentRequest};
+
 impl PublicClientApplication {
     /// Create an instance of an application.
     ///
@@ -6004,6 +6010,25 @@ impl BrokerClientApplication {
         let token = self
             .acquire_token_by_refresh_token_for_device_enrollment(refresh_token)
             .await?;
+        let access_token = token
+            .access_token
+            .as_deref()
+            .ok_or_else(|| MsalError::GeneralFailure("Access token not found".to_string()))?;
+        self.enroll_device_with_access_token(access_token, attrs, tpm, storage_key)
+            .await
+    }
+
+    // Shared by ordinary user enrollment and installation-time bulk enrollment.
+    // Each call creates a fresh device identity; the bulk credential is never
+    // used as a user's refresh token or PRT.
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn enroll_device_with_access_token(
+        &mut self,
+        access_token: &str,
+        attrs: EnrollAttrs,
+        tpm: &mut BoxedDynTpm,
+        storage_key: &StorageKey,
+    ) -> Result<(LoadableMsOapxbcRsaKey, LoadableMsDeviceEnrolmentKey, String), MsalError> {
         // Create the transport and cert keys
         // Create the CSR
         let (in_progess_enrolment, csr) = tpm
@@ -6018,7 +6043,6 @@ impl BrokerClientApplication {
         let loadable_transport_key = tpm
             .msoapxbc_rsa_key_create(storage_key)
             .map_err(|e| MsalError::TPMFail(format!("Failed creating transport key: {:?}", e)))?;
-        self.transport_key = Some(loadable_transport_key.clone());
 
         // Load the transport key
         let transport_key = match tpm.msoapxbc_rsa_key_load(storage_key, &loadable_transport_key) {
@@ -6040,17 +6064,9 @@ impl BrokerClientApplication {
         let transport_key_rsa = Rsa::public_key_from_der(&transport_key_der)
             .map_err(|e| MsalError::TPMFail(format!("{}", e)))?;
 
-        let (cert, device_id) = match &token.access_token {
-            Some(access_token) => {
-                self.enroll_device_internal(access_token, attrs, &transport_key_rsa, &csr_der)
-                    .await?
-            }
-            None => {
-                return Err(MsalError::GeneralFailure(
-                    "Access token not found".to_string(),
-                ))
-            }
-        };
+        let (cert, device_id) = self
+            .enroll_device_internal(access_token, attrs, &transport_key_rsa, &csr_der)
+            .await?;
 
         let cert_der = cert.to_der().map_err(|_|
                 // TODO: David, is this the right error here?
@@ -6065,6 +6081,7 @@ impl BrokerClientApplication {
                 MsalError::TPMFail(format!("Failed creating loadable identity key: {:?}", err))
             })?;
 
+        self.transport_key = Some(loadable_transport_key.clone());
         self.cert_key = Some(new_loadable_cert_key.clone());
         Ok((
             loadable_transport_key,

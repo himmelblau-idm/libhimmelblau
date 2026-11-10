@@ -11,6 +11,8 @@ use tokio::task::JoinHandle;
 pub(crate) struct Request {
     pub(crate) target: String,
     pub(crate) body: String,
+    #[cfg(feature = "bulk_enrollment")]
+    pub(crate) headers: String,
 }
 
 pub(crate) struct Server {
@@ -22,13 +24,24 @@ pub(crate) struct Server {
 impl Server {
     // Responses contain an optional $BASE placeholder for this server's ephemeral URL.
     pub(crate) async fn start(responses: Vec<String>) -> Self {
+        let mut responses = responses.into_iter();
+        Self::start_with_handler(move |_| {
+            responses
+                .next()
+                .unwrap_or_else(|| "500 Unexpected request\r\n\r\n".into())
+        })
+        .await
+    }
+
+    pub(crate) async fn start_with_handler(
+        mut handler: impl FnMut(&Request) -> String + Send + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let base = url.clone();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
         let task = tokio::spawn(async move {
-            let mut responses = responses.into_iter();
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
@@ -56,7 +69,7 @@ impl Server {
                     assert_ne!(count, 0, "incomplete HTTP body");
                     bytes.extend_from_slice(&buf[..count]);
                 }
-                captured.lock().unwrap().push(Request {
+                let request = Request {
                     target: headers
                         .lines()
                         .next()
@@ -65,11 +78,11 @@ impl Server {
                         .to_string(),
                     body: String::from_utf8(bytes[header_end..header_end + length].to_vec())
                         .unwrap(),
-                });
-                let response = responses
-                    .next()
-                    .unwrap_or_else(|| "500 Unexpected request\r\n\r\n".into())
-                    .replace("$BASE", &base);
+                    #[cfg(feature = "bulk_enrollment")]
+                    headers,
+                };
+                let response = handler(&request).replace("$BASE", &base);
+                captured.lock().unwrap().push(request);
                 let (status_headers, body) = response.split_once("\r\n\r\n").unwrap();
                 let wire = format!("HTTP/1.1 {status_headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 stream.write_all(wire.as_bytes()).await.unwrap();
