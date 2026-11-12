@@ -837,7 +837,7 @@ struct CertReqInfoEmptyAttributes {
     pub public_key: SubjectPublicKeyInfoOwned,
     /// Empty attributes - CONSTRUCTED context tag [0] with length 0
     #[asn1(context_specific = "0", tag_mode = "IMPLICIT")]
-    pub attributes: SetOfVec<crypto_glue::x509::Attribute>,
+    pub attributes: SetOfVec<x509_cert::attr::Attribute>,
 }
 
 impl IntuneForLinux {

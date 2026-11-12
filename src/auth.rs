@@ -36,8 +36,6 @@ use crypto_glue::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use crypto_glue::traits::{SignatureEncoding, SpkiEncodePublicKey};
 #[cfg(feature = "broker")]
 use crypto_glue::x509::oiddb::rfc5912;
-#[cfg(feature = "broker")]
-use crypto_glue::x509::Attribute;
 use crypto_glue::x509::Certificate;
 #[cfg(feature = "broker")]
 use crypto_glue::x509::Name;
@@ -64,6 +62,8 @@ use std::thread::sleep;
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+#[cfg(feature = "broker")]
+use x509_cert::attr::Attribute;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "broker")]

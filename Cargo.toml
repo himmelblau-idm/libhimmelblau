@@ -38,7 +38,8 @@ set_timeout = []
 ipvers = []
 
 [dependencies]
-crypto-glue = { git = "https://github.com/kanidm/crypto-glue.git", rev="ff414e60c2def031d032333287ffe74f766f6d37" }
+x509-cert = { version = "0.3.0" }
+crypto-glue = { version = "0.2.2" }
 der = { version = "0.8.2" }
 pem-rfc7468 = "1.0.0"
 base64 = "^0.23.0"
