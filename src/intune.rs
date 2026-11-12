@@ -21,11 +21,13 @@ use crate::graph::IntuneServiceEndpoints;
 use crate::EnrollAttrs;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use crypto_glue::traits::SpkiEncodePublicKey;
+use crypto_glue::der::asn1::SetOfVec;
+use crypto_glue::der::AnyRef;
+use crypto_glue::spki::der::pem::LineEnding;
+use crypto_glue::spki::der::{Decode, Encode, Sequence};
+use crypto_glue::spki::{AlgorithmIdentifierOwned, EncodePublicKey, SubjectPublicKeyInfoOwned};
 use crypto_glue::x509::oiddb::rfc5912;
-use der::asn1::{BitString, SetOfVec};
-use der::pem::LineEnding;
-use der::{Decode, Encode, Sequence};
+use crypto_glue::x509::BitString;
 use kanidm_hsm_crypto::{
     provider::{BoxedDynTpm, TpmRS256},
     structures::{LoadableMsDeviceEnrolmentKey, LoadableRS256Key, StorageKey as MachineKey},
@@ -53,10 +55,6 @@ use std::{fmt, time::Duration};
 use tokio::time::sleep;
 use tracing::debug;
 use uuid::Uuid;
-use x509_cert::attr::Attribute;
-use x509_cert::certificate::Certificate;
-use x509_cert::name::Name;
-use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 
 #[cfg(feature = "ipvers")]
 use crate::auth::IpVersion;
@@ -832,14 +830,14 @@ async fn http_status_error(operation: &str, resp: reqwest::Response) -> MsalErro
 #[derive(Clone, Debug, PartialEq, Eq, Sequence)]
 struct CertReqInfoEmptyAttributes {
     /// Version (must be 0 for v1)
-    pub version: x509_cert::request::Version,
+    pub version: crypto_glue::x509::Version,
     /// Subject name
-    pub subject: Name,
+    pub subject: crypto_glue::x509::Name,
     /// Subject public key info
     pub public_key: SubjectPublicKeyInfoOwned,
     /// Empty attributes - CONSTRUCTED context tag [0] with length 0
     #[asn1(context_specific = "0", tag_mode = "IMPLICIT")]
-    pub attributes: SetOfVec<Attribute>,
+    pub attributes: SetOfVec<crypto_glue::x509::Attribute>,
 }
 
 impl IntuneForLinux {
@@ -972,12 +970,12 @@ impl IntuneForLinux {
             "CN={}",
             Self::escape_dn_attribute_value(device_display_name)
         );
-        let subject = Name::from_str(&subject_str)
+        let subject = crypto_glue::x509::Name::from_str(&subject_str)
             .map_err(|e| MsalError::CryptoFail(format!("Failed parsing subject name: {:?}", e)))?;
 
         // Build CertReqInfo with empty CONSTRUCTED [0] context tag
         let cert_req_info = CertReqInfoEmptyAttributes {
-            version: x509_cert::request::Version::V1,
+            version: crypto_glue::x509::Version::V1,
             subject,
             public_key: spki,
             attributes: SetOfVec::new(), // Empty SET - will encode as constructed [0]
@@ -1000,7 +998,7 @@ impl IntuneForLinux {
         // Build signature algorithm identifier (sha256WithRSAEncryption)
         let signature_algorithm = AlgorithmIdentifierOwned {
             oid: rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
-            parameters: Some(der::asn1::AnyRef::from(der::asn1::Null).into()),
+            parameters: Some(AnyRef::from(crypto_glue::der::asn1::Null).into()),
         };
 
         // Build the complete CSR manually
@@ -1103,9 +1101,10 @@ impl IntuneForLinux {
                 .map_err(|e| MsalError::CryptoFail(format!("{}", e)))?;
 
             // Verify the certificate's public key matches the TPM key
-            let certificate = Certificate::from_der(cert_der.as_slice()).map_err(|e| {
-                MsalError::CryptoFail(format!("Failed to parse certificate: {:?}", e))
-            })?;
+            let certificate = crypto_glue::x509::Certificate::from_der(cert_der.as_slice())
+                .map_err(|e| {
+                    MsalError::CryptoFail(format!("Failed to parse certificate: {:?}", e))
+                })?;
 
             let rs256_key = tpm
                 .rs256_load(machine_key, &loadable_rs256_key)
@@ -1122,7 +1121,7 @@ impl IntuneForLinux {
             let tpm_spki = SubjectPublicKeyInfoOwned::try_from(tpm_public_key_der.as_bytes())
                 .map_err(|e| MsalError::CryptoFail(format!("Failed parsing TPM SPKI: {:?}", e)))?;
 
-            let cert_spki = &certificate.tbs_certificate.subject_public_key_info;
+            let cert_spki = certificate.tbs_certificate().subject_public_key_info();
 
             if tpm_spki != *cert_spki {
                 return Err(MsalError::CryptoFail(

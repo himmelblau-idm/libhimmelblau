@@ -38,10 +38,9 @@ set_timeout = []
 ipvers = []
 
 [dependencies]
-crypto-glue = { version = "0.1.6" }
-der = { version = "0.7", features = ["pem"] }
-pem-rfc7468 = "0.7"
-x509-cert = { version = "0.2", features = ["builder"] }
+crypto-glue = { git = "https://github.com/kanidm/crypto-glue.git", rev="ff414e60c2def031d032333287ffe74f766f6d37" }
+der = { version = "0.8.2" }
+pem-rfc7468 = "1.0.0"
 base64 = "^0.23.0"
 reqwest = { version = "^0.13.1", features = ["json", "cookies", "form"] }
 serde = { version = "^1.0.180", features = ["derive"] }
@@ -51,8 +50,8 @@ uuid = { version = "^1.20.0", features = [ "v4", "serde" ] }
 os-release = "^0.1.0"
 hostname = "^0.4.2"
 openssl = "^0.10.75"
-compact_jwt = { version = "0.5.3-dev", optional = true }
-kanidm-hsm-crypto = { version = "^0.3.5", optional = true }
+compact_jwt = { version = "0.6.0", optional = true }
+kanidm-hsm-crypto = { version = "^0.4.0", optional = true }
 regex = "^1.12.3"
 zeroize = { version = "^1.7.0", features = ["zeroize_derive"] }
 scraper = "0.27.0"
@@ -66,10 +65,10 @@ serde_bytes = "0.11.17"
 serde_urlencoded = "0.7.1"
 reqwest_cookie_store = "0.10.0"
 semver = "1.0.27"
-libkrimes = { version = "0.1.0" }
+libkrimes = { version = "0.2.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libkrimes = { version = "0.1.0", features = ["keyring"] }
+libkrimes = { version = "0.2.0", features = ["keyring"] }
 
 [build-dependencies]
 cbindgen = "0.29.2"

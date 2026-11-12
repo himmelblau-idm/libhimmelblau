@@ -25,15 +25,22 @@ use crate::ssh::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use crypto_glue::aes256;
+#[cfg(feature = "broker")]
+use crypto_glue::spki::der::asn1::{BitString, OctetString, SetOfVec};
+#[cfg(feature = "broker")]
+use crypto_glue::spki::der::{Decode, Encode, Sequence};
+#[cfg(feature = "broker")]
+use crypto_glue::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 #[cfg(feature = "broker")]
 use crypto_glue::traits::{SignatureEncoding, SpkiEncodePublicKey};
 #[cfg(feature = "broker")]
 use crypto_glue::x509::oiddb::rfc5912;
+#[cfg(feature = "broker")]
+use crypto_glue::x509::Attribute;
 use crypto_glue::x509::Certificate;
 #[cfg(feature = "broker")]
-use der::asn1::{BitString, OctetString, SetOfVec};
-#[cfg(feature = "broker")]
-use der::{Decode, Encode, Sequence};
+use crypto_glue::x509::Name;
 use kanidm_hsm_crypto::structures::RS256Key;
 use percent_encoding::percent_decode_str;
 use reqwest::redirect::Policy;
@@ -48,6 +55,7 @@ use serde_json::{from_str as json_from_str, json, Value};
 #[cfg(feature = "set_timeout")]
 use std::cmp::min;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -56,12 +64,6 @@ use std::thread::sleep;
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-#[cfg(feature = "broker")]
-use x509_cert::attr::Attribute;
-#[cfg(feature = "broker")]
-use x509_cert::name::Name;
-#[cfg(feature = "broker")]
-use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(feature = "broker")]
@@ -116,7 +118,7 @@ use crate::discovery::Services;
 use crate::discovery::{BcryptRsaKeyBlob, EnrollAttrs};
 
 #[cfg(feature = "broker")]
-use libkrimes::ccache::resolve as ccache_resolve;
+use libkrimes::ccache::{resolve as ccache_resolve, ResolvedCredentialCache};
 #[cfg(feature = "broker")]
 use libkrimes::proto::{AuthenticationReply, DerivedKey, KerberosCredentials, KerberosReply};
 #[cfg(feature = "broker")]
@@ -1651,9 +1653,11 @@ impl Tgt for StructuredTgt {
 
         match self.key_type {
             18 => {
-                let k: [u8; 32] = client_key.as_slice().try_into().map_err(|_| {
-                    MsalError::CryptoFail("Unexpected TGT session key length".to_string())
-                })?;
+                let Some(k) = aes256::key_from_slice(client_key.as_slice()) else {
+                    return Err(MsalError::CryptoFail(
+                        "Failed to build AES256 key from client key".to_string(),
+                    ));
+                };
                 let dk = DerivedKey::Aes256CtsHmacSha196 {
                     k,
                     i: 0,
@@ -1736,13 +1740,11 @@ impl Tgt for RawTgt {
 
         let dk = match self.tgt_key_type {
             18 => {
-                let k: [u8; 32] =
-                    long_term_krb_session_key
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| {
-                            MsalError::CryptoFail("Unexpected TGT session key length".to_string())
-                        })?;
+                let Some(k) = aes256::key_from_slice(long_term_krb_session_key.as_slice()) else {
+                    return Err(MsalError::CryptoFail(
+                        "Failed to build AES256 key from session key".to_string(),
+                    ));
+                };
                 DerivedKey::Aes256CtsHmacSha196 {
                     k,
                     i: 0,
@@ -5585,7 +5587,7 @@ impl fmt::Debug for P2PCertificate {
 #[cfg(feature = "broker")]
 #[derive(Clone, Debug, PartialEq, Eq, Sequence)]
 struct P2PCertReqInfo {
-    pub version: x509_cert::request::Version,
+    pub version: crypto_glue::x509::Version,
     pub subject: Name,
     pub public_key: SubjectPublicKeyInfoOwned,
     #[asn1(context_specific = "0", tag_mode = "IMPLICIT")]
@@ -6571,10 +6573,10 @@ impl BrokerClientApplication {
     fn device_certificate_tenant_id(cert_der: &[u8]) -> Result<Option<String>, MsalError> {
         const TENANT_ID_OID: &str = "1.2.840.113556.1.5.284.5";
 
-        let cert = x509_cert::Certificate::from_der(cert_der).map_err(|e| {
+        let cert = crypto_glue::x509::Certificate::from_der(cert_der).map_err(|e| {
             MsalError::CryptoFail(format!("Failed parsing device certificate DER: {:?}", e))
         })?;
-        let extensions = match cert.tbs_certificate.extensions.as_ref() {
+        let extensions = match cert.tbs_certificate().extensions() {
             Some(extensions) => extensions,
             None => return Ok(None),
         };
@@ -6790,7 +6792,7 @@ impl BrokerClientApplication {
             .map_err(|e| MsalError::CryptoFail(format!("Failed parsing SPKI: {:?}", e)))?;
 
         let cert_req_info = P2PCertReqInfo {
-            version: x509_cert::request::Version::V1,
+            version: crypto_glue::x509::Version::V1,
             subject,
             public_key: spki,
             attributes: SetOfVec::new(),
@@ -6804,7 +6806,9 @@ impl BrokerClientApplication {
         let signature_bytes: Box<[u8]> = signature.into();
         let signature_algorithm = AlgorithmIdentifierOwned {
             oid: rfc5912::SHA_256_WITH_RSA_ENCRYPTION,
-            parameters: Some(der::asn1::AnyRef::from(der::asn1::Null).into()),
+            parameters: Some(
+                crypto_glue::der::asn1::AnyRef::from(crypto_glue::der::asn1::Null).into(),
+            ),
         };
 
         #[derive(Sequence)]
@@ -9035,12 +9039,19 @@ impl BrokerClientApplication {
         // Generate a unique temp file path
         let temp_path = format!("/tmp/himmelblau_ccache_{}", Uuid::new_v4().as_hyphenated());
         let ccache_name = format!("FILE:{}", temp_path);
+        let ccache_name = OsString::from(ccache_name);
 
         // Create and initialize the ccache
-        let mut ccache = ccache_resolve(Some(&ccache_name)).map_err(|e| {
-            error!("Failed to resolve ccache: {:?}", e);
-            MsalError::CryptoFail("Failed to resolve ccache".to_string())
-        })?;
+        let ResolvedCredentialCache::Subsidiary(mut ccache) = ccache_resolve(Some(&ccache_name))
+            .map_err(|e| {
+                error!("Failed to resolve ccache: {:?}", e);
+                MsalError::CryptoFail("Failed to resolve ccache".to_string())
+            })?
+        else {
+            return Err(MsalError::CryptoFail(
+                "Expected a subsidiary credential cache".to_string(),
+            ));
+        };
 
         ccache.init(credentials.name(), None).map_err(|e| {
             error!("Failed to init ccache: {:?}", e);
